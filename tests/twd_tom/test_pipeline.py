@@ -205,7 +205,10 @@ def _install_fake_collection(
             "profile_name"
         ] == "fake_agent"
         assert writer is not None
-        assert log_dir.parent == games_dir
+        assert (
+            log_dir.parent.resolve()
+            == games_dir.resolve()
+        )
         assert log_dir.name == game_id
         (log_dir / "game_log.json").write_text(
             "{}\n",
@@ -248,10 +251,13 @@ def _install_fake_collection(
 def test_debug_config_validates_without_api_key_or_artifacts(
     monkeypatch,
 ):
-    config_path = (
+    repo_root = (
         Path(pipeline.__file__)
         .resolve()
         .parents[2]
+    )
+    config_path = (
+        repo_root
         / "configs"
         / "twd_tom_pipeline_debug.yaml"
     )
@@ -288,18 +294,25 @@ def test_debug_config_validates_without_api_key_or_artifacts(
     assert summary["game_count"] == 3
     assert summary["seeds"] == [3101, 3102, 3103]
     plan = summary["plan"]
-    assert plan["logs"]["run_dir"].endswith(
-        "logs/tom/debug4101"
-    )
-    assert plan["data"]["run_dir"].endswith(
-        "data/tom/debug4101"
-    )
-    assert plan["outputs"]["run_dir"].endswith(
-        "outputs/tom/debug4101"
-    )
-    assert not Path(plan["logs"]["run_dir"]).exists()
-    assert not Path(plan["data"]["run_dir"]).exists()
-    assert not Path(plan["outputs"]["run_dir"]).exists()
+    expected_run_dirs = {
+        group: (
+            repo_root
+            / group
+            / "tom"
+            / "debug4101"
+        ).resolve()
+        for group in (
+            "logs",
+            "data",
+            "outputs",
+        )
+    }
+    for group, expected in expected_run_dirs.items():
+        actual = Path(
+            plan[group]["run_dir"]
+        ).resolve()
+        assert actual == expected
+        assert not actual.exists()
     serialized = json.dumps(summary)
     assert "DEEPSEEK_API_KEY" not in serialized
     assert "secret" not in serialized
@@ -664,13 +677,13 @@ def test_collect_calls_existing_core_sequentially(
     raw_path = Path(
         summary["output_path"]
     )
-    assert raw_path == (
+    assert raw_path.resolve() == (
         tmp_path
         / "data"
         / "tom"
         / "test_run"
         / "raw.jsonl"
-    )
+    ).resolve()
     records = [
         json.loads(line)
         for line in raw_path.read_text(
@@ -778,41 +791,45 @@ def test_collect_override_preserves_seed_order_and_yaml(
         config_path.resolve()
     )
     assert manifest["source_commit"]
-    assert manifest["output_path"] == str(
+    assert Path(
+        manifest["output_path"]
+    ).resolve() == (
         tmp_path
         / "data"
         / "tom"
         / "test_run"
         / "raw.jsonl"
-    )
+    ).resolve()
     expected_run_dirs = {
         "logs": (
             tmp_path
             / "logs"
             / "tom"
             / "test_run"
-        ),
+        ).resolve(),
         "data": (
             tmp_path
             / "data"
             / "tom"
             / "test_run"
-        ),
+        ).resolve(),
         "outputs": (
             tmp_path
             / "outputs"
             / "tom"
             / "test_run"
-        ),
+        ).resolve(),
     }
     assert {
-        group: group_paths[
-            "run_dir"
-        ]
+        group: Path(
+            group_paths[
+                "run_dir"
+            ]
+        ).resolve()
         for group, group_paths
         in manifest["paths"].items()
     } == {
-        group: str(path)
+        group: path
         for group, path
         in expected_run_dirs.items()
     }
@@ -835,15 +852,17 @@ def test_collect_override_preserves_seed_order_and_yaml(
         "seeds"
     ] == list(seeds)
     assert {
-        group: group_paths[
-            "run_dir"
-        ]
+        group: Path(
+            group_paths[
+                "run_dir"
+            ]
+        ).resolve()
         for group, group_paths
         in resolved["pipeline"][
             "resolved_run"
         ]["paths"].items()
     } == {
-        group: str(path)
+        group: path
         for group, path
         in expected_run_dirs.items()
     }
@@ -1138,9 +1157,9 @@ def test_explicit_staged_synthetic_flow(
     checkpoint_before_eval = (
         checkpoint_path.read_bytes()
     )
-    assert checkpoint_path == (
+    assert checkpoint_path.resolve() == (
         outputs_run / "checkpoint_best.pt"
-    )
+    ).resolve()
     assert (
         outputs_run / "training_metrics.json"
     ).is_file()
@@ -1158,9 +1177,9 @@ def test_explicit_staged_synthetic_flow(
     assert eval_summary["status"] == "ok"
     assert Path(
         eval_summary["output_path"]
-    ) == (
+    ).resolve() == (
         outputs_run / "evaluation.json"
-    )
+    ).resolve()
     assert (
         outputs_run / "evaluation.json"
     ).is_file()
