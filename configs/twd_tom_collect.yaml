@@ -1,0 +1,67 @@
+backends:
+  deepseek:
+    type: openai_compatible
+    base_url: "https://api.deepseek.com"
+    api_key_env: "DEEPSEEK_API_KEY"
+
+  local_vllm_good:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8001/v1"
+    api_key_env: "VLLM_API_KEY"
+
+  local_vllm_wolf:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8002/v1"
+    api_key_env: "VLLM_API_KEY"
+
+parser:
+  backend: deepseek
+  model: "deepseek-v4-flash"
+  model_params:
+    temperature: 0.0
+
+env_config:
+  n_player: 7
+  n_role: 4
+  n_werewolf: 2
+  n_seer: 1
+  n_guard: 0
+  n_witch: 1
+  n_hunter: 0
+  n_villager: 3
+
+agent_config:
+  village_team:
+    profile_name: deepseek_village
+    agent_type: deepseek
+    backend: deepseek
+    model: "deepseek-v4-flash"
+    model_params:
+      temperature: 1.0
+
+  must_include: []
+
+  all_candidates:
+    - profile_name: deepseek_flash
+      agent_type: deepseek
+      backend: deepseek
+      model: "deepseek-v4-flash"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 0.34
+
+    - profile_name: local_qwen_7b
+      agent_type: gpt
+      backend: local_vllm_good
+      model: "Qwen/Qwen2.5-7B-Instruct"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 0.33
+
+    - profile_name: local_qwen_14b
+      agent_type: gpt
+      backend: local_vllm_wolf
+      model: "Qwen/Qwen2.5-14B-Instruct"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 0.33

@@ -1,0 +1,105 @@
+backends:
+  local_qwen25_7b:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8080/v1"
+    default_model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+
+  local_llama31_8b:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8081/v1"
+    default_model: "mlx-community/Llama-3.1-8B-Instruct-4bit"
+
+  local_mistral7b_v03:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8082/v1"
+    default_model: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+
+parser:
+  backend: local_qwen25_7b
+  model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+  model_params:
+    temperature: 0.0
+
+env_config:
+  n_player: 7
+  n_role: 4
+  n_werewolf: 2
+  n_seer: 1
+  n_guard: 0
+  n_witch: 1
+  n_hunter: 0
+  n_villager: 3
+
+agent_config:
+  allow_cross_team_profiles: true
+  must_include: []
+  all_candidates:
+    - profile_name: local_qwen25_7b
+      agent_type: gpt
+      backend: local_qwen25_7b
+      model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 1.0
+
+    - profile_name: local_llama31_8b
+      agent_type: gpt
+      backend: local_llama31_8b
+      model: "mlx-community/Llama-3.1-8B-Instruct-4bit"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 1.0
+
+    - profile_name: local_mistral7b_v03
+      agent_type: gpt
+      backend: local_mistral7b_v03
+      model: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+      model_params:
+        temperature: 1.0
+      sample_ratio: 1.0
+
+pipeline:
+  public_event_schema_version: classic7_public_event_sequence_v1
+  raw_schema_version: classic7_pre_speech_player_suspicion_v2
+  projected_schema_version: classic7_pre_speech_suspicion_pair_distribution_v2
+  projection_version: classic7_player_suspicion_pair_projection_base2_v1
+
+  collection:
+    game_count: 3
+    seeds: [4101, 4102, 4103]
+    max_gameplay_calls_per_game: 96
+    max_belief_calls_per_game: 224
+    max_total_calls_per_game: 320
+    max_wall_seconds_per_game: 3600.0
+
+  project: {}
+
+  split:
+    seed: 42
+    train_game_count: 1
+    validation_game_count: 1
+    test_game_count: 1
+
+  train:
+    epochs: 1
+    batch_size: 2
+    learning_rate: 0.001
+    weight_decay: 0.0
+    seed: 42
+    device: cpu
+    num_workers: 0
+    gradient_clip_norm: 1.0
+    early_stopping_patience: 2
+    early_stopping_min_delta: 0.0
+    d_model: 8
+    n_head: 2
+    n_layer: 1
+    dropout: 0.0
+    max_seq_len: 8
+    dim_feedforward: 16
+
+  eval:
+    batch_size: 2
+    device: cpu
+    num_workers: 0
+    allow_game_id_overlap: false

@@ -1,0 +1,1 @@
+"""Werewolf game package."""

@@ -1,0 +1,74 @@
+# macOS
+.DS_Store
+
+# Secrets / local env
+.env
+.env.*
+.envrc
+
+# Node / frontend
+node_modules/
+dist/
+build/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python packaging
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / local tooling
+.codegraph/
+.vscode/
+
+# Generated logs and runtime outputs
+logs/
+logs/twd_tom/
+data/twd_tom/
+outputs/twd_tom/
+*.log
+runs/
+outputs/
+artifacts/
+mlruns/
+tensorboard/
+lightning_logs/
+wandb/
+
+# Model checkpoints and large artifacts
+checkpoints/
+archive/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+# Keep a sanitized environment template trackable
+!.env.example
+
+# Invalid legacy TWD-ToM data
+data/twd_tom/debug/
+
+# Local conversion source archive
+twd_tom_legacy_projection_source.zip

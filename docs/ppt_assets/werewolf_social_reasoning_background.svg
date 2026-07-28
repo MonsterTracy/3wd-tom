@@ -1,0 +1,162 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">狼人杀：隐藏身份下的多轮社会推理</title>
+  <desc id="desc">一张中文学术汇报背景图，展示狼人杀中隐藏身份、夜晚阶段、公开发言、信念更新、投票出局以及信息不完全、发言可欺骗、多轮动态变化三个任务难点。</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="14" markerHeight="14" refX="11" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M 1 1 L 12 7 L 1 13 Z" fill="#1f6feb"/>
+    </marker>
+    <style>
+      .bg { fill: #ffffff; }
+      .title { font: 700 42px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #111827; letter-spacing: 0; }
+      .subtitle { font: 400 22px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #4b5563; letter-spacing: 0; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; }
+      .card-accent { stroke: #1f6feb; stroke-width: 4; stroke-linecap: round; }
+      .stage-title { font: 700 27px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #111827; letter-spacing: 0; }
+      .stage-sub { font: 500 18px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #1f6feb; letter-spacing: 0; }
+      .body { font: 400 20px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #374151; letter-spacing: 0; }
+      .small { font: 400 16px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #4b5563; letter-spacing: 0; }
+      .mini { font: 500 15px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #374151; letter-spacing: 0; }
+      .blue { fill: #1f6feb; }
+      .blue-text { fill: #1f6feb; }
+      .light-blue { fill: #eef6ff; stroke: #b7d7ff; stroke-width: 1.5; }
+      .difficulty { fill: #eef6ff; stroke: #1f6feb; stroke-width: 1.5; }
+      .difficulty-text { font: 600 18px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #0f3f86; letter-spacing: 0; }
+      .loop-arrow { fill: none; stroke: #1f6feb; stroke-width: 4; stroke-linecap: round; marker-end: url(#arrow-blue); }
+      .loop-label { font: 500 16px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #1f6feb; letter-spacing: 0; }
+      .center-title { font: 700 36px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #0b1220; letter-spacing: 0; }
+      .center-body { font: 400 19px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #374151; letter-spacing: 0; }
+      .summary { font: 500 24px "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; fill: #111827; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="900"/>
+
+  <text class="title" x="800" y="62" text-anchor="middle">狼人杀：隐藏身份下的多轮社会推理</text>
+  <text class="subtitle" x="800" y="100" text-anchor="middle">社会推理 · Theory of Mind · 不确定决策</text>
+
+  <g transform="translate(386 124)">
+    <rect class="difficulty" x="0" y="0" width="238" height="42" rx="8"/>
+    <circle cx="25" cy="21" r="6" fill="#1f6feb"/>
+    <text class="difficulty-text" x="48" y="28">信息不完全</text>
+
+    <rect class="difficulty" x="287" y="0" width="238" height="42" rx="8"/>
+    <circle cx="312" cy="21" r="6" fill="#1f6feb"/>
+    <text class="difficulty-text" x="335" y="28">发言可欺骗</text>
+
+    <rect class="difficulty" x="574" y="0" width="254" height="42" rx="8"/>
+    <circle cx="599" cy="21" r="6" fill="#1f6feb"/>
+    <text class="difficulty-text" x="622" y="28">多轮动态变化</text>
+  </g>
+
+  <!-- Loop arrows -->
+  <path class="loop-arrow" d="M 560 280 L 1032 280"/>
+  <text class="loop-label" x="796" y="257" text-anchor="middle">公开证据进入历史</text>
+  <path class="loop-arrow" d="M 1260 386 L 1260 508"/>
+  <text class="loop-label" x="1282" y="452">话语触发推断</text>
+  <path class="loop-arrow" d="M 1032 616 L 568 616"/>
+  <text class="loop-label" x="800" y="650" text-anchor="middle">怀疑转化为行动</text>
+  <path class="loop-arrow" d="M 340 508 L 340 386"/>
+  <text class="loop-label" x="230" y="452" text-anchor="middle">局面进入下一轮</text>
+
+  <!-- Night phase -->
+  <g>
+    <rect class="card" x="120" y="190" width="430" height="190" rx="8"/>
+    <line class="card-accent" x1="120" y1="190" x2="550" y2="190"/>
+    <circle cx="174" cy="246" r="34" fill="#eef6ff" stroke="#1f6feb" stroke-width="2"/>
+    <path d="M 183 223 C 163 231 159 257 176 270 C 185 277 199 278 209 272 C 190 269 178 252 181 235 C 182 230 183 226 183 223 Z" fill="#1f6feb"/>
+    <text class="stage-title" x="226" y="239">夜晚阶段</text>
+    <text class="stage-sub" x="226" y="269">私有信息 / 角色技能 / 狼人协同</text>
+
+    <circle cx="154" cy="315" r="5" fill="#1f6feb"/>
+    <text class="body" x="172" y="322">身份、阵营、查验等信息只对部分玩家可见</text>
+    <circle cx="154" cy="346" r="5" fill="#1f6feb"/>
+    <text class="body" x="172" y="353">夜间行动改变局面，但公开记录并不完整</text>
+  </g>
+
+  <!-- Speech phase -->
+  <g>
+    <rect class="card" x="1050" y="190" width="430" height="190" rx="8"/>
+    <line class="card-accent" x1="1050" y1="190" x2="1480" y2="190"/>
+    <circle cx="1104" cy="246" r="34" fill="#eef6ff" stroke="#1f6feb" stroke-width="2"/>
+    <path d="M1084 230 H1125 C1132 230 1137 235 1137 242 V251 C1137 258 1132 263 1125 263 H1106 L1092 274 V263 H1084 C1077 263 1072 258 1072 251 V242 C1072 235 1077 230 1084 230 Z" fill="none" stroke="#1f6feb" stroke-width="3" stroke-linejoin="round"/>
+    <text class="stage-title" x="1156" y="239">公开发言</text>
+    <text class="stage-sub" x="1156" y="269">指控、辩解、站边、角色声称</text>
+
+    <circle cx="1084" cy="315" r="5" fill="#1f6feb"/>
+    <text class="body" x="1102" y="322">玩家通过语言表达立场与身份线索</text>
+    <circle cx="1084" cy="346" r="5" fill="#1f6feb"/>
+    <text class="body" x="1102" y="353">真实信息、误导和伪装同时出现</text>
+  </g>
+
+  <!-- Belief update -->
+  <g>
+    <rect class="card" x="1050" y="520" width="430" height="190" rx="8"/>
+    <line class="card-accent" x1="1050" y1="520" x2="1480" y2="520"/>
+    <circle cx="1104" cy="576" r="34" fill="#eef6ff" stroke="#1f6feb" stroke-width="2"/>
+    <path d="M1081 594 C1088 578 1097 569 1110 565 C1122 561 1129 552 1133 542" fill="none" stroke="#1f6feb" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="1081" cy="594" r="4" fill="#1f6feb"/>
+    <circle cx="1110" cy="565" r="4" fill="#1f6feb"/>
+    <circle cx="1133" cy="542" r="4" fill="#1f6feb"/>
+    <text class="stage-title" x="1156" y="569">信念更新</text>
+    <text class="stage-sub" x="1156" y="599">observer 对身份怀疑随证据变化</text>
+
+    <text class="mini" x="1085" y="638">怀疑强度示意</text>
+    <text class="small" x="1085" y="668">P2</text>
+    <rect x="1118" y="654" width="82" height="14" rx="4" fill="#dbeafe"/>
+    <rect x="1118" y="654" width="44" height="14" rx="4" fill="#1f6feb"/>
+    <text class="small" x="1220" y="668">P4</text>
+    <rect x="1253" y="654" width="82" height="14" rx="4" fill="#dbeafe"/>
+    <rect x="1253" y="654" width="68" height="14" rx="4" fill="#1f6feb"/>
+    <text class="small" x="1355" y="668">P6</text>
+    <rect x="1388" y="654" width="64" height="14" rx="4" fill="#dbeafe"/>
+    <rect x="1388" y="654" width="24" height="14" rx="4" fill="#1f6feb"/>
+  </g>
+
+  <!-- Voting / elimination -->
+  <g>
+    <rect class="card" x="120" y="520" width="430" height="190" rx="8"/>
+    <line class="card-accent" x1="120" y1="520" x2="550" y2="520"/>
+    <circle cx="174" cy="576" r="34" fill="#eef6ff" stroke="#1f6feb" stroke-width="2"/>
+    <path d="M155 571 L171 587 L195 557" fill="none" stroke="#1f6feb" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="stage-title" x="226" y="569">投票 / 出局</text>
+    <text class="stage-sub" x="226" y="599">放逐决策改变存活状态</text>
+
+    <circle cx="154" cy="645" r="5" fill="#1f6feb"/>
+    <text class="body" x="172" y="652">集体投票把怀疑转化为行动结果</text>
+    <circle cx="154" cy="676" r="5" fill="#1f6feb"/>
+    <text class="body" x="172" y="683">玩家死亡或出局后，推理进入下一轮</text>
+  </g>
+
+  <!-- Hidden identity center -->
+  <g>
+    <rect x="600" y="318" width="400" height="252" rx="8" fill="#ffffff" stroke="#1f6feb" stroke-width="2.5"/>
+    <rect x="600" y="318" width="400" height="54" rx="8" fill="#eef6ff"/>
+    <path d="M600 364 H1000" stroke="#b7d7ff" stroke-width="1.5"/>
+    <text class="center-title" x="800" y="357" text-anchor="middle">隐藏身份</text>
+
+    <g transform="translate(708 392)">
+      <rect x="0" y="16" width="58" height="82" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="2" transform="rotate(-8 29 57)"/>
+      <rect x="68" y="0" width="58" height="82" rx="6" fill="#ffffff" stroke="#1f6feb" stroke-width="2"/>
+      <rect x="136" y="16" width="58" height="82" rx="6" fill="#ffffff" stroke="#94a3b8" stroke-width="2" transform="rotate(8 165 57)"/>
+      <text class="center-title blue-text" x="29" y="70" text-anchor="middle" transform="rotate(-8 29 57)">?</text>
+      <text class="center-title blue-text" x="97" y="54" text-anchor="middle">?</text>
+      <text class="center-title blue-text" x="165" y="70" text-anchor="middle" transform="rotate(8 165 57)">?</text>
+    </g>
+
+    <text class="center-body" x="800" y="520" text-anchor="middle">真实身份不可直接观测</text>
+    <text class="center-body" x="800" y="548" text-anchor="middle">每个玩家只能基于局部历史推断他人</text>
+  </g>
+
+  <!-- Observer cue -->
+  <g transform="translate(622 592)">
+    <rect class="light-blue" x="0" y="0" width="356" height="46" rx="8"/>
+    <text class="stage-sub" x="178" y="30" text-anchor="middle">核心问题：我应当相信谁？怀疑谁？</text>
+  </g>
+
+  <!-- Summary -->
+  <g>
+    <rect x="120" y="780" width="1360" height="78" rx="8" fill="#f8fafc" stroke="#dbe3ef" stroke-width="1.5"/>
+    <rect x="120" y="780" width="8" height="78" rx="4" fill="#1f6feb"/>
+    <text class="summary" x="800" y="829" text-anchor="middle">狼人杀推理是在隐藏身份、私有信息和欺骗性发言条件下，持续更新对他人的狼人信念。</text>
+  </g>
+</svg>
