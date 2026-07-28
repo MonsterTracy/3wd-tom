@@ -72,13 +72,13 @@ def _validated_run_id(run_id: Any) -> str:
 
 def _run_paths(run_id: str) -> dict[str, dict[str, Path]]:
     logs_run = (
-        REPO_ROOT / "logs" / "twd_tom" / run_id
+        REPO_ROOT / "logs" / "tom" / run_id
     ).resolve()
     data_run = (
-        REPO_ROOT / "data" / "twd_tom" / run_id
+        REPO_ROOT / "data" / "tom" / run_id
     ).resolve()
     outputs_run = (
-        REPO_ROOT / "outputs" / "twd_tom" / run_id
+        REPO_ROOT / "outputs" / "tom" / run_id
     ).resolve()
     return {
         "logs": {

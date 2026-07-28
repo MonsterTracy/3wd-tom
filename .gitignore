@@ -36,9 +36,9 @@ pip-wheel-metadata/
 
 # Generated logs and runtime outputs
 logs/
-logs/twd_tom/
-data/twd_tom/
-outputs/twd_tom/
+/logs/tom/
+/data/tom/
+/outputs/tom/
 *.log
 runs/
 outputs/
@@ -66,9 +66,6 @@ temp/
 *.swp
 # Keep a sanitized environment template trackable
 !.env.example
-
-# Invalid legacy TWD-ToM data
-data/twd_tom/debug/
 
 # Local conversion source archive
 twd_tom_legacy_projection_source.zip

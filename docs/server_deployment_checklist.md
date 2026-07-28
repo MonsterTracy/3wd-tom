@@ -18,7 +18,7 @@
 16. Run the full suite with `python -m pytest -q`.
 17. Run `python -m script.twd_tom.pipeline --config CONFIG --run-id RUN_ID --stage validate` before any data-producing stage.
 18. Choose a new, unique `run_id`.
-19. Ensure `data/twd_tom/`, `logs/twd_tom/`, and `outputs/twd_tom/` are writable.
+19. Ensure `data/tom/`, `logs/tom/`, and `outputs/tom/` are writable.
 20. Put runtime data, logs, and checkpoints on persistent server storage.
 21. Do not commit runtime artifacts to Git.
 22. Run `collect` successfully before `project`.

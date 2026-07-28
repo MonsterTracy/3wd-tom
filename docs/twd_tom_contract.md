@@ -158,9 +158,9 @@ the current process. Repeated seeds are allowed and preserve their order.
 
 Artifacts for one `run_id` are derived without scanning for a latest run:
 game logs, call audit, manifest, and resolved config are under
-`logs/twd_tom/<run_id>/`; raw, projected, and split data are under
-`data/twd_tom/<run_id>/`; checkpoints, training metrics, and evaluation are
-under `outputs/twd_tom/<run_id>/`. The resolved config is written to the log
+`logs/tom/<run_id>/`; raw, projected, and split data are under
+`data/tom/<run_id>/`; checkpoints, training metrics, and evaluation are
+under `outputs/tom/<run_id>/`. The resolved config is written to the log
 directory and never back to `configs/`; no timestamp config is generated.
 Secrets remain in environment variables loaded from `.env`, never in YAML or
 stage summaries. Raw and projected artifacts remain distinct, train reads

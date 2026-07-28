@@ -32,9 +32,9 @@ For SFT training, you may follow the instructions in [TRL](https://huggingface.c
 The following paths contain runtime artifacts and are not tracked by Git.
 Deployments may map them to external large-volume storage:
 
-- `data/twd_tom/`
-- `logs/twd_tom/`
-- `outputs/twd_tom/`
+- `data/tom/`
+- `logs/tom/`
+- `outputs/tom/`
 
 ## How to run Werewolf Game
 

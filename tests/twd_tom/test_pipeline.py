@@ -289,13 +289,13 @@ def test_debug_config_validates_without_api_key_or_artifacts(
     assert summary["seeds"] == [3101, 3102, 3103]
     plan = summary["plan"]
     assert plan["logs"]["run_dir"].endswith(
-        "logs/twd_tom/debug4101"
+        "logs/tom/debug4101"
     )
     assert plan["data"]["run_dir"].endswith(
-        "data/twd_tom/debug4101"
+        "data/tom/debug4101"
     )
     assert plan["outputs"]["run_dir"].endswith(
-        "outputs/twd_tom/debug4101"
+        "outputs/tom/debug4101"
     )
     assert not Path(plan["logs"]["run_dir"]).exists()
     assert not Path(plan["data"]["run_dir"]).exists()
@@ -303,6 +303,100 @@ def test_debug_config_validates_without_api_key_or_artifacts(
     serialized = json.dumps(summary)
     assert "DEEPSEEK_API_KEY" not in serialized
     assert "secret" not in serialized
+
+
+def test_runtime_contract_is_tom_only_and_keeps_module_names():
+    repo_root = (
+        Path(pipeline.__file__)
+        .resolve()
+        .parents[2]
+    )
+    checked_files = {
+        *(
+            repo_root / "script"
+        ).rglob("*.py"),
+        *(
+            repo_root / "werewolf"
+        ).rglob("*.py"),
+        *(
+            repo_root / "configs"
+        ).rglob("*.yaml"),
+        *(
+            repo_root / "docs"
+        ).rglob("*.md"),
+        *repo_root.glob("run_*.py"),
+        repo_root / "README.md",
+        repo_root / ".gitignore",
+        repo_root / "setup.py",
+        repo_root / "run_batch.sh",
+    }
+    legacy_runtime_name = "_".join(
+        ("twd", "tom")
+    )
+    forbidden_paths = tuple(
+        f"{root}/{legacy_runtime_name}/"
+        for root in (
+            "data",
+            "logs",
+            "outputs",
+        )
+    )
+
+    for path in checked_files:
+        text = path.read_text(
+            encoding="utf-8"
+        )
+        assert all(
+            forbidden not in text
+            for forbidden in forbidden_paths
+        ), path
+
+    for module_path in (
+        repo_root / "script" / "twd_tom",
+        repo_root / "werewolf" / "models" / "twd_tom",
+        repo_root / "tests" / "twd_tom",
+    ):
+        assert module_path.is_dir()
+
+
+def test_runtime_paths_are_scoped_to_tom_roots(
+    tmp_path,
+    monkeypatch,
+):
+    _use_temporary_repo(
+        tmp_path,
+        monkeypatch,
+    )
+    paths = pipeline._run_paths(
+        "test_run"
+    )
+    expected_roots = {
+        "data": (
+            tmp_path / "data" / "tom"
+        ).resolve(),
+        "logs": (
+            tmp_path / "logs" / "tom"
+        ).resolve(),
+        "outputs": (
+            tmp_path / "outputs" / "tom"
+        ).resolve(),
+    }
+
+    for group, root in expected_roots.items():
+        run_dir = (
+            root / "test_run"
+        ).resolve()
+        assert paths[group][
+            "run_dir"
+        ] == run_dir
+        assert all(
+            path == run_dir
+            or run_dir in path.parents
+            for path in paths[
+                group
+            ].values()
+        )
+        assert not root.exists()
 
 
 def test_validate_rejects_non_v2_pipeline_schema(tmp_path):
@@ -537,7 +631,7 @@ def test_collect_calls_existing_core_sequentially(
         games_dir=(
             tmp_path
             / "logs"
-            / "twd_tom"
+            / "tom"
             / "test_run"
             / "games"
         ),
@@ -573,7 +667,7 @@ def test_collect_calls_existing_core_sequentially(
     assert raw_path == (
         tmp_path
         / "data"
-        / "twd_tom"
+        / "tom"
         / "test_run"
         / "raw.jsonl"
     )
@@ -604,7 +698,7 @@ def test_collect_calls_existing_core_sequentially(
         json.dumps(summary)
     )
     logs_run = (
-        tmp_path / "logs" / "twd_tom" / "test_run"
+        tmp_path / "logs" / "tom" / "test_run"
     )
     assert (logs_run / "call_audit.jsonl").is_file()
     assert (logs_run / "manifest.json").is_file()
@@ -636,7 +730,7 @@ def test_collect_override_preserves_seed_order_and_yaml(
     games_dir = (
         tmp_path
         / "logs"
-        / "twd_tom"
+        / "tom"
         / "test_run"
         / "games"
     )
@@ -670,7 +764,7 @@ def test_collect_override_preserves_seed_order_and_yaml(
         (
             tmp_path
             / "logs"
-            / "twd_tom"
+            / "tom"
             / "test_run"
             / "manifest.json"
         ).read_text(
@@ -687,14 +781,45 @@ def test_collect_override_preserves_seed_order_and_yaml(
     assert manifest["output_path"] == str(
         tmp_path
         / "data"
-        / "twd_tom"
+        / "tom"
         / "test_run"
         / "raw.jsonl"
     )
+    expected_run_dirs = {
+        "logs": (
+            tmp_path
+            / "logs"
+            / "tom"
+            / "test_run"
+        ),
+        "data": (
+            tmp_path
+            / "data"
+            / "tom"
+            / "test_run"
+        ),
+        "outputs": (
+            tmp_path
+            / "outputs"
+            / "tom"
+            / "test_run"
+        ),
+    }
+    assert {
+        group: group_paths[
+            "run_dir"
+        ]
+        for group, group_paths
+        in manifest["paths"].items()
+    } == {
+        group: str(path)
+        for group, path
+        in expected_run_dirs.items()
+    }
     resolved_path = (
         tmp_path
         / "logs"
-        / "twd_tom"
+        / "tom"
         / "test_run"
         / "resolved_config.yaml"
     )
@@ -709,6 +834,19 @@ def test_collect_override_preserves_seed_order_and_yaml(
     assert resolved["pipeline"]["collection"][
         "seeds"
     ] == list(seeds)
+    assert {
+        group: group_paths[
+            "run_dir"
+        ]
+        for group, group_paths
+        in resolved["pipeline"][
+            "resolved_run"
+        ]["paths"].items()
+    } == {
+        group: str(path)
+        for group, path
+        in expected_run_dirs.items()
+    }
     assert "test-secret" not in resolved_path.read_text(
         encoding="utf-8"
     )
@@ -720,9 +858,9 @@ def test_collect_override_preserves_seed_order_and_yaml(
 @pytest.mark.parametrize(
     "existing_relative",
     (
-        "logs/twd_tom/test_run",
-        "data/twd_tom/test_run",
-        "outputs/twd_tom/test_run",
+        "logs/tom/test_run",
+        "data/tom/test_run",
+        "outputs/tom/test_run",
     ),
 )
 def test_collect_refuses_existing_run_id(
@@ -822,7 +960,7 @@ def test_explicit_staged_synthetic_flow(
         games_dir=(
             tmp_path
             / "logs"
-            / "twd_tom"
+            / "tom"
             / "test_run"
             / "games"
         ),
@@ -859,13 +997,13 @@ def test_explicit_staged_synthetic_flow(
     )
     assert raw_path.is_file()
     logs_run = (
-        tmp_path / "logs" / "twd_tom" / "test_run"
+        tmp_path / "logs" / "tom" / "test_run"
     )
     data_run = (
-        tmp_path / "data" / "twd_tom" / "test_run"
+        tmp_path / "data" / "tom" / "test_run"
     )
     outputs_run = (
-        tmp_path / "outputs" / "twd_tom" / "test_run"
+        tmp_path / "outputs" / "tom" / "test_run"
     )
     assert {
         path.name
