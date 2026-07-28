@@ -8,7 +8,9 @@ All the dataset can be downloaded at https://huggingface.co/datasets/ReneeYe/wer
 The following is how to prepare SFT data from the raw game record.
 
 ### SFT Dataset preparation
-The sample of dataset is under `data/sample/`. Due to the limitation of file size, in the path, we provide samples of 10 games and script to process the game behavoior data into SFT dataset. See `data/sample/README.md` for more details.
+Public SFT sample data is not bundled in this deployment repository. When
+needed, obtain the raw game records from the external dataset source listed
+above and prepare the SFT data separately.
 
 ### SFT
 After prepared SFT dataset in json format, you can train SFT model based on Base model like [Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct).
@@ -18,13 +20,21 @@ For SFT training, you may follow the instructions in [TRL](https://huggingface.c
 ## Repository layout
 
 - `configs/`: stable, reusable experiment and runtime configuration.
-- `data/`: model data, including raw, projected, split, and sample datasets.
-- `logs/`: game logs, message-pool records, and API call audits.
-- `outputs/`: checkpoints, training metrics, and evaluation results.
+- `docs/`: deployment, model, and research-contract documentation.
 - `script/`: command-line and pipeline entry points.
-- `werewolf/`: core game, agent, and model source code.
 - `tests/`: automated tests, grouped by subsystem.
-- `docs/`: project and research-contract documentation.
+- `werewolf/`: core game, agent, backend, environment, and model source code.
+- `run_battle.py`, `run_random.py`, and `run_batch.sh`: game and batch entry
+  points.
+- `setup.py`: Python package definition.
+- `.env.example`: secret-free environment variable template.
+
+The following paths contain runtime artifacts and are not tracked by Git.
+Deployments may map them to external large-volume storage:
+
+- `data/twd_tom/`
+- `logs/twd_tom/`
+- `outputs/twd_tom/`
 
 ## How to run Werewolf Game
 
