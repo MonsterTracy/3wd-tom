@@ -18,6 +18,9 @@ CONFIG_PATH = REPO_ROOT / "configs" / "twd_tom_local_mlx.yaml"
 QWEN_CONFIG_PATH = (
     REPO_ROOT / "configs" / "twd_tom_local_qwen25_7b.yaml"
 )
+SERVER_QWEN_CONFIG_PATH = (
+    REPO_ROOT / "configs" / "twd_tom_server_qwen25_7b.yaml"
+)
 LOCAL_MODELS = {
     "local_qwen25_7b": (
         "http://127.0.0.1:8080/v1",
@@ -41,6 +44,12 @@ def _config():
 def _qwen_config():
     return yaml.safe_load(
         QWEN_CONFIG_PATH.read_text(encoding="utf-8")
+    )
+
+
+def _server_qwen_config():
+    return yaml.safe_load(
+        SERVER_QWEN_CONFIG_PATH.read_text(encoding="utf-8")
     )
 
 
@@ -273,6 +282,118 @@ def test_single_qwen_gameplay_and_belief_use_same_route(
     for url, payload in calls:
         assert url == f"{base_url}/chat/completions"
         assert payload["model"] == model
+
+
+def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
+    monkeypatch,
+):
+    parsed = _server_qwen_config()
+    baseline = _qwen_config()
+    normalized = normalize_runtime_config(parsed)
+    alias = "server_qwen25_7b"
+    base_url = "http://127.0.0.1:8000/v1"
+    model = "qwen2.5-7b-instruct"
+
+    assert parsed["env_config"] == baseline["env_config"]
+    assert parsed["pipeline"] == baseline["pipeline"]
+    assert normalized["backends"] == {
+        alias: {
+            "type": "openai_compatible",
+            "base_url": base_url,
+            "api_key_env": None,
+            "default_model": model,
+        }
+    }
+    assert normalized["agent_config"]["all_candidates"] == [
+        {
+            "profile_name": alias,
+            "agent_type": "gpt",
+            "backend": alias,
+            "model": model,
+            "model_params": {"temperature": 1.0},
+            "sample_ratio": 1.0,
+        }
+    ]
+    assert normalized["parser"] == {
+        "backend": alias,
+        "model": model,
+        "model_params": {"temperature": 0.0},
+    }
+    assert "belief" not in parsed
+
+    monkeypatch.setattr(
+        openai_compatible.openai,
+        "OpenAI",
+        lambda **_kwargs: pytest.fail(
+            "validate accessed the network client"
+        ),
+    )
+    run_id = "server_qwen_validate_test"
+    paths = pipeline._run_paths(run_id)
+    expected_run_dirs = {
+        group: (
+            REPO_ROOT
+            / group
+            / "tom"
+            / run_id
+        ).resolve()
+        for group in (
+            "data",
+            "logs",
+            "outputs",
+        )
+    }
+    assert {
+        group: group_paths["run_dir"]
+        for group, group_paths in paths.items()
+    } == expected_run_dirs
+    assert all(
+        not path.exists()
+        for group in paths.values()
+        for path in group.values()
+    )
+
+    result = pipeline.run_pipeline_stage(
+        config_path=SERVER_QWEN_CONFIG_PATH,
+        run_id=run_id,
+        stage="validate",
+    )
+
+    assert {
+        group: Path(
+            result["plan"][group]["run_dir"]
+        ).resolve()
+        for group in expected_run_dirs
+    } == expected_run_dirs
+    assert all(
+        not path.exists()
+        for group in paths.values()
+        for path in group.values()
+    )
+
+    captured = {}
+
+    def fake_openai(**kwargs):
+        captured.update(kwargs)
+        kwargs["http_client"].close()
+        return object()
+
+    monkeypatch.setattr(
+        openai_compatible.openai,
+        "OpenAI",
+        fake_openai,
+    )
+    backends = load_named_backends(
+        parsed,
+        env_file=None,
+        max_retries=0,
+    )
+    assert set(backends) == {alias}
+    assert captured["api_key"] == "local-mlx"
+    assert captured["base_url"] == base_url
+    assert captured["max_retries"] == 0
+    assert "http_client" in captured
+    assert backends[alias].default_model == model
 
 
 @pytest.mark.parametrize(
