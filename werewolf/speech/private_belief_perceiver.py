@@ -38,7 +38,6 @@ PRIVATE_BELIEF_JSON_SCHEMA = {
             "type": "array",
             "minItems": 0,
             "maxItems": 7,
-            "uniqueItems": True,
             "items": {
                 "type": "string",
                 "enum": list(

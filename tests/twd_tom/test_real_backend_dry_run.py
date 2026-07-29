@@ -4,6 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 import time
 
+import httpx
+import openai
 import pytest
 
 import script.twd_tom.real_backend_dry_run as dry_run
@@ -25,6 +27,7 @@ class FakeBackend:
         *,
         usage=None,
         failures=0,
+        error=None,
         supports_json_schema=False,
     ):
         self.default_model = "fake-model"
@@ -32,10 +35,13 @@ class FakeBackend:
         self.responses = list(responses or ["fake response"])
         self.usage = usage
         self.failures = failures
+        self.error = error
         self.calls = []
 
     def chat_with_metadata(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
+        if self.error is not None:
+            raise self.error
         if self.failures > 0:
             self.failures -= 1
             raise RuntimeError("fake provider failure")
@@ -190,6 +196,7 @@ def test_privacy_safe_call_record_has_usage_hashes_but_no_raw_text(tmp_path):
     assert records[0]["request_character_count"] > 0
     assert records[0]["request_max_tokens"] is None
     assert records[0]["response_format_type"] is None
+    assert records[0]["error_message"] is None
     assert records[0]["response_character_count"] == len("PRIVATE_RAW_RESPONSE")
     for forbidden in (
         private_prompt,
@@ -203,6 +210,82 @@ def test_privacy_safe_call_record_has_usage_hashes_but_no_raw_text(tmp_path):
     assert fake.calls[0]["messages"] == [
         {"role": "user", "content": private_prompt}
     ]
+
+
+def test_bad_request_error_message_is_capped_and_privacy_safe(
+    tmp_path,
+):
+    session, writer = _new_session(tmp_path)
+    error_body = (
+        "vLLM rejected unsupported keyword uniqueItems: "
+        + "x" * 1200
+    )
+    request = httpx.Request(
+        "POST",
+        "http://127.0.0.1:8000/v1/chat/completions",
+        headers={"Authorization": "Bearer audit-secret"},
+    )
+    response = httpx.Response(
+        400,
+        request=request,
+    )
+    bad_request = openai.BadRequestError(
+        message=error_body,
+        response=response,
+        body={"error": {"message": error_body}},
+    )
+    fake = FakeBackend(error=bad_request)
+    audited = _backend(fake, session)
+    private_prompt = "PRIVATE_PROMPT do-not-audit"
+
+    with session.gameplay_context(
+        acting_player_id=1,
+        observation=_observation(),
+        public_events=_public_events(),
+    ):
+        with pytest.raises(openai.BadRequestError):
+            audited.chat(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": private_prompt,
+                    }
+                ],
+                model="fake-model",
+            )
+    writer.close()
+
+    records, serialized = _records(tmp_path / "audit.jsonl")
+    assert len(records) == 1
+    assert records[0]["dispatch_status"] == "error"
+    assert records[0]["error_type"] == "BadRequestError"
+    assert (
+        "vLLM rejected unsupported keyword uniqueItems"
+        in records[0]["error_message"]
+    )
+    assert len(records[0]["error_message"]) == 1000
+    for forbidden in (
+        private_prompt,
+        "do-not-audit",
+        "audit-secret",
+        "Authorization",
+    ):
+        assert forbidden not in serialized
+
+
+def test_audit_writer_accepts_legacy_record_without_error_message(
+    tmp_path,
+):
+    writer = dry_run.PrivacySafeAuditWriter(
+        tmp_path / "legacy_audit.jsonl"
+    )
+    writer.write({"game_id": "legacy"})
+    writer.close()
+
+    records, _serialized = _records(
+        tmp_path / "legacy_audit.jsonl"
+    )
+    assert records == [{"game_id": "legacy"}]
 
 
 @pytest.mark.parametrize(

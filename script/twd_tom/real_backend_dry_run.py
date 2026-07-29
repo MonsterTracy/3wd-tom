@@ -73,6 +73,7 @@ _AUDIT_FIELDS = {
     "response_sha256",
     "dispatch_status",
     "error_type",
+    "error_message",
     "usage_available",
     "input_tokens",
     "output_tokens",
@@ -707,6 +708,11 @@ class AuditedBackend:
                 None
                 if raised is None
                 else type(raised.__cause__ or raised).__name__
+            ),
+            "error_message": (
+                None
+                if raised is None
+                else str(raised.__cause__ or raised)[:1000]
             ),
             "usage_available": usage is not None,
             "input_tokens": None if usage is None else usage.get("input_tokens"),

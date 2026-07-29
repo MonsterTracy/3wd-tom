@@ -187,9 +187,11 @@ def test_parser_accepts_player_level_sets_of_any_legal_size(raw, expected):
         '{"suspected_werewolves":"player3"}',
         '{"suspected_werewolves":[3]}',
         '{"suspected_werewolves":[1,6]}',
+        '{"suspected_werewolves":["1","6"]}',
         '{"suspected_werewolves":["player3","player3"]}',
         '{"suspected_werewolves":["player8"]}',
         '{"suspected_werewolves":["Player_3"]}',
+        '{"suspected_werewolves":[],"extra":true}',
     ],
 )
 def test_parser_rejects_noncanonical_or_old_structures(raw):
@@ -371,6 +373,29 @@ def test_belief_request_uses_capability_format_and_fixed_budget(
             "name": "private_belief_report",
             "strict": True,
             "schema": PRIVATE_BELIEF_JSON_SCHEMA,
+        }
+        transport_schema = request["response_format"][
+            "json_schema"
+        ]["schema"]
+        array_schema = transport_schema["properties"][
+            "suspected_werewolves"
+        ]
+        for unsupported in (
+            "uniqueItems",
+            "contains",
+            "minContains",
+            "maxContains",
+        ):
+            assert unsupported not in array_schema
+        assert transport_schema["additionalProperties"] is False
+        assert transport_schema["required"] == [
+            "suspected_werewolves"
+        ]
+        assert array_schema["minItems"] == 0
+        assert array_schema["maxItems"] == 7
+        assert array_schema["items"] == {
+            "type": "string",
+            "enum": [f"player{i}" for i in range(1, 8)],
         }
     else:
         assert request["response_format"] == {

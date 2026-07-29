@@ -538,6 +538,16 @@ def test_server_qwen_belief_uses_strict_schema_without_network(
             "schema": PRIVATE_BELIEF_JSON_SCHEMA,
         },
     }
+    transport_schema = payload["response_format"][
+        "json_schema"
+    ]["schema"]
+    array_schema = transport_schema["properties"][
+        "suspected_werewolves"
+    ]
+    assert "uniqueItems" not in array_schema
+    assert "contains" not in array_schema
+    assert "minContains" not in array_schema
+    assert "maxContains" not in array_schema
 
 
 def test_collect_key_preflight_accepts_only_implicit_loopback_auth(
