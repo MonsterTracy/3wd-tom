@@ -78,6 +78,7 @@ class RuntimeConfigNormalizationTest(unittest.TestCase):
                 "base_url": "https://api.deepseek.com",
                 "api_key_env": "DEEPSEEK_API_KEY",
                 "default_model": None,
+                "supports_json_schema": False,
             },
         )
         self.assertEqual(
@@ -122,6 +123,7 @@ class RuntimeConfigNormalizationTest(unittest.TestCase):
                 "base_url": "https://api.deepseek.com",
                 "api_key_env": "OPENAI_API_KEY",
                 "default_model": None,
+                "supports_json_schema": False,
             },
         )
         self.assertEqual(
@@ -149,6 +151,27 @@ class RuntimeConfigNormalizationTest(unittest.TestCase):
         config["backend"] = {"type": "openai_compatible"}
 
         with self.assertRaises(ValueError):
+            normalize_runtime_config(config)
+
+    def test_backend_json_schema_capability_must_be_boolean(self):
+        config = new_config()
+        config["backends"]["deepseek"][
+            "supports_json_schema"
+        ] = True
+        normalized = normalize_runtime_config(config)
+        self.assertTrue(
+            normalized["backends"]["deepseek"][
+                "supports_json_schema"
+            ]
+        )
+
+        config["backends"]["deepseek"][
+            "supports_json_schema"
+        ] = "true"
+        with self.assertRaisesRegex(
+            ValueError,
+            "supports_json_schema",
+        ):
             normalize_runtime_config(config)
 
     def test_separate_belief_reporter_config_is_rejected(self):

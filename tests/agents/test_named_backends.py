@@ -81,11 +81,13 @@ class NamedBackendFactoryTest(unittest.TestCase):
                     api_key="deepseek-secret",
                     base_url="https://api.deepseek.com",
                     default_model="deepseek-chat",
+                    supports_json_schema=False,
                 ),
                 call(
                     api_key="openai-secret",
                     base_url=None,
                     default_model="gpt-4o-mini",
+                    supports_json_schema=False,
                 ),
             ],
         )
@@ -120,6 +122,7 @@ class NamedBackendFactoryTest(unittest.TestCase):
             api_key="default-secret",
             base_url=None,
             default_model=None,
+            supports_json_schema=False,
         )
 
     def test_missing_or_empty_api_key_raises(self):
@@ -259,6 +262,7 @@ class NamedBackendFactoryTest(unittest.TestCase):
             api_key="legacy-secret",
             base_url="https://legacy.example/v1",
             default_model="legacy-model",
+            supports_json_schema=False,
         )
 
 

@@ -57,6 +57,19 @@ def normalize_backend_config(
             f"{backend_type}"
         )
 
+    supports_json_schema = config.get(
+        "supports_json_schema",
+        False,
+    )
+    if not isinstance(
+        supports_json_schema,
+        bool,
+    ):
+        raise ValueError(
+            "backend supports_json_schema "
+            "must be boolean"
+        )
+
     return {
         "type": backend_type,
         "base_url": deepcopy(
@@ -71,6 +84,9 @@ def normalize_backend_config(
         ),
         "default_model": deepcopy(
             config.get("default_model")
+        ),
+        "supports_json_schema": (
+            supports_json_schema
         ),
     }
 

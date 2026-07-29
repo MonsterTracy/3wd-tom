@@ -2,6 +2,9 @@ import json
 import unittest
 
 from werewolf.models import SpeechPerceiver
+from werewolf.speech.speech_perceiver import (
+    SPEECH_PARSER_MAX_TOKENS,
+)
 
 
 class FakeBackend:
@@ -95,6 +98,13 @@ class SpeechPerceiverTest(unittest.TestCase):
             0,
         )
         self.assertEqual(
+            call["max_tokens"],
+            SPEECH_PARSER_MAX_TOKENS,
+        )
+        self.assertIsNone(
+            call["response_format"],
+        )
+        self.assertEqual(
             call["messages"][0]["role"],
             "user",
         )
@@ -110,6 +120,14 @@ class SpeechPerceiverTest(unittest.TestCase):
         )
         self.assertIn(
             "每个动作单独一行",
+            prompt,
+        )
+        self.assertIn(
+            "每一个非空行都必须符合上述协议",
+            prompt,
+        )
+        self.assertIn(
+            "最多输出7个动作",
             prompt,
         )
         self.assertIn(
@@ -632,6 +650,26 @@ class SpeechPerceiverTest(unittest.TestCase):
             ),
             [],
         )
+
+    def test_overlong_garbage_fails_closed_without_retry(self):
+        backend = FakeBackend(
+            "not-an-action " * 10000
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(
+                1,
+                "发言",
+                1,
+                "speech",
+            ),
+            [],
+        )
+        self.assertEqual(len(backend.calls), 1)
 
     def test_rejects_invalid_speaker(
         self,

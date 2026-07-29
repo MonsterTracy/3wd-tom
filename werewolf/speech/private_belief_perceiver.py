@@ -5,8 +5,18 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from contextlib import nullcontext
+from copy import deepcopy
 from typing import Any
 
+
+STATUS_OK = "ok"
+STATUS_PARSE_ERROR = "parse_error"
+STATUS_SEMANTIC_ERROR = "semantic_error"
+STATUS_REPORTER_ERROR = "reporter_error"
+
+from werewolf.models.twd_tom.public_events import (
+    copy_public_events,
+)
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
     PLAYER_NAMES,
@@ -16,10 +26,57 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-STATUS_OK = "ok"
-STATUS_PARSE_ERROR = "parse_error"
-STATUS_SEMANTIC_ERROR = "semantic_error"
-STATUS_REPORTER_ERROR = "reporter_error"
+PRIVATE_BELIEF_MAX_TOKENS = 96
+PRIVATE_BELIEF_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "suspected_werewolves",
+    ],
+    "properties": {
+        "suspected_werewolves": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 7,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "enum": list(
+                    PLAYER_NAMES
+                ),
+            },
+        },
+    },
+}
+
+
+def private_belief_response_format(
+    *,
+    supports_json_schema: bool,
+) -> dict[str, Any]:
+    """Build the provider request format without weakening local validation."""
+
+    if not isinstance(
+        supports_json_schema,
+        bool,
+    ):
+        raise TypeError(
+            "supports_json_schema must be boolean"
+        )
+    if not supports_json_schema:
+        return {
+            "type": "json_object",
+        }
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "private_belief_report",
+            "strict": True,
+            "schema": deepcopy(
+                PRIVATE_BELIEF_JSON_SCHEMA
+            ),
+        },
+    }
 
 
 class PlayingAgentBeliefReporter:
@@ -211,7 +268,9 @@ class PlayingAgentBeliefReporter:
         ]
         legal_candidate_list = ", ".join(legal_candidates)
         public_history = json.dumps(
-            [list(action) for action in public_snapshot.sp_actions],
+            copy_public_events(
+                public_snapshot.public_events
+            ),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -226,7 +285,7 @@ Environment-derived known_non_werewolves: {known_non_wolf_list}
 Current legal_candidates: {legal_candidate_list}
 Canonical player IDs (complete ordered list):
 {canonical_list}
-Current pre-speech public sp_actions:
+Canonical pre-speech public_events:
 {public_history}
 
 `suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。只列出当前相对更可疑、也就是相对更值得怀疑的玩家；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入，也不要列出全部 legal_candidates 来表示“不确定”或“没有相对偏好”。
@@ -322,5 +381,8 @@ __all__ = [
     "STATUS_PARSE_ERROR",
     "STATUS_SEMANTIC_ERROR",
     "STATUS_REPORTER_ERROR",
+    "PRIVATE_BELIEF_MAX_TOKENS",
+    "PRIVATE_BELIEF_JSON_SCHEMA",
+    "private_belief_response_format",
     "PlayingAgentBeliefReporter",
 ]

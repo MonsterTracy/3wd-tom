@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from typing import Any
 
 
+SPEECH_PARSER_MAX_TOKENS = 256
+
 _PIPE_TRIPLET_PATTERN = re.compile(
     r"^\s*[\"'`]?\s*"
     r"(?P<subject>(?:player\s*)?[1-7])"
@@ -139,6 +141,9 @@ class SpeechPerceiver:
                 ],
                 model=self.model_name,
                 temperature=0,
+                max_tokens=(
+                    SPEECH_PARSER_MAX_TOKENS
+                ),
             )
 
             parsed = self._extract_response_actions(
@@ -253,6 +258,8 @@ NONE
 
 输出协议：
 - 每个动作单独一行，格式必须严格为：subject | action | object
+- 整个回答的每一个非空行都必须符合上述协议；不要混入无法解析的行。
+- 最多输出7个动作，不要重复动作，不要输出超长文本。
 - 没有可抽取动作时，只输出：NONE
 - 不输出 JSON，不输出解释，不输出 Markdown 代码块。
 
@@ -688,5 +695,6 @@ player{speaker}: {speech}"""
 
 
 __all__ = [
+    "SPEECH_PARSER_MAX_TOKENS",
     "SpeechPerceiver",
 ]

@@ -3,6 +3,7 @@ backends:
     type: openai_compatible
     base_url: "http://127.0.0.1:8000/v1"
     default_model: "qwen2.5-7b-instruct"
+    supports_json_schema: true
 
 parser:
   backend: server_qwen25_7b
@@ -30,6 +31,7 @@ agent_config:
       model: "qwen2.5-7b-instruct"
       model_params:
         temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
       sample_ratio: 1.0
 
 pipeline:

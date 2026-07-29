@@ -9,12 +9,26 @@ import pytest
 import script.twd_tom.real_backend_dry_run as dry_run
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.models import SpeechPerceiver
-from werewolf.speech.private_belief_perceiver import PlayingAgentBeliefReporter
+from werewolf.speech.private_belief_perceiver import (
+    PRIVATE_BELIEF_MAX_TOKENS,
+    PlayingAgentBeliefReporter,
+)
+from werewolf.speech.speech_perceiver import (
+    SPEECH_PARSER_MAX_TOKENS,
+)
 
 
 class FakeBackend:
-    def __init__(self, responses=None, *, usage=None, failures=0):
+    def __init__(
+        self,
+        responses=None,
+        *,
+        usage=None,
+        failures=0,
+        supports_json_schema=False,
+    ):
         self.default_model = "fake-model"
+        self.supports_json_schema = supports_json_schema
         self.responses = list(responses or ["fake response"])
         self.usage = usage
         self.failures = failures
@@ -104,6 +118,7 @@ def _snapshot():
         public_action_count=0,
         public_history_digest="0" * 64,
         sp_actions=(),
+        public_events=tuple(_public_events()),
         speaker_id=1,
         phase="1_day_speech",
     )
@@ -118,9 +133,13 @@ def _perform_report(
     tmp_path,
     *,
     response='{"suspected_werewolves":[]}',
+    supports_json_schema=False,
 ):
     session, writer = _new_session(tmp_path)
-    fake = FakeBackend([response, "next action"])
+    fake = FakeBackend(
+        [response, "next action"],
+        supports_json_schema=supports_json_schema,
+    )
     audited = _backend(fake, session)
     agent = LLMAgent(backend=audited, model_name="fake-model")
     agent.backend_id = "fake-backend"
@@ -169,6 +188,8 @@ def test_privacy_safe_call_record_has_usage_hashes_but_no_raw_text(tmp_path):
     assert records[0]["output_tokens"] == 3
     assert records[0]["total_tokens"] == 15
     assert records[0]["request_character_count"] > 0
+    assert records[0]["request_max_tokens"] is None
+    assert records[0]["response_format_type"] is None
     assert records[0]["response_character_count"] == len("PRIVATE_RAW_RESPONSE")
     for forbidden in (
         private_prompt,
@@ -269,12 +290,57 @@ def test_report_nonce_and_response_are_absent_from_next_action(tmp_path):
     writer.close()
     records, serialized = _records(tmp_path / "audit.jsonl")
     belief = next(record for record in records if record["call_category"] == "belief")
+    assert belief["request_max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert belief["response_format_type"] == "json_object"
     assert belief["report_nonce_absent_from_next_action"] is True
     assert belief["report_response_absent_from_next_action"] is True
     assert belief["next_action_check_not_reached"] is False
     assert belief["state_hash_before"] == belief["state_hash_after"]
     assert "TWD_TOM_REPORT_AUDIT_" not in serialized
     assert '{"suspected_werewolves":[]}' not in serialized
+
+
+def test_audit_records_strict_belief_and_pipe_parser_contracts(
+    tmp_path,
+):
+    session, writer, fake, audited, result = _perform_report(
+        tmp_path,
+        supports_json_schema=True,
+    )
+    assert result["status"] == "ok"
+    parser = SpeechPerceiver(
+        backend=audited,
+        model_name="fake-model",
+    )
+    with session.gameplay_context(
+        acting_player_id=1,
+        observation=_observation(),
+        public_events=_public_events(),
+    ):
+        assert parser.parse(
+            speaker=1,
+            speech="public speech",
+            day=1,
+            phase="1_day_speech",
+        ) == []
+    session.finish_game()
+    writer.close()
+
+    records, _serialized = _records(tmp_path / "audit.jsonl")
+    belief = next(
+        record
+        for record in records
+        if record["call_category"] == "belief"
+    )
+    parser_record = next(
+        record
+        for record in records
+        if record["request_max_tokens"] == SPEECH_PARSER_MAX_TOKENS
+    )
+    assert belief["request_max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert belief["response_format_type"] == "json_schema"
+    assert parser_record["response_format_type"] is None
+    assert fake.calls[1]["response_format"] is None
 
 
 @pytest.mark.parametrize("contamination", ["nonce", "response"])

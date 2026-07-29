@@ -11,6 +11,10 @@ from script.twd_tom import pipeline
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.backends import BackendError, load_named_backends
 from werewolf.runtime_config import normalize_runtime_config
+from werewolf.speech.private_belief_perceiver import (
+    PRIVATE_BELIEF_JSON_SCHEMA,
+    PRIVATE_BELIEF_MAX_TOKENS,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -129,6 +133,7 @@ def test_local_mlx_config_resolves_exact_routes_without_secrets():
         assert backend["base_url"] == base_url
         assert backend["default_model"] == model
         assert backend["api_key_env"] is None
+        assert backend["supports_json_schema"] is False
 
     profiles = {
         profile["profile_name"]: profile
@@ -178,6 +183,7 @@ def test_single_qwen_config_resolves_without_network_or_artifacts(
         "base_url": base_url,
         "api_key_env": None,
         "default_model": model,
+        "supports_json_schema": False,
     }
     assert normalized["agent_config"]["all_candidates"] == [
         {
@@ -275,13 +281,16 @@ def test_single_qwen_gameplay_and_belief_use_same_route(
             "game_log": [],
         },
         report_prompt="Return the required JSON object.",
-        max_tokens=8,
     )
 
     assert len(calls) == 2
     for url, payload in calls:
         assert url == f"{base_url}/chat/completions"
         assert payload["model"] == model
+    assert calls[1][1]["max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert calls[1][1]["response_format"] == {
+        "type": "json_object"
+    }
 
 
 def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
@@ -302,6 +311,7 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
             "base_url": base_url,
             "api_key_env": None,
             "default_model": model,
+            "supports_json_schema": True,
         }
     }
     assert normalized["agent_config"]["all_candidates"] == [
@@ -310,7 +320,10 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
             "agent_type": "gpt",
             "backend": alias,
             "model": model,
-            "model_params": {"temperature": 1.0},
+            "model_params": {
+                "temperature": 1.0,
+                "gameplay_prompt_profile": "strict_classic7",
+            },
             "sample_ratio": 1.0,
         }
     ]
@@ -415,6 +428,10 @@ def test_existing_cloud_configs_still_normalize(config_name):
     normalized = normalize_runtime_config(parsed)
 
     assert normalized["backends"]
+    assert all(
+        backend["supports_json_schema"] is False
+        for backend in normalized["backends"].values()
+    )
     assert normalized["parser"]["backend"] in normalized["backends"]
 
 
@@ -453,7 +470,6 @@ def test_local_routes_preserve_alias_and_model_for_gameplay_and_belief(
                 "game_log": [],
             },
             report_prompt="Return the required JSON object.",
-            max_tokens=8,
         )
 
     assert len(calls) == 6
@@ -469,7 +485,59 @@ def test_local_routes_preserve_alias_and_model_for_gameplay_and_belief(
         assert belief_payload["response_format"] == {
             "type": "json_object"
         }
+        assert (
+            belief_payload["max_tokens"]
+            == PRIVATE_BELIEF_MAX_TOKENS
+        )
         assert belief_payload["thinking"] == {"type": "disabled"}
+
+
+def test_server_qwen_belief_uses_strict_schema_without_network(
+    monkeypatch,
+):
+    calls = []
+
+    def handler(request):
+        calls.append((str(request.url), json.loads(request.content)))
+        return _success_response(request)
+
+    _mock_openai_clients(monkeypatch, handler)
+    backends = load_named_backends(
+        _server_qwen_config(),
+        env_file=None,
+        max_retries=0,
+    )
+    alias = "server_qwen25_7b"
+    model = "qwen2.5-7b-instruct"
+    agent = LLMAgent(
+        backend=backends[alias],
+        model_name=model,
+    )
+
+    agent.report_suspected_werewolves_readonly(
+        observation={
+            "observer_id": 1,
+            "identity": "Villager",
+            "phase": "1_day_speech",
+            "current_act_idx": 1,
+            "game_log": [],
+        },
+        report_prompt="Return the required JSON object.",
+    )
+
+    assert len(calls) == 1
+    url, payload = calls[0]
+    assert url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert payload["model"] == model
+    assert payload["max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "private_belief_report",
+            "strict": True,
+            "schema": PRIVATE_BELIEF_JSON_SCHEMA,
+        },
+    }
 
 
 def test_collect_key_preflight_accepts_only_implicit_loopback_auth(

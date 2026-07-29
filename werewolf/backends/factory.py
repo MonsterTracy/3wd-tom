@@ -158,6 +158,9 @@ def load_named_backends(
             "api_key": api_key,
             "base_url": backend_config.get("base_url"),
             "default_model": backend_config.get("default_model"),
+            "supports_json_schema": backend_config[
+                "supports_json_schema"
+            ],
         }
         if max_retries is not None:
             if (

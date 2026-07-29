@@ -38,6 +38,10 @@ class Registry(BaseModel):
             "model_name": model_name,
             "tokenizer": kwargs.get("tokenizer"),
             "temperature": kwargs.get("temperature", 1.0),
+            "gameplay_prompt_profile": kwargs.get(
+                "gameplay_prompt_profile",
+                "legacy",
+            ),
         }
         if type.lower() == "twdm_agent":
             agent_params["twdm_config"] = kwargs.get("twdm_config", {})
@@ -66,7 +70,10 @@ class Registry(BaseModel):
                                   model_name=agent_param["model_name"],
                                   tokenizer=agent_param.get("tokenizer"),
                                   temperature=agent_param["temperature"],
-                                  log_file=log_file)
+                                  log_file=log_file,
+                                  gameplay_prompt_profile=agent_param[
+                                      "gameplay_prompt_profile"
+                                  ])
 
     def get_all_entries(self):
         return self.entries

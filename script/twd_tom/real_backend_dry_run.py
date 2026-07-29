@@ -67,6 +67,8 @@ _AUDIT_FIELDS = {
     "request_message_count",
     "request_character_count",
     "request_sha256",
+    "request_max_tokens",
+    "response_format_type",
     "response_character_count",
     "response_sha256",
     "dispatch_status",
@@ -302,6 +304,25 @@ def _request_text_values(value: Any) -> str:
     return "\n".join(values)
 
 
+def _response_format_type(
+    response_format: Any,
+) -> str | None:
+    if not isinstance(
+        response_format,
+        Mapping,
+    ):
+        return None
+    format_type = response_format.get(
+        "type"
+    )
+    if format_type in {
+        "json_object",
+        "json_schema",
+    }:
+        return format_type
+    return None
+
+
 def _reject_remote_session_state(value: Any) -> None:
     if isinstance(value, Mapping):
         for raw_key, item in value.items():
@@ -332,6 +353,7 @@ def backend_semantic_state_fingerprint(backend) -> str:
         "api_version",
         "organization",
         "project",
+        "supports_json_schema",
     ):
         value = getattr(backend, field, None)
         if value is None or isinstance(value, (str, int, float, bool)):
@@ -577,6 +599,11 @@ class AuditedBackend:
             None,
         )
         self.default_model = getattr(backend, "default_model", None)
+        self.supports_json_schema = getattr(
+            backend,
+            "supports_json_schema",
+            False,
+        )
 
     def chat(
         self,
@@ -667,6 +694,12 @@ class AuditedBackend:
             "request_message_count": len(messages),
             "request_character_count": len(serialized),
             "request_sha256": _sha256_text(serialized),
+            "request_max_tokens": max_tokens,
+            "response_format_type": (
+                _response_format_type(
+                    response_format
+                )
+            ),
             "response_character_count": len(response_text),
             "response_sha256": _sha256_text(response_text),
             "dispatch_status": "ok" if raised is None else "error",

@@ -13,9 +13,11 @@ class GPTAgent(LLMAgent):
                  model_name=None,
                  tokenizer=None,
                  temperature=1.0,
-                 log_file=None):
+                 log_file=None,
+                 gameplay_prompt_profile="legacy"):
         super().__init__(backend=backend, model_name=model_name, tokenizer=tokenizer,
-                         temperature=temperature, log_file=log_file)
+                         temperature=temperature, log_file=log_file,
+                         gameplay_prompt_profile=gameplay_prompt_profile)
         self.rate_limit = 6
         self.temperature = temperature
 

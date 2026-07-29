@@ -4,10 +4,44 @@ import json
 import logging
 import random
 import re
-from werewolf.agents.prompt_template_v0 import CON
+from werewolf.agents.prompt_template_v0 import (
+    CON,
+    LEGACY_GAMEPLAY_PROMPT_PROFILE,
+    STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+    build_strict_classic7_speech_rules,
+)
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import JsonFormatter, CustomLoggerAdapter
+from werewolf.speech.private_belief_perceiver import (
+    PRIVATE_BELIEF_MAX_TOKENS,
+    private_belief_response_format,
+)
+
+
+_PRIVATE_ROLE_EVENTS = {
+    "Werewolf": {
+        "werewolf_team_info",
+        "skill_wolf",
+        "kill_decision",
+    },
+    "Seer": {
+        "skill_seer",
+    },
+    "Witch": {
+        "kill_decision",
+        "skill_witch",
+    },
+    "Guard": {
+        "skill_guard",
+    },
+    "Villager": set(),
+}
+_OBSERVER_OWNED_PRIVATE_EVENTS = {
+    "skill_seer",
+    "skill_witch",
+    "skill_guard",
+}
 
 class LLMAgent(Agent):
     def __init__(self,
@@ -15,12 +49,24 @@ class LLMAgent(Agent):
                  model_name=None,
                  tokenizer=None,
                  temperature=1.0,
-                 log_file=None):
+                 log_file=None,
+                 gameplay_prompt_profile=LEGACY_GAMEPLAY_PROMPT_PROFILE):
         self.backend = backend
         self.model_name = model_name
         self.tokenizer = tokenizer
         self.nlp_action_to_env_action = {}
         self.temperature = temperature
+        if gameplay_prompt_profile not in {
+            LEGACY_GAMEPLAY_PROMPT_PROFILE,
+            STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+        }:
+            raise ValueError(
+                "unsupported gameplay_prompt_profile: "
+                f"{gameplay_prompt_profile}"
+            )
+        self.gameplay_prompt_profile = (
+            gameplay_prompt_profile
+        )
         if log_file is not None:
             self.has_log = True
             self.handler = logging.FileHandler(log_file)
@@ -60,12 +106,47 @@ class LLMAgent(Agent):
             if hasattr(self, field_name):
                 memory[field_name] = deepcopy(getattr(self, field_name))
 
+        private_events = _PRIVATE_ROLE_EVENTS.get(
+            identity
+        )
+        if private_events is None:
+            raise ValueError(
+                "readonly belief observation "
+                "has unsupported identity"
+            )
+        private_logs = [
+            deepcopy(log)
+            for log in game_log
+            if getattr(
+                log,
+                "event",
+                None,
+            )
+            in private_events
+            and (
+                getattr(
+                    log,
+                    "event",
+                    None,
+                )
+                not in _OBSERVER_OWNED_PRIVATE_EVENTS
+                or getattr(
+                    log,
+                    "source",
+                    None,
+                )
+                == observer_id
+            )
+        ]
+
         legal_context = {
             "observer_id": f"player{observer_id}",
             "self_role": identity,
             "current_phase": observation.get("phase"),
             "current_public_actor": observation.get("current_act_idx"),
-            "legally_visible_history": self.format_log(deepcopy(game_log)),
+            "private_role_history": self.format_log(
+                private_logs
+            ),
             "private_agent_memory": memory,
         }
         return [{
@@ -81,15 +162,11 @@ class LLMAgent(Agent):
         *,
         observation,
         report_prompt,
-        max_tokens=1000,
     ):
         """Run a detached self-report without mutating this agent context."""
 
         if not isinstance(report_prompt, str) or not report_prompt.strip():
             raise ValueError("report_prompt must be non-empty text")
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
-            raise ValueError("max_tokens must be a positive integer")
-
         detached_agent = copy(self)
         detached_observation = deepcopy(observation)
         messages = detached_agent._build_readonly_belief_context(
@@ -99,8 +176,20 @@ class LLMAgent(Agent):
         return detached_agent._chat(
             messages,
             temperature=0.0,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
+            max_tokens=(
+                PRIVATE_BELIEF_MAX_TOKENS
+            ),
+            response_format=(
+                private_belief_response_format(
+                    supports_json_schema=(
+                        getattr(
+                            detached_agent.backend,
+                            "supports_json_schema",
+                            False,
+                        )
+                    ),
+                )
+            ),
             extra_body={"thinking": {"type": "disabled"}},
         )
 
@@ -131,6 +220,20 @@ class LLMAgent(Agent):
 
             prompt = CON.speech_prompt.format(game_description=CON.game_description,
                                               player_identity_info=identity_info, logs=logs, )
+            if self.gameplay_prompt_profile == (
+                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+            ):
+                strict_rules = (
+                    build_strict_classic7_speech_rules(
+                        observation
+                    )
+                )
+                prompt = prompt.replace(
+                    "** 输出",
+                    strict_rules
+                    + "\n\n** 输出",
+                    1,
+                )
         else:
             raise ValueError
         return prompt

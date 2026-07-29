@@ -86,6 +86,7 @@ class AgentBackendTest(unittest.TestCase):
             backend=backend,
             default_model="default-agent-model",
             temperature=0.3,
+            gameplay_prompt_profile="strict_classic7",
         )
         agent = agent_registry.build_agent(
             agent_type,
@@ -98,6 +99,10 @@ class AgentBackendTest(unittest.TestCase):
         self.assertIs(agent.backend, backend)
         self.assertEqual(agent.model_name, "default-agent-model")
         self.assertEqual(agent.temperature, 0.3)
+        self.assertEqual(
+            agent.gameplay_prompt_profile,
+            "strict_classic7",
+        )
 
     def test_registry_supports_per_agent_model_override_and_llm_alias(self):
         backend = RecordingBackend()

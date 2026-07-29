@@ -210,6 +210,23 @@ class BackendTest(unittest.TestCase):
             ],
         )
 
+    def test_json_schema_capability_is_explicit_and_default_off(self):
+        default_backend = OpenAICompatibleBackend(
+            client=FakeClient(),
+        )
+        schema_backend = OpenAICompatibleBackend(
+            client=FakeClient(),
+            supports_json_schema=True,
+        )
+
+        self.assertFalse(default_backend.supports_json_schema)
+        self.assertTrue(schema_backend.supports_json_schema)
+        with self.assertRaises(TypeError):
+            OpenAICompatibleBackend(
+                client=FakeClient(),
+                supports_json_schema="true",
+            )
+
     def test_openai_backend_omits_none_optional_parameters(self):
         client = FakeClient()
         backend = OpenAICompatibleBackend(client=client, default_model="model")

@@ -34,7 +34,15 @@ class OpenAICompatibleBackend(LLMBackend):
         default_model=None,
         client=None,
         max_retries=None,
+        supports_json_schema=False,
     ):
+        if not isinstance(
+            supports_json_schema,
+            bool,
+        ):
+            raise TypeError(
+                "supports_json_schema must be boolean"
+            )
         if client is None:
             if not api_key:
                 raise BackendError(
@@ -60,6 +68,9 @@ class OpenAICompatibleBackend(LLMBackend):
             else None
         )
         self.default_model = default_model
+        self.supports_json_schema = (
+            supports_json_schema
+        )
 
     def chat(
         self,
