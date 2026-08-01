@@ -99,7 +99,7 @@ class OpenAICompatibleBackend(LLMBackend):
         max_tokens=None,
         response_format=None,
         **kwargs,
-    ) -> tuple[str, dict[str, int | None] | None]:
+    ) -> tuple[str, dict[str, int | str | None] | None]:
         """Return text plus provider-reported token usage when available."""
 
         resolved_model = model or self.default_model
@@ -123,8 +123,18 @@ class OpenAICompatibleBackend(LLMBackend):
                 raise BackendError(
                     "OpenAI-compatible chat response content must be text."
                 )
-            usage = _extract_usage(getattr(response, "usage", None))
-            return content, usage
+            metadata = _extract_usage(
+                getattr(response, "usage", None)
+            )
+            finish_reason = getattr(
+                response.choices[0],
+                "finish_reason",
+                None,
+            )
+            if isinstance(finish_reason, str):
+                metadata = dict(metadata or {})
+                metadata["finish_reason"] = finish_reason
+            return content, metadata
         except BackendError:
             raise
         except Exception as exc:

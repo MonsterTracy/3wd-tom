@@ -14,10 +14,12 @@ class GPTAgent(LLMAgent):
                  tokenizer=None,
                  temperature=1.0,
                  log_file=None,
-                 gameplay_prompt_profile="legacy"):
+                 gameplay_prompt_profile="legacy",
+                 gameplay_max_tokens=None):
         super().__init__(backend=backend, model_name=model_name, tokenizer=tokenizer,
                          temperature=temperature, log_file=log_file,
-                         gameplay_prompt_profile=gameplay_prompt_profile)
+                         gameplay_prompt_profile=gameplay_prompt_profile,
+                         gameplay_max_tokens=gameplay_max_tokens)
         self.rate_limit = 6
         self.temperature = temperature
 
@@ -26,17 +28,19 @@ class GPTAgent(LLMAgent):
         phase = observation['phase']
         valid_action = list(self.nlp_action_to_env_action.keys())  
         time.sleep(self.rate_limit)
+        is_o1 = self.model_name is not None and "o1" in self.model_name
+        request_temperature = None if is_o1 else self.temperature
+        request_max_tokens = self.gameplay_max_tokens
+        if request_max_tokens is None and is_o1:
+            request_max_tokens = 32000
         if 'speech' in phase:
             if self.backend is not None and self.model_name:
                 messages = [{'role': 'user', 'content': prompt}]
-                if "o1" in self.model_name:
-                    raw_action = self._chat(
-                        messages, temperature=None, max_tokens=32000
-                    ).strip()
-                else:
-                    raw_action = self._chat(
-                        messages, temperature=self.temperature
-                    ).strip()
+                raw_action = self._chat(
+                    messages,
+                    temperature=request_temperature,
+                    max_tokens=request_max_tokens,
+                ).strip()
                 checked_action = self.extract_answer(raw_action)
                 gen_times = 0
             else:
@@ -69,14 +73,11 @@ class GPTAgent(LLMAgent):
                         action = raw_action
                         break
                     messages = [{'role': 'user', 'content': prompt}]
-                    if "o1" in self.model_name:
-                        raw_action = self._chat(
-                            messages, temperature=None, max_tokens=32000
-                        ).strip().strip("- ")
-                    else:
-                        raw_action = self._chat(
-                            messages, temperature=self.temperature
-                        ).strip().strip("- ")
+                    raw_action = self._chat(
+                        messages,
+                        temperature=request_temperature,
+                        max_tokens=request_max_tokens,
+                    ).strip().strip("- ")
                     if "vote" in phase:
                         parsed_vote_action = self.parse_vote_action(raw_action, observation, valid_action)
                         if parsed_vote_action is not None:

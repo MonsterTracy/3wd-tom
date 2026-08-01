@@ -174,6 +174,47 @@ class RuntimeConfigNormalizationTest(unittest.TestCase):
         ):
             normalize_runtime_config(config)
 
+    def test_gameplay_max_tokens_is_optional_and_strictly_positive(self):
+        normalized = normalize_runtime_config(new_config())
+        self.assertNotIn(
+            "gameplay_max_tokens",
+            normalized["agent_config"]["all_candidates"][0][
+                "model_params"
+            ],
+        )
+
+        config = new_config()
+        config["agent_config"]["all_candidates"][0][
+            "model_params"
+        ]["gameplay_max_tokens"] = 512
+        normalized = normalize_runtime_config(config)
+        self.assertEqual(
+            normalized["agent_config"]["all_candidates"][0][
+                "model_params"
+            ]["gameplay_max_tokens"],
+            512,
+        )
+
+        for invalid in (
+            True,
+            False,
+            0,
+            -1,
+            1.5,
+            "512",
+            None,
+        ):
+            with self.subTest(invalid=invalid):
+                config = new_config()
+                config["agent_config"]["all_candidates"][0][
+                    "model_params"
+                ]["gameplay_max_tokens"] = invalid
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "gameplay_max_tokens",
+                ):
+                    normalize_runtime_config(config)
+
     def test_separate_belief_reporter_config_is_rejected(self):
         config = new_config()
         config["belief"] = {}

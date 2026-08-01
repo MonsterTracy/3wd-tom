@@ -43,6 +43,10 @@ class Registry(BaseModel):
                 "legacy",
             ),
         }
+        if "gameplay_max_tokens" in kwargs:
+            agent_params["gameplay_max_tokens"] = kwargs[
+                "gameplay_max_tokens"
+            ]
         if type.lower() == "twdm_agent":
             agent_params["twdm_config"] = kwargs.get("twdm_config", {})
 
@@ -64,7 +68,10 @@ class Registry(BaseModel):
                                       tokenizer=agent_param.get("tokenizer"),
                                       temperature=agent_param["temperature"],
                                       log_file=log_file,
-                                      twdm_config=agent_param.get("twdm_config", {}))
+                                      twdm_config=agent_param.get("twdm_config", {}),
+                                      gameplay_max_tokens=agent_param.get(
+                                          "gameplay_max_tokens"
+                                      ))
 
         return self.entries[type](backend=agent_param["backend"],
                                   model_name=agent_param["model_name"],
@@ -73,7 +80,10 @@ class Registry(BaseModel):
                                   log_file=log_file,
                                   gameplay_prompt_profile=agent_param[
                                       "gameplay_prompt_profile"
-                                  ])
+                                  ],
+                                  gameplay_max_tokens=agent_param.get(
+                                      "gameplay_max_tokens"
+                                  ))
 
     def get_all_entries(self):
         return self.entries

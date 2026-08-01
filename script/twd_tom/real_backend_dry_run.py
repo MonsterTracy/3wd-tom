@@ -74,6 +74,7 @@ _AUDIT_FIELDS = {
     "dispatch_status",
     "error_type",
     "error_message",
+    "finish_reason",
     "usage_available",
     "input_tokens",
     "output_tokens",
@@ -713,6 +714,12 @@ class AuditedBackend:
                 None
                 if raised is None
                 else str(raised.__cause__ or raised)[:1000]
+            ),
+            "finish_reason": (
+                usage.get("finish_reason")
+                if usage is not None
+                and isinstance(usage.get("finish_reason"), str)
+                else None
             ),
             "usage_available": usage is not None,
             "input_tokens": None if usage is None else usage.get("input_tokens"),

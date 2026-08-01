@@ -195,6 +195,20 @@ def normalize_agent_profile(
         )
     )
 
+    if "gameplay_max_tokens" in model_params:
+        gameplay_max_tokens = model_params[
+            "gameplay_max_tokens"
+        ]
+        if (
+            isinstance(gameplay_max_tokens, bool)
+            or not isinstance(gameplay_max_tokens, int)
+            or gameplay_max_tokens <= 0
+        ):
+            raise ValueError(
+                "agent profile model_params."
+                "gameplay_max_tokens must be a positive integer"
+            )
+
     model_name_alias = model_params.pop(
         "model_name",
         None,

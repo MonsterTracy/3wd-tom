@@ -50,12 +50,25 @@ class LLMAgent(Agent):
                  tokenizer=None,
                  temperature=1.0,
                  log_file=None,
-                 gameplay_prompt_profile=LEGACY_GAMEPLAY_PROMPT_PROFILE):
+                 gameplay_prompt_profile=LEGACY_GAMEPLAY_PROMPT_PROFILE,
+                 gameplay_max_tokens=None):
         self.backend = backend
         self.model_name = model_name
         self.tokenizer = tokenizer
         self.nlp_action_to_env_action = {}
         self.temperature = temperature
+        if (
+            gameplay_max_tokens is not None
+            and (
+                isinstance(gameplay_max_tokens, bool)
+                or not isinstance(gameplay_max_tokens, int)
+                or gameplay_max_tokens <= 0
+            )
+        ):
+            raise ValueError(
+                "gameplay_max_tokens must be a positive integer"
+            )
+        self.gameplay_max_tokens = gameplay_max_tokens
         if gameplay_prompt_profile not in {
             LEGACY_GAMEPLAY_PROMPT_PROFILE,
             STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,

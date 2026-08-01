@@ -39,9 +39,11 @@ class TWDMStrategyAgent(LLMAgent):
                  tokenizer=None,
                  temperature=0.0,
                  log_file=None,
-                 twdm_config=None):
+                 twdm_config=None,
+                 gameplay_max_tokens=None):
         super().__init__(backend=backend, model_name=model_name, tokenizer=tokenizer,
-                         temperature=temperature, log_file=log_file)
+                         temperature=temperature, log_file=log_file,
+                         gameplay_max_tokens=gameplay_max_tokens)
         self.twdm_config = twdm_config or {}
         self.strategy = TWDMStrategy(self.twdm_config)
         self.matcher = Matcher()
@@ -553,7 +555,9 @@ class TWDMStrategyAgent(LLMAgent):
 
         messages = process_messages(messages)
         response_text = self._chat(
-            messages, temperature=self.temperature
+            messages,
+            temperature=self.temperature,
+            max_tokens=self.gameplay_max_tokens,
         ).strip()
         return response_text
 

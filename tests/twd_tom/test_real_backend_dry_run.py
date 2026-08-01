@@ -9,6 +9,7 @@ import openai
 import pytest
 
 import script.twd_tom.real_backend_dry_run as dry_run
+from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.models import SpeechPerceiver
 from werewolf.speech.private_belief_perceiver import (
@@ -197,6 +198,7 @@ def test_privacy_safe_call_record_has_usage_hashes_but_no_raw_text(tmp_path):
     assert records[0]["request_max_tokens"] is None
     assert records[0]["response_format_type"] is None
     assert records[0]["error_message"] is None
+    assert records[0]["finish_reason"] is None
     assert records[0]["response_character_count"] == len("PRIVATE_RAW_RESPONSE")
     for forbidden in (
         private_prompt,
@@ -210,6 +212,47 @@ def test_privacy_safe_call_record_has_usage_hashes_but_no_raw_text(tmp_path):
     assert fake.calls[0]["messages"] == [
         {"role": "user", "content": private_prompt}
     ]
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ["stop", "length"],
+)
+def test_gameplay_limit_and_finish_reason_are_audited(
+    tmp_path,
+    finish_reason,
+):
+    session, writer = _new_session(tmp_path)
+    fake = FakeBackend(
+        responses=["public speech"],
+        usage={"finish_reason": finish_reason},
+    )
+    agent = GPTAgent(
+        backend=_backend(fake, session),
+        model_name="fake-model",
+        gameplay_max_tokens=512,
+    )
+    agent.rate_limit = 0
+
+    with session.gameplay_context(
+        acting_player_id=1,
+        observation=_observation(),
+        public_events=_public_events(),
+    ):
+        assert agent.act(
+            {
+                **_observation(),
+                "valid_action": ("speech", -1),
+            }
+        ) == ("speech", "public speech")
+    writer.close()
+
+    records, _serialized = _records(tmp_path / "audit.jsonl")
+    assert len(records) == 1
+    assert records[0]["call_category"] == "gameplay"
+    assert records[0]["request_max_tokens"] == 512
+    assert records[0]["finish_reason"] == finish_reason
+    assert records[0]["usage_available"] is True
 
 
 def test_bad_request_error_message_is_capped_and_privacy_safe(

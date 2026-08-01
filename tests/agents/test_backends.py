@@ -34,10 +34,17 @@ class BackendAvailabilityTest(unittest.TestCase):
 
 
 class FakeCompletions:
-    def __init__(self, content="backend response", error=None, usage=None):
+    def __init__(
+        self,
+        content="backend response",
+        error=None,
+        usage=None,
+        finish_reason=None,
+    ):
         self.content = content
         self.error = error
         self.usage = usage
+        self.finish_reason = finish_reason
         self.calls = []
 
     def create(self, **kwargs):
@@ -46,18 +53,30 @@ class FakeCompletions:
             raise self.error
         message = SimpleNamespace(content=self.content)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=message)],
+            choices=[
+                SimpleNamespace(
+                    message=message,
+                    finish_reason=self.finish_reason,
+                )
+            ],
             usage=self.usage,
             id="provider-response-id",
         )
 
 
 class FakeClient:
-    def __init__(self, content="backend response", error=None, usage=None):
+    def __init__(
+        self,
+        content="backend response",
+        error=None,
+        usage=None,
+        finish_reason=None,
+    ):
         self.completions = FakeCompletions(
             content=content,
             error=error,
             usage=usage,
+            finish_reason=finish_reason,
         )
         self.chat = SimpleNamespace(completions=self.completions)
 
@@ -265,6 +284,27 @@ class BackendTest(unittest.TestCase):
             {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13},
         )
         self.assertNotIn("id", normalized_usage)
+
+    def test_openai_backend_exposes_stop_and_length_finish_reasons(self):
+        for finish_reason in ("stop", "length"):
+            with self.subTest(finish_reason=finish_reason):
+                backend = OpenAICompatibleBackend(
+                    client=FakeClient(
+                        content="output",
+                        finish_reason=finish_reason,
+                    ),
+                    default_model="model",
+                )
+
+                content, metadata = backend.chat_with_metadata(
+                    messages=[{"role": "user", "content": "hello"}],
+                )
+
+                self.assertEqual(content, "output")
+                self.assertEqual(
+                    metadata,
+                    {"finish_reason": finish_reason},
+                )
 
     @patch("werewolf.backends.openai_compatible.openai.OpenAI")
     def test_openai_backend_can_disable_transport_retries(self, client_class):

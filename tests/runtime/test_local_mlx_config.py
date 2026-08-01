@@ -8,6 +8,7 @@ import yaml
 import script.twd_tom.real_backend_dry_run as dry_run
 import werewolf.backends.openai_compatible as openai_compatible
 from script.twd_tom import pipeline
+from werewolf.agents import agent_registry
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.backends import BackendError, load_named_backends
 from werewolf.runtime_config import normalize_runtime_config
@@ -323,6 +324,7 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
             "model_params": {
                 "temperature": 1.0,
                 "gameplay_prompt_profile": "strict_classic7",
+                "gameplay_max_tokens": 512,
             },
             "sample_ratio": 1.0,
         }
@@ -407,6 +409,55 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
     assert captured["max_retries"] == 0
     assert "http_client" in captured
     assert backends[alias].default_model == model
+
+
+def test_server_qwen_gameplay_limit_reaches_chat_completions(
+    monkeypatch,
+):
+    calls = []
+
+    def handler(request):
+        calls.append((str(request.url), json.loads(request.content)))
+        return _success_response(request)
+
+    _mock_openai_clients(monkeypatch, handler)
+    normalized = normalize_runtime_config(_server_qwen_config())
+    profile = normalized["agent_config"]["all_candidates"][0]
+    backends = load_named_backends(
+        normalized,
+        env_file=None,
+        max_retries=0,
+    )
+    agent_type, agent_params = agent_registry.build(
+        profile["agent_type"],
+        backend=backends[profile["backend"]],
+        model_name=profile["model"],
+        **profile["model_params"],
+    )
+    agent = agent_registry.build_agent(
+        agent_type,
+        player_idx=0,
+        agent_param=agent_params,
+        env_param={"n_player": 7, "n_role": 4},
+        log_file=None,
+    )
+    agent.rate_limit = 0
+
+    agent.act(
+        {
+            "phase": "1_day_speech",
+            "identity": "Villager",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": ("speech", -1),
+        }
+    )
+
+    assert len(calls) == 1
+    url, payload = calls[0]
+    assert url == "http://127.0.0.1:8000/v1/chat/completions"
+    assert payload["max_tokens"] == 512
+    assert payload["model"] == "qwen2.5-7b-instruct"
 
 
 @pytest.mark.parametrize(

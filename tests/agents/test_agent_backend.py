@@ -57,6 +57,85 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(backend.calls[0]["model"], "agent-model")
         self.assertEqual(backend.calls[0]["temperature"], 0.2)
+        self.assertIsNone(backend.calls[0]["max_tokens"])
+
+    def test_gpt_agent_applies_gameplay_max_tokens_to_speech_and_action(self):
+        observations = (
+            (
+                "speech",
+                "公开发言",
+                {
+                    "phase": "1_day_speech",
+                    "identity": "Villager",
+                    "current_act_idx": 1,
+                    "game_log": [],
+                    "valid_action": ("speech", -1),
+                },
+                ("speech", "公开发言"),
+            ),
+            (
+                "vote",
+                "{'投票': '2'}",
+                {
+                    "phase": "1_day_vote",
+                    "identity": "Villager",
+                    "current_act_idx": 1,
+                    "game_log": [],
+                    "valid_action": [("vote", 2)],
+                },
+                ("vote", 2),
+            ),
+        )
+
+        for name, response, observation, expected in observations:
+            with self.subTest(name=name):
+                backend = RecordingBackend([response])
+                agent = GPTAgent(
+                    backend=backend,
+                    model_name="agent-model",
+                    gameplay_max_tokens=512,
+                )
+                agent.rate_limit = 0
+
+                self.assertEqual(agent.act(observation), expected)
+                self.assertEqual(
+                    backend.calls[0]["max_tokens"],
+                    512,
+                )
+
+    def test_gpt_agent_preserves_legacy_o1_limit_when_unconfigured(self):
+        backend = RecordingBackend(["公开发言"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="o1-test-model",
+        )
+        agent.rate_limit = 0
+
+        agent.act(
+            {
+                "phase": "1_day_speech",
+                "identity": "Villager",
+                "current_act_idx": 1,
+                "game_log": [],
+                "valid_action": ("speech", -1),
+            }
+        )
+
+        self.assertEqual(backend.calls[0]["max_tokens"], 32000)
+        self.assertIsNone(backend.calls[0]["temperature"])
+
+    def test_agent_rejects_invalid_gameplay_max_tokens(self):
+        for invalid in (True, False, 0, -1, 1.5, "512"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "gameplay_max_tokens",
+                ):
+                    GPTAgent(
+                        backend=RecordingBackend(),
+                        model_name="agent-model",
+                        gameplay_max_tokens=invalid,
+                    )
 
     def test_twdm_generation_uses_backend_chat_and_agent_model(self):
         backend = RecordingBackend(["  structured response  "])
@@ -64,6 +143,7 @@ class AgentBackendTest(unittest.TestCase):
             backend=backend,
             model_name="twdm-model",
             temperature=0.1,
+            gameplay_max_tokens=512,
         )
 
         response = agent._TWDMStrategyAgent__api_generate(
@@ -73,6 +153,7 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(response, "structured response")
         self.assertEqual(backend.calls[0]["model"], "twdm-model")
         self.assertEqual(backend.calls[0]["temperature"], 0.1)
+        self.assertEqual(backend.calls[0]["max_tokens"], 512)
         self.assertEqual(
             backend.calls[0]["messages"],
             [{"role": "user", "content": "prompt"}],
@@ -87,6 +168,7 @@ class AgentBackendTest(unittest.TestCase):
             default_model="default-agent-model",
             temperature=0.3,
             gameplay_prompt_profile="strict_classic7",
+            gameplay_max_tokens=512,
         )
         agent = agent_registry.build_agent(
             agent_type,
@@ -103,6 +185,7 @@ class AgentBackendTest(unittest.TestCase):
             agent.gameplay_prompt_profile,
             "strict_classic7",
         )
+        self.assertEqual(agent.gameplay_max_tokens, 512)
 
     def test_registry_supports_per_agent_model_override_and_llm_alias(self):
         backend = RecordingBackend()
