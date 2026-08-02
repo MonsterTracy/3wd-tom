@@ -12,5 +12,5 @@ This directory groups the active TWD-ToM contract tests:
 - pipeline orchestration and synthetic collection.
 
 Backbone tests exercise the sole, randomly initialized Hugging Face
-`GPT2Model` path, including causal and padding behavior, strict checkpoint
-restoration, and rejection of the removed torch-Transformer architecture.
+`Qwen2Model` path, including `inputs_embeds`, causal and padding behavior,
+order-specific private inputs, and strict checkpoint restoration.

@@ -53,27 +53,3 @@ pipeline:
     train_game_count: 1
     validation_game_count: 1
     test_game_count: 1
-
-  train:
-    epochs: 1
-    batch_size: 2
-    learning_rate: 0.001
-    weight_decay: 0.0
-    seed: 42
-    device: cpu
-    num_workers: 0
-    gradient_clip_norm: 1.0
-    early_stopping_patience: 2
-    early_stopping_min_delta: 0.0
-    d_model: 8
-    n_head: 2
-    n_layer: 1
-    dropout: 0.0
-    max_seq_len: 8
-    dim_feedforward: 16
-
-  eval:
-    batch_size: 2
-    device: cpu
-    num_workers: 0
-    allow_game_id_overlap: false

@@ -1,4 +1,4 @@
-"""Backbones for subjective Werewolf belief prediction.
+"""Qwen2 backbone for subjective Werewolf belief prediction.
 
 The model consumes one structured public-event token sequence. It reuses the
 existing player/action/object embeddings and adds only event-type, public
@@ -11,13 +11,15 @@ phase, and scalar day fields:
 Speech-action positions still carry ``[subject, action, object]``. Event
 boundaries and public system facts may leave those fields at padding zero.
 
-The causal backbone is a randomly initialized Hugging Face ``GPT2Model`` that
+The causal backbone is a randomly initialized Hugging Face ``Qwen2Model`` that
 receives the structured action embeddings through ``inputs_embeds``. No
-pretrained GPT-2 weights or tokenizer are used.
+pretrained weights or tokenizer are used.
 
-The final valid hidden state is projected into one pair distribution per
-observer with shape ``[batch_size, num_players, 21]``. Player-level belief
-marginals are derived from these pair probabilities.
+The final valid hidden state is combined with one observer embedding per
+player. First-order samples may additionally provide the current observer's
+two seven-player hard-knowledge vectors. A single linear projection maps those
+vectors into the hidden size. The shared output head then predicts one pair
+distribution per observer with shape ``[batch_size, num_players, 21]``.
 
 This module does not consume raw public text, true roles, truth-derived
 labels, observer IDs, alive masks, or private event fields.
@@ -29,6 +31,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from transformers import Qwen2Config, Qwen2Model
 
 from werewolf.models.twd_tom.schema import (
     ACTION_TO_ID,
@@ -44,7 +47,14 @@ from werewolf.models.twd_tom.belief_labels import (
     pair_probabilities_to_belief_marginals,
 )
 
-BACKBONE_NAME = "gpt2_model"
+BACKBONE_NAME = "qwen2_model"
+HIDDEN_SIZE = 256
+INTERMEDIATE_SIZE = 768
+NUM_HIDDEN_LAYERS = 4
+NUM_ATTENTION_HEADS = 8
+NUM_KEY_VALUE_HEADS = 4
+ATTENTION_DROPOUT = 0.1
+RMS_NORM_EPS = 1e-6
 
 
 def _mapping_vocab_size(mapping: dict[str, int]) -> int:
@@ -59,12 +69,7 @@ class ToMBeliefBackboneConfig:
 
     num_players: int = NUM_PLAYERS
     pair_class_count: int = NUM_WOLF_PAIR_CLASSES
-    d_model: int = 128
-    n_head: int = 4
-    n_layer: int = 2
-    dropout: float = 0.1
     max_seq_len: int = 256
-    dim_feedforward: int | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -85,52 +90,11 @@ class ToMBeliefBackboneConfig:
             )
 
         if (
-            isinstance(self.d_model, bool)
-            or not isinstance(self.d_model, int)
-            or self.d_model <= 0
-        ):
-            raise ValueError("d_model must be a positive integer")
-
-        if (
-            isinstance(self.n_head, bool)
-            or not isinstance(self.n_head, int)
-            or self.n_head <= 0
-        ):
-            raise ValueError("n_head must be a positive integer")
-
-        if self.d_model % self.n_head != 0:
-            raise ValueError("d_model must be divisible by n_head")
-
-        if (
-            isinstance(self.n_layer, bool)
-            or not isinstance(self.n_layer, int)
-            or self.n_layer <= 0
-        ):
-            raise ValueError("n_layer must be a positive integer")
-
-        if (
-            isinstance(self.dropout, bool)
-            or not isinstance(self.dropout, (int, float))
-            or not 0.0 <= float(self.dropout) < 1.0
-        ):
-            raise ValueError("dropout must be a number in [0, 1)")
-
-        if (
             isinstance(self.max_seq_len, bool)
             or not isinstance(self.max_seq_len, int)
             or self.max_seq_len <= 0
         ):
             raise ValueError("max_seq_len must be a positive integer")
-
-        if self.dim_feedforward is not None:
-            if (
-                isinstance(self.dim_feedforward, bool)
-                or not isinstance(self.dim_feedforward, int)
-                or self.dim_feedforward <= 0
-            ):
-                raise ValueError(
-                    "dim_feedforward must be a positive integer or None"
-                )
 
 
 class ToMBeliefBackbone(nn.Module):
@@ -155,103 +119,75 @@ class ToMBeliefBackbone(nn.Module):
 
         self.subject_embedding = nn.Embedding(
             player_vocab_size,
-            self.config.d_model,
+            HIDDEN_SIZE,
             padding_idx=0,
         )
         self.action_embedding = nn.Embedding(
             action_vocab_size,
-            self.config.d_model,
+            HIDDEN_SIZE,
             padding_idx=0,
         )
         self.object_embedding = nn.Embedding(
             player_vocab_size,
-            self.config.d_model,
+            HIDDEN_SIZE,
             padding_idx=0,
         )
         self.event_type_embedding = nn.Embedding(
             event_type_vocab_size,
-            self.config.d_model,
+            HIDDEN_SIZE,
             padding_idx=0,
         )
         self.phase_embedding = nn.Embedding(
             phase_vocab_size,
-            self.config.d_model,
+            HIDDEN_SIZE,
             padding_idx=0,
         )
         self.day_projection = nn.Linear(
             1,
-            self.config.d_model,
+            HIDDEN_SIZE,
             bias=False,
         )
 
         # Used only when the public action history is empty.
         self.empty_history_embedding = nn.Parameter(
-            torch.zeros(self.config.d_model)
+            torch.zeros(HIDDEN_SIZE)
         )
 
-        self.input_layer_norm = nn.LayerNorm(self.config.d_model)
-        self.input_dropout = nn.Dropout(float(self.config.dropout))
-
-        feedforward_size = (
-            self.config.dim_feedforward
-            if self.config.dim_feedforward is not None
-            else 4 * self.config.d_model
+        self.transformer = Qwen2Model(
+            Qwen2Config(
+                vocab_size=1,
+                hidden_size=HIDDEN_SIZE,
+                intermediate_size=INTERMEDIATE_SIZE,
+                num_hidden_layers=NUM_HIDDEN_LAYERS,
+                num_attention_heads=NUM_ATTENTION_HEADS,
+                num_key_value_heads=NUM_KEY_VALUE_HEADS,
+                hidden_act="silu",
+                max_position_embeddings=self.config.max_seq_len,
+                attention_dropout=ATTENTION_DROPOUT,
+                rms_norm_eps=RMS_NORM_EPS,
+                use_cache=False,
+                bos_token_id=0,
+                eos_token_id=0,
+                pad_token_id=0,
+            )
         )
 
-        self.transformer = self._build_gpt2_transformer(
-            feedforward_size
+        self.observer_embedding = nn.Embedding(
+            self.config.num_players,
+            HIDDEN_SIZE,
+        )
+        self.private_knowledge_projection = nn.Linear(
+            2 * self.config.num_players,
+            HIDDEN_SIZE,
+            bias=False,
         )
 
         self.output_projection = nn.Linear(
-            self.config.d_model,
-            self.config.num_players * self.config.pair_class_count,
+            HIDDEN_SIZE,
+            self.config.pair_class_count,
         )
 
         self._reset_parameters()
-
-    def _build_gpt2_transformer(
-        self,
-        feedforward_size: int,
-    ) -> nn.Module:
-        """Build a small randomly initialized GPT-2 decoder stack.
-
-        ``GPT2Model`` is instantiated from a configuration rather than through
-        ``from_pretrained``. Consequently this method never downloads or loads
-        pretrained language-model weights.
-        """
-
-        try:
-            from transformers import GPT2Config, GPT2Model
-        except ImportError as exc:
-            raise RuntimeError(
-                "GPT-2 backbone requires the 'transformers' package. "
-                "Install it with `python -m pip install -e \".[local_model]\"` "
-                "or `python -m pip install 'transformers>=4.47.1'`."
-            ) from exc
-
-        gpt2_config = GPT2Config(
-            vocab_size=1,
-            n_positions=self.config.max_seq_len,
-            n_ctx=self.config.max_seq_len,
-            n_embd=self.config.d_model,
-            n_layer=self.config.n_layer,
-            n_head=self.config.n_head,
-            n_inner=feedforward_size,
-            activation_function="gelu_new",
-            resid_pdrop=float(self.config.dropout),
-            # Input dropout is already applied by this project immediately
-            # before the backbone, so avoid applying embedding dropout twice.
-            embd_pdrop=0.0,
-            attn_pdrop=float(self.config.dropout),
-            layer_norm_epsilon=1e-5,
-            initializer_range=0.02,
-            use_cache=False,
-            bos_token_id=0,
-            eos_token_id=0,
-            pad_token_id=0,
-        )
-
-        return GPT2Model(gpt2_config)
 
     def _reset_parameters(self) -> None:
         """Initialize project-owned embeddings and output layers."""
@@ -262,6 +198,7 @@ class ToMBeliefBackbone(nn.Module):
             self.object_embedding,
             self.event_type_embedding,
             self.phase_embedding,
+            self.observer_embedding,
         ):
             nn.init.normal_(
                 embedding.weight,
@@ -277,6 +214,11 @@ class ToMBeliefBackbone(nn.Module):
             self.event_type_embedding.weight[0].zero_()
             self.phase_embedding.weight[0].zero_()
         nn.init.normal_(self.day_projection.weight, mean=0.0, std=0.02)
+        nn.init.normal_(
+            self.private_knowledge_projection.weight,
+            mean=0.0,
+            std=0.02,
+        )
 
         nn.init.normal_(
             self.empty_history_embedding,
@@ -299,6 +241,8 @@ class ToMBeliefBackbone(nn.Module):
         event_type_ids: torch.Tensor | None = None,
         phase_ids: torch.Tensor | None = None,
         day_values: torch.Tensor | None = None,
+        known_werewolves: torch.Tensor | None = None,
+        known_non_werewolves: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Encode actions and predict pair distributions and marginals.
 
@@ -311,8 +255,8 @@ class ToMBeliefBackbone(nn.Module):
                 omitted, padding is inferred from all-zero action triplets.
 
         Returns:
-            A dictionary with ``hidden_states`` (``[B, T, d_model]``),
-            ``pooled_hidden_state`` (``[B, d_model]``), ``pair_logits``
+            A dictionary with ``hidden_states`` (``[B, T, 256]``),
+            ``pooled_hidden_state`` (``[B, 256]``), ``observer_pair_logits``
             (``[B, 7, 21]``), pair probabilities, and the derived
             ``belief_matrix`` with shape ``[B, 7, 7]``.
         """
@@ -346,7 +290,6 @@ class ToMBeliefBackbone(nn.Module):
             + self.day_projection(day_values.unsqueeze(-1))
         )
 
-        # GPT2Model adds its own learned absolute position embeddings.
         hidden_states = base_embeddings
 
         # Attention cannot safely operate on a row whose every key is masked.
@@ -359,14 +302,12 @@ class ToMBeliefBackbone(nn.Module):
             hidden_states = hidden_states.clone()
             hidden_states[empty_rows, 0] = self.empty_history_embedding
 
-        hidden_states = self.input_dropout(
-            self.input_layer_norm(hidden_states)
-        )
-
-        hidden_states = self._forward_gpt2(
-            hidden_states,
-            safe_attention_mask,
-        )
+        hidden_states = self.transformer(
+            inputs_embeds=hidden_states,
+            attention_mask=safe_attention_mask.long(),
+            use_cache=False,
+            return_dict=True,
+        ).last_hidden_state
 
         # Zero right-padding positions in returned hidden states.
         hidden_states = (
@@ -391,13 +332,27 @@ class ToMBeliefBackbone(nn.Module):
             last_valid_indices,
         ]
 
-        pair_logits = self.output_projection(
-            pooled_hidden_state
-        ).view(
-            batch_size,
+        observer_ids = torch.arange(
             self.config.num_players,
-            self.config.pair_class_count,
+            device=subject_ids.device,
         )
+        observer_hidden_states = (
+            pooled_hidden_state.unsqueeze(1)
+            + self.observer_embedding(observer_ids).unsqueeze(0)
+        )
+        private_knowledge = self._validate_private_knowledge(
+            known_werewolves=known_werewolves,
+            known_non_werewolves=known_non_werewolves,
+            batch_size=batch_size,
+            device=subject_ids.device,
+        )
+        if private_knowledge is not None:
+            observer_hidden_states = (
+                observer_hidden_states
+                + self.private_knowledge_projection(private_knowledge)
+            )
+
+        pair_logits = self.output_projection(observer_hidden_states)
         pair_probabilities = torch.softmax(
             pair_logits,
             dim=-1,
@@ -409,26 +364,58 @@ class ToMBeliefBackbone(nn.Module):
         return {
             "hidden_states": hidden_states,
             "pooled_hidden_state": pooled_hidden_state,
+            "observer_hidden_states": observer_hidden_states,
+            "observer_pair_logits": pair_logits,
             "pair_logits": pair_logits,
             "pair_probabilities": pair_probabilities,
             "belief_matrix": belief_matrix,
         }
 
-    def _forward_gpt2(
+    def _validate_private_knowledge(
         self,
-        hidden_states: torch.Tensor,
-        safe_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run GPT-2 using structured action embeddings as model inputs."""
+        *,
+        known_werewolves: torch.Tensor | None,
+        known_non_werewolves: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Validate and concatenate optional first-order private features."""
 
-        output = self.transformer(
-            inputs_embeds=hidden_states,
-            attention_mask=safe_attention_mask.long(),
-            use_cache=False,
-            return_dict=True,
+        if (known_werewolves is None) != (known_non_werewolves is None):
+            raise ValueError(
+                "known_werewolves and known_non_werewolves must be provided together"
+            )
+        if known_werewolves is None:
+            return None
+
+        expected_shape = (
+            batch_size,
+            self.config.num_players,
+            self.config.num_players,
         )
+        normalized = []
+        for field_name, tensor in (
+            ("known_werewolves", known_werewolves),
+            ("known_non_werewolves", known_non_werewolves),
+        ):
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"{field_name} must be a tensor")
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"{field_name} must have shape [B, 7, 7]"
+                )
+            tensor = tensor.to(device=device, dtype=torch.float32)
+            if not torch.isfinite(tensor).all() or (
+                (tensor != 0) & (tensor != 1)
+            ).any():
+                raise ValueError(f"{field_name} must contain only 0 or 1")
+            normalized.append(tensor)
 
-        return output.last_hidden_state
+        if (normalized[0] * normalized[1]).any():
+            raise ValueError(
+                "known_werewolves and known_non_werewolves must be disjoint"
+            )
+        return torch.cat(normalized, dim=-1)
 
     def _validate_inputs(
         self,
@@ -627,7 +614,8 @@ class ToMBeliefBackbone(nn.Module):
 
 
 __all__ = [
-    "BackboneType",
+    "BACKBONE_NAME",
+    "HIDDEN_SIZE",
     "ToMBeliefBackboneConfig",
     "ToMBeliefBackbone",
 ]

@@ -4,8 +4,6 @@ import json
 from copy import deepcopy
 
 import pytest
-import torch
-from torch.utils.data import DataLoader
 
 from script.twd_tom.project_suspicion_to_pairs import (
     PROJECTED_SAMPLE_FIELDS,
@@ -15,19 +13,9 @@ from script.twd_tom.project_suspicion_to_pairs import (
     project_suspicion_sample,
     validate_raw_suspicion_sample,
 )
-from werewolf.models.twd_tom.belief_backbone import (
-    ToMBeliefBackbone,
-    ToMBeliefBackboneConfig,
-)
-from werewolf.models.twd_tom.dataset import (
-    TWDToMDataset,
-    collate_twd_tom_samples,
-)
-from werewolf.models.twd_tom.losses import masked_pair_kl_divergence
 from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION as PLAYER_SUSPICION_SCHEMA_VERSION,
 )
-from tests.twd_tom.public_event_fixtures import public_history_fields
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
     PAIR_ORDERING,
@@ -282,106 +270,3 @@ def test_invalid_input_creates_no_output_or_partial_file(
         project_jsonl(input_path, output_path)
     assert not output_path.parent.exists()
     assert not output_path.exists()
-
-
-def test_synthetic_end_to_end_projection_dataset_model_and_loss(
-    tmp_path,
-    suspicion_sample_factory,
-):
-    def make_row(step_idx):
-        row = suspicion_sample_factory(
-            game_id="synthetic",
-            step_idx=step_idx,
-            observers=(1, 2, 3, 4, 5),
-        )
-        for subject in row["belief_status"]:
-            row["belief_status"][subject] = "ok"
-            row["belief_errors"][subject] = None
-            row["suspected_werewolves"][subject] = []
-        row["known_werewolves"]["player2"] = ["player3"]
-        row["suspected_werewolves"]["player2"] = ["player3"]
-        row["known_werewolves"]["player3"] = ["player3", "player6"]
-        row["known_non_werewolves"]["player3"] = [
-            "player1",
-            "player2",
-            "player4",
-            "player5",
-            "player7",
-        ]
-        row["suspected_werewolves"]["player3"] = ["player3", "player6"]
-        row["known_werewolves"]["player4"] = ["player3"]
-        row["suspected_werewolves"]["player4"] = ["player3", "player5"]
-        row["belief_status"]["player5"] = "semantic_error"
-        row["belief_errors"]["player5"] = (
-            "suspected_werewolves cannot equal all legal candidates unless "
-            "hard knowledge already determines the full candidate set"
-        )
-        row["suspected_werewolves"]["player5"] = None
-        return row
-
-    first = make_row(1)
-    for key, value in public_history_fields(
-        [], speaker_id=first["speaker_id"]
-    ).items():
-        first[key] = value
-    second = make_row(2)
-    input_path = tmp_path / "raw.jsonl"
-    output_path = tmp_path / "projected.jsonl"
-    _write_jsonl(input_path, [first, second])
-    assert project_jsonl(input_path, output_path) == 2
-
-    dataset = TWDToMDataset.from_jsonl(output_path)
-    loader = DataLoader(
-        dataset,
-        batch_size=2,
-        collate_fn=collate_twd_tom_samples,
-    )
-    batch = next(iter(loader))
-    assert batch["pair_targets"].shape == (2, 7, 21)
-    assert batch["subject_mask"].shape == (2, 7)
-    assert torch.allclose(
-        batch["pair_targets"][batch["subject_mask"]].sum(-1),
-        torch.ones(8),
-    )
-    assert not batch["subject_mask"][:, 4].any()
-    assert torch.count_nonzero(batch["pair_targets"][:, 4]).item() == 0
-    for private_field in (
-        "suspected_werewolves",
-        "known_werewolves",
-        "known_non_werewolves",
-    ):
-        assert private_field not in {
-            key for key in batch if key != "metadata"
-        }
-
-    model = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            d_model=16,
-            n_head=4,
-            n_layer=1,
-            dropout=0.0,
-            max_seq_len=8,
-        )
-    )
-    output = model(
-        batch["subject_ids"],
-        batch["action_ids"],
-        batch["object_ids"],
-        batch["attention_mask"],
-        event_type_ids=batch["event_type_ids"],
-        phase_ids=batch["phase_ids"],
-        day_values=batch["day_values"],
-    )
-    assert output["pair_logits"].shape == (2, 7, 21)
-    assert output["belief_matrix"].shape == (2, 7, 7)
-    assert torch.allclose(
-        output["belief_matrix"].sum(-1),
-        torch.full((2, 7), 2.0),
-        atol=1e-6,
-    )
-    loss = masked_pair_kl_divergence(
-        output["pair_logits"],
-        batch["pair_targets"],
-        batch["subject_mask"],
-    )
-    assert torch.isfinite(loss)

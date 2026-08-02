@@ -36,6 +36,7 @@ from werewolf.models.twd_tom.dataset import (
     load_twd_tom_jsonl,
 )
 from werewolf.models.twd_tom.losses import (
+    masked_pair_cross_entropy,
     masked_pair_kl_divergence,
 )
 from werewolf.models.twd_tom.metrics import (
@@ -58,6 +59,7 @@ __all__ = [
     "TWDToMDataset",
     "collate_twd_tom_samples",
     "load_twd_tom_jsonl",
+    "masked_pair_cross_entropy",
     "masked_pair_kl_divergence",
     "compute_subjective_pair_metrics",
     "SAMPLE_SCHEMA_VERSION",

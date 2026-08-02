@@ -31,6 +31,37 @@ VALID_REDUCTIONS = {
 }
 
 
+def masked_pair_cross_entropy(
+    pair_logits: torch.Tensor,
+    pair_targets: torch.Tensor,
+    subject_mask: torch.Tensor,
+    *,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Compute soft-target cross entropy over supervised observer rows."""
+
+    pair_logits, pair_targets, subject_mask = _validate_pair_loss_inputs(
+        pair_logits=pair_logits,
+        pair_targets=pair_targets,
+        subject_mask=subject_mask,
+        reduction=reduction,
+    )
+    valid_subject_count = subject_mask.sum()
+    if valid_subject_count.item() == 0:
+        raise ValueError("subject_mask must select at least one valid observer")
+
+    per_subject_loss = -(
+        pair_targets * F.log_softmax(pair_logits, dim=-1)
+    ).sum(dim=-1)
+    masked_loss = per_subject_loss * subject_mask.to(per_subject_loss.dtype)
+    if reduction == "none":
+        return masked_loss
+    total_loss = masked_loss.sum()
+    if reduction == "sum":
+        return total_loss
+    return total_loss / valid_subject_count.to(dtype=total_loss.dtype)
+
+
 def masked_pair_kl_divergence(
     pair_logits: torch.Tensor,
     pair_targets: torch.Tensor,
@@ -327,5 +358,6 @@ def _validate_pair_loss_inputs(
 
 __all__ = [
     "VALID_REDUCTIONS",
+    "masked_pair_cross_entropy",
     "masked_pair_kl_divergence",
 ]

@@ -4,12 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from werewolf.models.twd_tom.public_events import public_speech_actions
-import torch
-from transformers import GPT2Model
-
-from script.twd_tom.eval import build_model_from_checkpoint, load_checkpoint
 from script.twd_tom.collect import _write_audit_manifest
-from script.twd_tom.train import TrainingConfig, run_training
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.collector import TWDToMSampleCollector
@@ -213,8 +208,8 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
     )
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
-    with pytest.raises(ValueError, match="explicit offline pair projection"):
-        TWDToMDataset.from_jsonl(path)
+    with pytest.raises(ValueError, match="field set mismatch"):
+        TWDToMDataset.from_jsonl(path, tom_order=2)
 
 
 def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
@@ -375,8 +370,8 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     serialized = path.read_text(encoding="utf-8")
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
-    with pytest.raises(ValueError, match="explicit offline pair projection"):
-        TWDToMDataset.from_jsonl(path)
+    with pytest.raises(ValueError, match="field set mismatch"):
+        TWDToMDataset.from_jsonl(path, tom_order=2)
 
 
 def test_collection_manifest_records_frozen_label_contract(tmp_path):
@@ -404,64 +399,3 @@ def test_collection_manifest_records_frozen_label_contract(tmp_path):
     assert manifest["report_side_effect_free"] is True
     assert manifest["global_truth_injected"] is False
     assert manifest["private_context_serialized"] is False
-
-
-def _write_train_validation(tmp_path, projected_sample_factory):
-    train_sample = projected_sample_factory(game_id="game_train")
-    validation_sample = projected_sample_factory(game_id="game_validation")
-    train_path = tmp_path / "train.jsonl"
-    validation_path = tmp_path / "validation.jsonl"
-    train_path.write_text(json.dumps(train_sample) + "\n", encoding="utf-8")
-    validation_path.write_text(
-        json.dumps(validation_sample) + "\n", encoding="utf-8"
-    )
-    return train_path, validation_path
-
-
-def _run_one_epoch(tmp_path, projected_sample_factory):
-    train_path, validation_path = _write_train_validation(
-        tmp_path,
-        projected_sample_factory,
-    )
-    summary = run_training(
-        TrainingConfig(
-            train_dataset_path=str(train_path),
-            validation_dataset_path=str(validation_path),
-            output_dir=str(tmp_path / "gpt2_model_run"),
-            epochs=1,
-            batch_size=1,
-            learning_rate=1e-3,
-            weight_decay=0.0,
-            device="cpu",
-            d_model=8,
-            n_head=2,
-            n_layer=1,
-            dropout=0.0,
-            max_seq_len=8,
-            dim_feedforward=16,
-        )
-    )
-    checkpoint = load_checkpoint(summary["best_checkpoint"])
-    restored = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
-    return summary, checkpoint, restored
-
-
-def test_gpt2model_one_epoch_checkpoint_round_trip_and_old_head_rejection(
-    tmp_path,
-    projected_sample_factory,
-):
-    summary, checkpoint, restored = _run_one_epoch(
-        tmp_path,
-        projected_sample_factory,
-    )
-    assert summary["epoch_count"] == 1
-    assert checkpoint["backbone"] == "gpt2_model"
-    assert isinstance(restored.transformer, GPT2Model)
-    assert restored.config.pair_class_count == 21
-    old_checkpoint = deepcopy(checkpoint)
-    old_checkpoint["pair_class_count"] = 15
-    with pytest.raises(ValueError, match="pair_class_count mismatch"):
-        build_model_from_checkpoint(
-            old_checkpoint,
-            device=torch.device("cpu"),
-        )

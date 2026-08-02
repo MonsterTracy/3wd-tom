@@ -11,10 +11,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from werewolf.models.twd_tom.dataset import (
-    _normalize_sample,
-    load_twd_tom_jsonl,
+from script.twd_tom.project_suspicion_to_pairs import (
+    PROJECTED_SAMPLE_FIELDS,
+    project_suspicion_sample,
 )
+from werewolf.models.twd_tom.dataset import load_twd_tom_jsonl
+from werewolf.models.twd_tom.samples import SAMPLE_FIELDS
 from werewolf.models.twd_tom.schema import (
     PROJECTED_SCHEMA_VERSION,
     PROJECTION_VERSION,
@@ -26,6 +28,24 @@ SPLIT_NAMES = (
     "validation",
     "test",
 )
+
+
+def _validate_projected_sample(sample: Any) -> None:
+    """Validate a projected split record independently of raw training data."""
+
+    if not isinstance(sample, Mapping):
+        raise TypeError("each projected sample must be a mapping")
+    if set(sample) != PROJECTED_SAMPLE_FIELDS:
+        missing = sorted(PROJECTED_SAMPLE_FIELDS - set(sample))
+        extra = sorted(set(sample) - PROJECTED_SAMPLE_FIELDS)
+        raise ValueError(
+            f"projected sample field set mismatch; missing={missing}, extra={extra}"
+        )
+    raw_sample = {field: sample[field] for field in SAMPLE_FIELDS}
+    raw_sample["schema_version"] = sample["source_schema_version"]
+    expected = project_suspicion_sample(raw_sample)
+    if sample != expected:
+        raise ValueError("projected pair target or projection metadata is invalid")
 
 
 def _sha256(path: Path) -> str:
@@ -162,7 +182,7 @@ def split_projected_dataset(
         start=1,
     ):
         try:
-            _normalize_sample(record)
+            _validate_projected_sample(record)
         except (TypeError, ValueError) as exc:
             raise type(exc)(
                 f"line {row_number}: {exc}"

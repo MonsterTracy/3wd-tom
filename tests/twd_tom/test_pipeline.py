@@ -4,22 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
-import torch
 import yaml
-from torch.utils.data import DataLoader
 
 from script.twd_tom import pipeline
-from script.twd_tom.eval import (
-    build_model_from_checkpoint,
-    load_checkpoint,
-)
-from werewolf.models.twd_tom.dataset import (
-    TWDToMDataset,
-    collate_twd_tom_samples,
-)
-from werewolf.models.twd_tom.losses import (
-    masked_pair_kl_divergence,
-)
 from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION,
 )
@@ -110,30 +97,6 @@ def _pipeline_config(
                 "train_game_count": 1,
                 "validation_game_count": 1,
                 "test_game_count": 1,
-            },
-            "train": {
-                "epochs": 1,
-                "batch_size": 1,
-                "learning_rate": 0.001,
-                "weight_decay": 0.0,
-                "seed": 3,
-                "device": "cpu",
-                "num_workers": 0,
-                "gradient_clip_norm": 1.0,
-                "early_stopping_patience": 2,
-                "early_stopping_min_delta": 0.0,
-                "d_model": 8,
-                "n_head": 2,
-                "n_layer": 1,
-                "dropout": 0.0,
-                "max_seq_len": 8,
-                "dim_feedforward": 16,
-            },
-            "eval": {
-                "batch_size": 1,
-                "device": "cpu",
-                "num_workers": 0,
-                "allow_game_id_overlap": False,
             },
         },
     }
@@ -459,8 +422,6 @@ def test_cli_exposes_only_run_and_collection_instance_parameters():
         "collect",
         "project",
         "split",
-        "train",
-        "eval",
     )
 
 
@@ -595,7 +556,7 @@ def test_invalid_run_id_fails_closed(
 
 @pytest.mark.parametrize(
     "stage",
-    ("project", "split", "train", "eval"),
+    ("project", "split"),
 )
 def test_collection_overrides_are_rejected_for_later_stages(
     tmp_path,
@@ -614,6 +575,17 @@ def test_collection_overrides_are_rejected_for_later_stages(
             stage=stage,
             game_count=1,
             seeds=(4101,),
+        )
+
+
+@pytest.mark.parametrize("stage", ("train", "eval"))
+def test_training_stages_are_not_supported(tmp_path, stage):
+    config_path = _write_config(tmp_path)
+    with pytest.raises(ValueError, match="unsupported pipeline stage"):
+        pipeline.run_pipeline_stage(
+            config_path=config_path,
+            run_id="test_run",
+            stage=stage,
         )
 
 
@@ -1143,135 +1115,9 @@ def test_explicit_staged_synthetic_flow(
         "split",
     }
 
-    train_summary = (
-        pipeline.run_pipeline_stage(
-            config_path=config_path,
-            run_id="test_run",
-            stage="train",
-        )
-    )
-    checkpoint_path = Path(
-        train_summary["output_path"]
-    )
-    assert checkpoint_path.is_file()
-    checkpoint_before_eval = (
-        checkpoint_path.read_bytes()
-    )
-    assert checkpoint_path.resolve() == (
-        outputs_run / "checkpoint_best.pt"
-    ).resolve()
-    assert (
-        outputs_run / "training_metrics.json"
-    ).is_file()
-    assert not (
-        outputs_run / "evaluation.json"
-    ).exists()
-
-    eval_summary = (
-        pipeline.run_pipeline_stage(
-            config_path=config_path,
-            run_id="test_run",
-            stage="eval",
-        )
-    )
-    assert eval_summary["status"] == "ok"
-    assert Path(
-        eval_summary["output_path"]
-    ).resolve() == (
-        outputs_run / "evaluation.json"
-    ).resolve()
-    assert (
-        outputs_run / "evaluation.json"
-    ).is_file()
-    assert (
-        checkpoint_path.read_bytes()
-        == checkpoint_before_eval
-    )
-
-    dataset = (
-        TWDToMDataset.from_jsonl(
-            split_dir / "test.jsonl"
-        )
-    )
-    batch = next(
-        iter(
-            DataLoader(
-                dataset,
-                batch_size=1,
-                collate_fn=(
-                    collate_twd_tom_samples
-                ),
-            )
-        )
-    )
-    for private_field in (
-        "suspected_werewolves",
-        "known_werewolves",
-        "known_non_werewolves",
-    ):
-        assert private_field not in {
-            key
-            for key in batch
-            if key != "metadata"
-        }
-    checkpoint = load_checkpoint(
-        checkpoint_path
-    )
-    model = build_model_from_checkpoint(
-        checkpoint,
-        device=torch.device("cpu"),
-    )
-    output = model(
-        batch["subject_ids"],
-        batch["action_ids"],
-        batch["object_ids"],
-        batch["attention_mask"],
-        event_type_ids=batch["event_type_ids"],
-        phase_ids=batch["phase_ids"],
-        day_values=batch["day_values"],
-    )
-    assert output[
-        "pair_logits"
-    ].shape == (
-        1,
-        7,
-        21,
-    )
-    assert output[
-        "belief_matrix"
-    ].shape == (
-        1,
-        7,
-        7,
-    )
-    assert torch.allclose(
-        output[
-            "belief_matrix"
-        ].sum(-1),
-        torch.full(
-            (1, 7),
-            2.0,
-        ),
-        atol=1e-6,
-    )
-    loss = masked_pair_kl_divergence(
-        output["pair_logits"],
-        batch["pair_targets"],
-        batch["subject_mask"],
-    )
-    assert torch.isfinite(loss)
-
-    serialized_summaries = json.dumps(
-        [
-            validate_summary,
-            collect_summary,
-            project_summary,
-            split_summary,
-            train_summary,
-            eval_summary,
-        ]
-    )
-    assert "test-secret" not in (
-        serialized_summaries
+    # The order-specific raw-data trainer has its own one-batch smoke tests;
+    # the online collection/projection pipeline deliberately stops here.
+    assert "test-secret" not in json.dumps(
+        [validate_summary, collect_summary, project_summary, split_summary]
     )
     assert config_path.read_bytes() == original_yaml

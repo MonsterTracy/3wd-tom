@@ -10,7 +10,6 @@ from run_random import (
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
 )
-from werewolf.models.twd_tom.dataset import TWDToMDataset
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
 from werewolf.speech.private_belief_perceiver import (
@@ -479,14 +478,7 @@ def test_multi_action_speech_has_one_pre_speech_snapshot_and_one_dataset_row(
         collector.calls[1]["public_history"]
     ) == first_actions
 
-    sample = projected_sample_factory(step_idx=1)
-    for key, value in public_history_fields(
-        first_actions, speaker_id=sample["speaker_id"]
-    ).items():
-        sample[key] = value
-    dataset = TWDToMDataset([sample])
-    assert len(dataset) == 1
-    assert dataset[0]["metadata"]["public_action_count"] == 2
+    assert collector.calls[1]["public_history"][-1]["event_type"] == "turn_start"
 
 
 def test_builds_complete_sample_collector(

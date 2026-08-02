@@ -475,21 +475,21 @@ def test_empty_input_is_rejected_before_output(
                 "schema_version",
                 PLAYER_SUSPICION_SCHEMA_VERSION,
             ),
-            "explicit offline pair projection",
+            "projection metadata",
         ),
         (
             lambda row: row.__setitem__(
                 "schema_version",
                 "classic7_pre_speech_pair_belief_v1",
             ),
-            "schema_version",
+            "projection metadata",
         ),
         (
             lambda row: row.__setitem__(
                 "schema_version",
                 "unknown_schema",
             ),
-            "schema_version",
+            "projection metadata",
         ),
         (
             lambda row: row.pop(
@@ -522,7 +522,7 @@ def test_empty_input_is_rejected_before_output(
                 "plausible_wolf_pairs",
                 [],
             ),
-            "legacy or truth-derived",
+            "field set mismatch",
         ),
     ],
     ids=(
@@ -642,154 +642,4 @@ def test_write_failure_removes_temporary_directory(
 
     _assert_no_temporary_output(
         output_dir
-    )
-
-
-def test_train_ignores_test_and_eval_reads_it_only_when_explicit(
-    tmp_path,
-    projected_sample_factory,
-    monkeypatch,
-):
-    from script.twd_tom import (
-        eval as eval_module,
-    )
-    from script.twd_tom import (
-        train as train_module,
-    )
-
-    input_path = tmp_path / "projected.jsonl"
-    _make_projected_input(
-        input_path,
-        projected_sample_factory,
-        game_count=3,
-    )
-    output_dir = tmp_path / "split"
-    _split(
-        input_path,
-        output_dir,
-    )
-
-    train_path = (
-        output_dir / "train.jsonl"
-    )
-    validation_path = (
-        output_dir / "validation.jsonl"
-    )
-    test_path = (
-        output_dir / "test.jsonl"
-    )
-    original_test = test_path.read_bytes()
-    test_path.write_text(
-        "not valid projected data\n",
-        encoding="utf-8",
-    )
-
-    training_reads: list[Path] = []
-    original_training_loader = (
-        train_module.load_twd_tom_jsonl
-    )
-
-    def tracked_training_loader(path):
-        training_reads.append(
-            Path(path).resolve()
-        )
-        return original_training_loader(
-            path
-        )
-
-    monkeypatch.setattr(
-        train_module,
-        "load_twd_tom_jsonl",
-        tracked_training_loader,
-    )
-    training_summary = (
-        train_module.run_training(
-            train_module.TrainingConfig(
-                train_dataset_path=str(
-                    train_path
-                ),
-                validation_dataset_path=str(
-                    validation_path
-                ),
-                output_dir=str(
-                    tmp_path / "training"
-                ),
-                epochs=1,
-                batch_size=2,
-                learning_rate=1e-3,
-                weight_decay=0.0,
-                seed=3,
-                device="cpu",
-                d_model=8,
-                n_head=2,
-                n_layer=1,
-                dropout=0.0,
-                max_seq_len=8,
-                dim_feedforward=16,
-            )
-        )
-    )
-
-    assert set(training_reads) == {
-        train_path.resolve(),
-        validation_path.resolve(),
-    }
-    assert test_path.resolve() not in (
-        training_reads
-    )
-
-    test_path.write_bytes(
-        original_test
-    )
-    evaluation_reads: list[Path] = []
-    original_evaluation_loader = (
-        eval_module.load_twd_tom_jsonl
-    )
-
-    def tracked_evaluation_loader(path):
-        evaluation_reads.append(
-            Path(path).resolve()
-        )
-        return original_evaluation_loader(
-            path
-        )
-
-    monkeypatch.setattr(
-        eval_module,
-        "load_twd_tom_jsonl",
-        tracked_evaluation_loader,
-    )
-    evaluation_summary = (
-        eval_module.evaluate_checkpoint(
-            eval_module.EvaluationConfig(
-                checkpoint_path=(
-                    training_summary[
-                        "best_checkpoint"
-                    ]
-                ),
-                dataset_path=str(
-                    test_path
-                ),
-                training_dataset_path=str(
-                    train_path
-                ),
-                output_path=str(
-                    tmp_path
-                    / "evaluation.json"
-                ),
-                batch_size=2,
-                device="cpu",
-            )
-        )
-    )
-
-    assert evaluation_summary[
-        "status"
-    ] == "ok"
-    assert set(evaluation_reads) == {
-        train_path.resolve(),
-        test_path.resolve(),
-    }
-    assert validation_path.resolve() not in (
-        evaluation_reads
     )

@@ -15,10 +15,8 @@ import yaml
 from dotenv import load_dotenv
 
 from script.twd_tom import real_backend_dry_run as collection_core
-from script.twd_tom.eval import EvaluationConfig, evaluate_checkpoint
 from script.twd_tom.project_suspicion_to_pairs import project_jsonl
 from script.twd_tom.split_formal_dataset import split_projected_dataset
-from script.twd_tom.train import TrainingConfig, run_training
 from werewolf.backends import is_local_unauthenticated_backend
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.models.twd_tom.public_events import PUBLIC_EVENT_SCHEMA_VERSION
@@ -30,7 +28,7 @@ from werewolf.models.twd_tom.schema import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STAGES = ("validate", "collect", "project", "split", "train", "eval")
+STAGES = ("validate", "collect", "project", "split")
 COLLECTION_OVERRIDE_STAGES = ("validate", "collect")
 
 
@@ -96,11 +94,6 @@ def _run_paths(run_id: str) -> dict[str, dict[str, Path]]:
         },
         "outputs": {
             "run_dir": outputs_run,
-            "checkpoint_path": outputs_run / "checkpoint_best.pt",
-            "training_metrics_path": (
-                outputs_run / "training_metrics.json"
-            ),
-            "evaluation_path": outputs_run / "evaluation.json",
         },
     }
 
@@ -274,60 +267,6 @@ def _load_pipeline_config(
         ),
     }
 
-    train = _mapping(pipeline.get("train"), "pipeline.train")
-    _reject_path_fields(
-        train,
-        prefix="pipeline.train",
-        fields=(
-            "train_dataset_path",
-            "validation_dataset_path",
-            "output_dir",
-        ),
-    )
-    train_args = dict(train)
-    train_args.update(
-        {
-            "train_dataset_path": str(
-                paths["data"]["split_dir"] / "train.jsonl"
-            ),
-            "validation_dataset_path": str(
-                paths["data"]["split_dir"] / "validation.jsonl"
-            ),
-            "output_dir": str(paths["outputs"]["run_dir"]),
-        }
-    )
-    training_config = TrainingConfig(**train_args)
-
-    evaluation = _mapping(pipeline.get("eval"), "pipeline.eval")
-    _reject_path_fields(
-        evaluation,
-        prefix="pipeline.eval",
-        fields=(
-            "checkpoint_path",
-            "dataset_path",
-            "training_dataset_path",
-            "output_path",
-        ),
-    )
-    eval_args = dict(evaluation)
-    eval_args.update(
-        {
-            "checkpoint_path": str(
-                paths["outputs"]["checkpoint_path"]
-            ),
-            "dataset_path": str(
-                paths["data"]["split_dir"] / "test.jsonl"
-            ),
-            "training_dataset_path": str(
-                paths["data"]["split_dir"] / "train.jsonl"
-            ),
-            "output_path": str(
-                paths["outputs"]["evaluation_path"]
-            ),
-        }
-    )
-    evaluation_config = EvaluationConfig(**eval_args)
-
     resolved_runtime = deepcopy(parsed)
     resolved_pipeline = resolved_runtime["pipeline"]
     resolved_pipeline["collection"]["game_count"] = game_count
@@ -353,8 +292,6 @@ def _load_pipeline_config(
         },
         "project": project_paths,
         "split": split_args,
-        "training_config": training_config,
-        "evaluation_config": evaluation_config,
     }
 
 
@@ -382,8 +319,6 @@ def _validate(config: Mapping[str, Any]) -> dict[str, Any]:
     summary = _summary(
         config, stage="validate", input_path=None, output_path=None
     )
-    training = config["training_config"]
-    evaluation = config["evaluation_config"]
     summary["plan"] = {
         "run_id": config["run_id"],
         "versions": dict(config["versions"]),
@@ -399,16 +334,6 @@ def _validate(config: Mapping[str, Any]) -> dict[str, Any]:
         "split": {
             name: str(value) if isinstance(value, Path) else value
             for name, value in config["split"].items()
-        },
-        "train": {
-            "train_dataset_path": training.train_dataset_path,
-            "validation_dataset_path": training.validation_dataset_path,
-            "output_dir": training.output_dir,
-        },
-        "eval": {
-            "checkpoint_path": evaluation.checkpoint_path,
-            "dataset_path": evaluation.dataset_path,
-            "output_path": evaluation.output_path,
         },
     }
     return summary
@@ -582,54 +507,7 @@ def run_pipeline_stage(
         )
         result["total_game_count"] = manifest["total_game_count"]
         return result
-    if stage == "train":
-        outputs_run = config["paths"]["outputs"]["run_dir"]
-        if outputs_run.exists():
-            raise FileExistsError(
-                f"run directory already exists: {outputs_run}"
-            )
-        training = run_training(config["training_config"])
-        generated_summary = outputs_run / "summary.json"
-        training_metrics_path = config["paths"]["outputs"][
-            "training_metrics_path"
-        ]
-        if not generated_summary.is_file():
-            raise RuntimeError(
-                "training did not write its summary artifact"
-            )
-        generated_summary.replace(training_metrics_path)
-        result = _summary(
-            config,
-            stage=stage,
-            input_path=[
-                config["training_config"].train_dataset_path,
-                config["training_config"].validation_dataset_path,
-            ],
-            output_path=training["best_checkpoint"],
-        )
-        result["best_epoch"] = training["best_epoch"]
-        result["training_metrics_path"] = str(
-            training_metrics_path
-        )
-        return result
-
-    evaluation_path = config["paths"]["outputs"]["evaluation_path"]
-    if evaluation_path.exists():
-        raise FileExistsError(
-            f"evaluation output already exists: {evaluation_path}"
-        )
-    evaluation = evaluate_checkpoint(config["evaluation_config"])
-    result = _summary(
-        config,
-        stage=stage,
-        input_path={
-            "checkpoint": config["evaluation_config"].checkpoint_path,
-            "dataset": config["evaluation_config"].dataset_path,
-        },
-        output_path=config["evaluation_config"].output_path,
-    )
-    result["metrics"] = evaluation["metrics"]
-    return result
+    raise AssertionError(f"unhandled pipeline stage: {stage}")
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

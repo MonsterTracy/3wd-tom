@@ -119,9 +119,16 @@ version and does not require recollecting raw suspicion data.
 Projected JSONL retains the raw suspicion and audit metadata and adds
 `pair_targets`, projection metadata, and deterministic-encoding flags.
 Non-`ok` observers keep their status and error and receive a null target.
-The Dataset rejects raw suspicion rows with an explicit offline-projection
-error, accepts only the projected schema, audits stored targets against the
-declared projection, and never overwrites them.
+Projection and split utilities continue to validate that stored targets match
+the declared projection. They are not the formal model-training input.
+
+The formal Dataset reads the current annotated raw files directly. With
+`--tom-order 1` it selects `data/qwen25/raw_tom.jsonl`, requires one current
+speaker observer, and exposes only that observer's two seven-player private
+knowledge vectors. With `--tom-order 2` it selects
+`data/qwen25/raw_tom2.jsonl`, may supervise multiple observers, and exposes no
+private-knowledge model tensors. Both orders project `suspected_werewolves`
+to the same canonical 21 pair classes in memory.
 
 ## Game-level dataset split
 
@@ -132,8 +139,8 @@ exactly equals the number of distinct games. A local seeded shuffle assigns
 games deterministically; snapshots from one game never cross partitions, and
 their input-relative order is preserved. Fixed twelve-game and 8/2/2 rules
 are not built into the splitter; formal experiment counts must be supplied
-explicitly. Training reads only the explicit train and validation files.
-Evaluation reads test data only when that file is explicitly supplied.
+explicitly. These projected splits remain available for audit; the
+order-specific Qwen2 trainer does not consume them.
 
 ## Explicit stage pipeline
 
@@ -148,10 +155,10 @@ python -m script.twd_tom.pipeline \
   --seeds 4101
 ```
 
-Supported stages are `validate`, `collect`, `project`, `split`, `train`, and
-`eval`. Each stage must be invoked explicitly; the pipeline only validates
-configuration and calls the existing stage function. Configuration stores
-stable runtime, budget, schema, split, training, and evaluation parameters.
+Supported stages are `validate`, `collect`, `project`, and `split`. Each stage
+must be invoked explicitly; the pipeline only validates configuration and
+calls the existing non-training stage function. Configuration stores stable
+runtime, budget, schema, and split parameters.
 The required CLI `run_id` identifies one explicit run; optional
 `--game-count` and `--seeds` jointly override only `validate` or `collect` for
 the current process. Repeated seeds are allowed and preserve their order.
@@ -159,13 +166,15 @@ the current process. Repeated seeds are allowed and preserve their order.
 Artifacts for one `run_id` are derived without scanning for a latest run:
 game logs, call audit, manifest, and resolved config are under
 `logs/tom/<run_id>/`; raw, projected, and split data are under
-`data/tom/<run_id>/`; checkpoints, training metrics, and evaluation are
-under `outputs/tom/<run_id>/`. The resolved config is written to the log
-directory and never back to `configs/`; no timestamp config is generated.
-Secrets remain in environment variables loaded from `.env`, never in YAML or
-stage summaries. Raw and projected artifacts remain distinct, train reads
-only train and validation partitions, and evaluation uses the same explicit
-`run_id` checkpoint and test dataset. Three-way decision is not implemented.
+`data/tom/<run_id>/`. The `outputs/tom/<run_id>/` path remains reserved by the
+runtime path contract but the non-training pipeline does not write model
+artifacts there. The resolved config is written to the log directory and
+never back to `configs/`; no timestamp config is generated. Secrets remain in
+environment variables loaded from `.env`, never in YAML or stage summaries.
+Raw and projected artifacts remain distinct. The separate Qwen2 training
+entry selects one current annotated raw file by `tom_order` and writes
+checkpoints below a `tom_order_1/` or `tom_order_2/` output directory.
+Three-way decision is not implemented.
 
 Pipeline configuration fixes the public-event, raw, projected, and projection
 versions above. Earlier three-game artifacts remain audit-only and are not
@@ -173,12 +182,11 @@ training input. Whether future models should encode `raw_text` is deferred to
 a later structured-input collision study.
 
 The model input is the structured `public_events` projection. Its sole
-backbone is a randomly initialized Hugging Face `GPT2Model`, which provides
-the internal GPT-2 block stack; the project does not maintain a separate
-explicit `GPT2Block` stack. The model does not support
-`torch.nn.TransformerEncoder`, pretrained GPT-2 weights, or an automatic
-backbone fallback, and old torch-Transformer checkpoints are incompatible.
-The observer-specific pair head still outputs `[B,7,21]`; `[B,7,7]`
-membership marginals are derived deterministically from pair probabilities,
-and training uses the existing masked pair loss. Three-way decision remains
+backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
+`inputs_embeds`; it never loads pretrained weights or uses a tokenizer. The
+last non-padding event state is added to each observer embedding. First-order
+rows also add one linear projection of that observer's private knowledge;
+second-order rows remain public-only. The observer pair head outputs
+`[B,7,21]`; `[B,7,7]` membership marginals are derived deterministically, and
+training uses masked soft-target cross entropy. Three-way decision remains
 outside this contract.
