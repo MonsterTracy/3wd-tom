@@ -23,6 +23,8 @@ def make_checkpoint(tmp_path, tom_order=1):
     config = TrainingConfig(
         tom_order=tom_order,
         output_dir=str(tmp_path),
+        dataset_path=str(tmp_path / "train.jsonl"),
+        validation_dataset_path=str(tmp_path / "validation.jsonl"),
         batch_size=1,
         max_seq_len=64,
     )
@@ -33,7 +35,10 @@ def make_checkpoint(tmp_path, tom_order=1):
         optimizer=optimizer,
         config=config,
         epoch=1,
-        metrics={"mean_loss": 1.0, "valid_subject_count": 1},
+        train_metrics={"mean_loss": 1.0, "valid_subject_count": 1},
+        validation_metrics={"mean_loss": 0.5, "valid_subject_count": 1},
+        best_epoch=1,
+        best_validation_mean_loss=0.5,
     )
 
 
@@ -77,20 +82,28 @@ def test_incompatible_state_dict_is_rejected(tmp_path):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 
-def test_one_raw_sample_can_be_evaluated_without_a_split(tmp_path):
-    source = REPO_ROOT / "data" / "qwen25" / "raw_tom.jsonl"
-    sample = json.loads(source.read_text(encoding="utf-8").splitlines()[0])
-    dataset_path = tmp_path / "one.jsonl"
-    dataset_path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
+def test_one_validation_sample_can_be_evaluated_against_explicit_training_data(
+    tmp_path,
+):
+    train_source = REPO_ROOT / "data" / "qwen25" / "tom1" / "train.jsonl"
+    validation_source = REPO_ROOT / "data" / "qwen25" / "tom1" / "val.jsonl"
+    with train_source.open(encoding="utf-8") as handle:
+        train_sample = json.loads(next(handle))
+    with validation_source.open(encoding="utf-8") as handle:
+        validation_sample = json.loads(next(handle))
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(json.dumps(train_sample) + "\n", encoding="utf-8")
+    dataset_path = tmp_path / "validation.jsonl"
+    dataset_path.write_text(json.dumps(validation_sample) + "\n", encoding="utf-8")
     checkpoint_path = tmp_path / "checkpoint.pt"
-    torch.save(make_checkpoint(tmp_path), checkpoint_path)
+    checkpoint = make_checkpoint(tmp_path)
+    torch.save(checkpoint, checkpoint_path)
     summary = evaluate_checkpoint(
         EvaluationConfig(
             checkpoint_path=str(checkpoint_path),
             dataset_path=str(dataset_path),
             batch_size=1,
             device="cpu",
-            allow_game_id_overlap=True,
         )
     )
     assert summary["status"] == "ok"

@@ -1,4 +1,4 @@
-"""Train the Qwen2 ToM backbone directly from one current raw ToM file."""
+"""Train the Qwen2 ToM backbone with explicit training and validation data."""
 
 from __future__ import annotations
 
@@ -62,11 +62,12 @@ def _tom_order(value: Any) -> int:
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    """Configuration for one first- or second-order raw-data training run."""
+    """Configuration for one first- or second-order training run."""
 
     tom_order: int
     output_dir: str
-    dataset_path: str | None = None
+    dataset_path: str
+    validation_dataset_path: str
     epochs: int = 10
     batch_size: int = 32
     learning_rate: float = 3e-4
@@ -81,10 +82,10 @@ class TrainingConfig:
         _tom_order(self.tom_order)
         if not isinstance(self.output_dir, str) or not self.output_dir.strip():
             raise ValueError("output_dir must be non-empty text")
-        if self.dataset_path is not None and (
-            not isinstance(self.dataset_path, str) or not self.dataset_path.strip()
-        ):
-            raise ValueError("dataset_path must be non-empty text or None")
+        for field_name in ("dataset_path", "validation_dataset_path"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty text")
         _positive_integer(self.epochs, field_name="epochs")
         _positive_integer(self.batch_size, field_name="batch_size")
         _positive_integer(self.max_seq_len, field_name="max_seq_len")
@@ -119,9 +120,11 @@ class TrainingConfig:
 
     @property
     def resolved_dataset_path(self) -> Path:
-        if self.dataset_path is None:
-            return RAW_DATASET_PATHS[self.tom_order]
         return Path(self.dataset_path)
+
+    @property
+    def resolved_validation_dataset_path(self) -> Path:
+        return Path(self.validation_dataset_path)
 
     @property
     def run_output_dir(self) -> Path:
@@ -165,15 +168,18 @@ def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
 def build_data_loader(
     config: TrainingConfig,
     *,
-    shuffle: bool = True,
+    dataset_path: str | Path,
+    shuffle: bool,
 ) -> tuple[DataLoader, TWDToMDataset]:
-    """Load and strictly validate the complete raw file for one ToM order."""
+    """Load and strictly validate one complete file for one ToM order."""
 
     dataset = TWDToMDataset.from_jsonl(
-        config.resolved_dataset_path,
+        dataset_path,
         tom_order=config.tom_order,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
     )
+    if len(dataset) == 0:
+        raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
     generator = torch.Generator().manual_seed(config.seed)
     loader = DataLoader(
         dataset,
@@ -184,6 +190,35 @@ def build_data_loader(
         generator=generator if shuffle else None,
     )
     return loader, dataset
+
+
+def build_training_data_loaders(
+    config: TrainingConfig,
+) -> tuple[DataLoader, TWDToMDataset, DataLoader, TWDToMDataset]:
+    """Build order-matched loaders and reject train/validation game overlap."""
+
+    train_loader, train_dataset = build_data_loader(
+        config,
+        dataset_path=config.resolved_dataset_path,
+        shuffle=True,
+    )
+    validation_loader, validation_dataset = build_data_loader(
+        config,
+        dataset_path=config.resolved_validation_dataset_path,
+        shuffle=False,
+    )
+    train_game_ids = {sample["game_id"] for sample in train_dataset.samples}
+    validation_game_ids = {
+        sample["game_id"] for sample in validation_dataset.samples
+    }
+    overlapping_game_ids = sorted(train_game_ids & validation_game_ids)
+    if overlapping_game_ids:
+        raise ValueError(
+            "train and validation game_id values overlap: "
+            f"count={len(overlapping_game_ids)}, "
+            f"examples={overlapping_game_ids[:10]}"
+        )
+    return train_loader, train_dataset, validation_loader, validation_dataset
 
 
 def count_supervised_subjects(data_loader: DataLoader) -> int:
@@ -338,8 +373,12 @@ def checkpoint_payload(
     optimizer: AdamW,
     config: TrainingConfig,
     epoch: int,
-    metrics: Mapping[str, int | float],
+    train_metrics: Mapping[str, int | float],
+    validation_metrics: Mapping[str, int | float],
+    best_epoch: int,
+    best_validation_mean_loss: float,
 ) -> dict[str, Any]:
+    selection_metric_value = float(validation_metrics["mean_loss"])
     return {
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "tom_order": config.tom_order,
@@ -355,11 +394,20 @@ def checkpoint_payload(
         "pair_ordering": PAIR_ORDERING,
         "backbone": BACKBONE_NAME,
         "epoch": epoch,
+        "train_dataset_path": str(config.resolved_dataset_path.resolve()),
+        "validation_dataset_path": str(
+            config.resolved_validation_dataset_path.resolve()
+        ),
         "training_config": asdict(config),
         "model_config": asdict(model.config),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "train_metrics": dict(metrics),
+        "train_metrics": dict(train_metrics),
+        "validation_metrics": dict(validation_metrics),
+        "selection_metric_name": "validation_mean_loss",
+        "selection_metric_value": selection_metric_value,
+        "best_epoch": best_epoch,
+        "best_validation_mean_loss": best_validation_mean_loss,
     }
 
 
@@ -368,36 +416,81 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
 
     set_random_seed(config.seed)
     device = resolve_device(config.device)
-    data_loader, dataset = build_data_loader(config)
+    (
+        train_loader,
+        train_dataset,
+        validation_loader,
+        validation_dataset,
+    ) = build_training_data_loaders(config)
     model = build_model(config).to(device)
     optimizer = AdamW(
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    output_dir = config.run_output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = output_dir / "best.pt"
+    last_checkpoint_path = output_dir / "last.pt"
     history = []
+    best_epoch = 0
+    best_validation_mean_loss = float("inf")
     for epoch in range(1, config.epochs + 1):
-        metrics = train_one_epoch(
+        train_metrics = train_one_epoch(
             model,
-            data_loader,
+            train_loader,
             optimizer,
             device=device,
             gradient_clip_norm=config.gradient_clip_norm,
         )
-        history.append({"epoch": epoch, "train": metrics})
+        validation_metrics = evaluate_model(
+            model,
+            validation_loader,
+            device=device,
+        )
+        validation_mean_loss = float(validation_metrics["mean_loss"])
+        is_best = epoch == 1 or validation_mean_loss < best_validation_mean_loss
+        if is_best:
+            best_epoch = epoch
+            best_validation_mean_loss = validation_mean_loss
+        history.append(
+            {
+                "epoch": epoch,
+                "train": train_metrics,
+                "validation": validation_metrics,
+                "is_best": is_best,
+                "best_epoch": best_epoch,
+                "best_validation_mean_loss": best_validation_mean_loss,
+            }
+        )
+        if is_best:
+            torch.save(
+                checkpoint_payload(
+                    model=model,
+                    optimizer=optimizer,
+                    config=config,
+                    epoch=epoch,
+                    train_metrics=train_metrics,
+                    validation_metrics=validation_metrics,
+                    best_epoch=best_epoch,
+                    best_validation_mean_loss=best_validation_mean_loss,
+                ),
+                best_checkpoint_path,
+            )
 
-    output_dir = config.run_output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / "last.pt"
+    final_record = history[-1]
     torch.save(
         checkpoint_payload(
             model=model,
             optimizer=optimizer,
             config=config,
             epoch=config.epochs,
-            metrics=history[-1]["train"],
+            train_metrics=final_record["train"],
+            validation_metrics=final_record["validation"],
+            best_epoch=best_epoch,
+            best_validation_mean_loss=best_validation_mean_loss,
         ),
-        checkpoint_path,
+        last_checkpoint_path,
     )
     history_path = output_dir / "history.json"
     history_path.write_text(
@@ -408,15 +501,24 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "status": "ok",
         "tom_order": config.tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
-        "dataset_path": str(config.resolved_dataset_path.resolve()),
-        "sample_count": len(dataset),
-        "epoch_count": config.epochs,
+        "train_dataset": str(config.resolved_dataset_path.resolve()),
+        "validation_dataset": str(
+            config.resolved_validation_dataset_path.resolve()
+        ),
+        "train_sample_count": len(train_dataset),
+        "validation_sample_count": len(validation_dataset),
+        "epochs_completed": config.epochs,
+        "best_epoch": best_epoch,
+        "best_validation_mean_loss": best_validation_mean_loss,
         "device": str(device),
         "backbone": BACKBONE_NAME,
         "model_config": asdict(model.config),
-        "checkpoint_path": str(checkpoint_path.resolve()),
+        "best_checkpoint": str(best_checkpoint_path.resolve()),
+        "last_checkpoint": str(last_checkpoint_path.resolve()),
         "history_path": str(history_path.resolve()),
-        "final_train_metrics": history[-1]["train"],
+        "final_train_metrics": final_record["train"],
+        "final_validation_metrics": final_record["validation"],
+        "selection_metric_name": "validation_mean_loss",
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -427,11 +529,12 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train the fixed Qwen2 ToM backbone from current raw data."
+        description="Train the fixed Qwen2 ToM backbone with explicit train/validation data."
     )
     parser.add_argument("--tom-order", required=True, type=int, choices=(1, 2))
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--dataset", default=None)
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--validation-dataset", required=True)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -451,6 +554,7 @@ def main() -> int:
             tom_order=args.tom_order,
             output_dir=args.output_dir,
             dataset_path=args.dataset,
+            validation_dataset_path=args.validation_dataset,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
