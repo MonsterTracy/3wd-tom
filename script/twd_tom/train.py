@@ -12,7 +12,7 @@ from typing import Any, Mapping
 import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, SubsetRandomSampler
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
@@ -43,6 +43,8 @@ from werewolf.models.twd_tom.schema import (
     PROJECTION_VERSION,
     SECOND_ORDER_TARGET_ENCODING,
     SECOND_ORDER_OBSERVER_READOUT,
+    SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
+    SECOND_ORDER_SUBJECT_SUPERVISION,
     TARGET_ENCODING,
 )
 
@@ -190,10 +192,29 @@ def build_data_loader(
     if len(dataset) == 0:
         raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
     generator = torch.Generator().manual_seed(config.seed)
+    sampler = None
+    loader_shuffle = shuffle
+    if config.tom_order == 2 and shuffle:
+        eligible_indices = [
+            index
+            for index in range(len(dataset))
+            if (
+                dataset[index]["subject_mask"]
+                & dataset[index]["public_evidence_mask"]
+            ).any()
+        ]
+        if not eligible_indices:
+            raise ValueError("training dataset has no public-evidence targets")
+        sampler = SubsetRandomSampler(
+            eligible_indices,
+            generator=generator,
+        )
+        loader_shuffle = False
     loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
-        shuffle=shuffle,
+        shuffle=loader_shuffle,
+        sampler=sampler,
         num_workers=config.num_workers,
         collate_fn=collate_twd_tom_samples,
         generator=generator if shuffle else None,
@@ -231,7 +252,13 @@ def build_training_data_loaders(
 
 
 def count_supervised_subjects(data_loader: DataLoader) -> int:
-    return sum(int(batch["subject_mask"].sum().item()) for batch in data_loader)
+    total = 0
+    for batch in data_loader:
+        mask = batch["subject_mask"]
+        if "public_evidence_mask" in batch:
+            mask = mask & batch["public_evidence_mask"]
+        total += int(mask.sum().item())
+    return total
 
 
 def _move_batch_to_device(
@@ -253,6 +280,9 @@ def _move_batch_to_device(
     fields.append("pair_targets")
     moved = {field: batch[field].to(device) for field in fields}
     for field in ("known_werewolves", "known_non_werewolves"):
+        if field in batch:
+            moved[field] = batch[field].to(device)
+    for field in ("public_evidence_mask", "observer_public_action_count"):
         if field in batch:
             moved[field] = batch[field].to(device)
     return moved
@@ -289,6 +319,7 @@ class MetricAccumulator:
         self.loss_sum = 0.0
         self.metric_sums: dict[str, float] = {}
         self.metric_weights: dict[str, int] = {}
+        self.original_subject_count = 0
 
     def update(
         self,
@@ -297,6 +328,7 @@ class MetricAccumulator:
         logits: torch.Tensor,
         targets: torch.Tensor,
         subject_mask: torch.Tensor,
+        original_subject_mask: torch.Tensor | None = None,
     ) -> None:
         metrics = compute_subjective_pair_metrics(
             logits,
@@ -312,6 +344,14 @@ class MetricAccumulator:
                 )
             )
         valid_count = int(metrics["valid_subject_count"])
+        if self.include_collapse_diagnostics:
+            if original_subject_mask is None:
+                raise ValueError(
+                    "second-order metrics require the original subject mask"
+                )
+            self.original_subject_count += int(
+                original_subject_mask.sum().item()
+            )
         pairwise_snapshot_count = int(
             (subject_mask.to(dtype=torch.int64).sum(dim=-1) >= 2).sum().item()
         )
@@ -350,7 +390,42 @@ class MetricAccumulator:
                 "mean_predicted_observer_pairwise_tv",
             ):
                 result.setdefault(name, 0.0)
+            result["public_evidence_valid_subject_count"] = (
+                self.valid_subject_count
+            )
+            result["public_evidence_subject_fraction"] = (
+                self.valid_subject_count / self.original_subject_count
+            )
         return result
+
+
+def _effective_subject_mask(
+    model: ToMBeliefBackbone,
+    batch: Mapping[str, torch.Tensor],
+) -> torch.Tensor:
+    subject_mask = batch["subject_mask"].to(dtype=torch.bool)
+    if model.tom_order == 1:
+        return subject_mask
+    evidence_mask = batch.get("public_evidence_mask")
+    if evidence_mask is None:
+        raise ValueError("second-order batch requires public_evidence_mask")
+    if evidence_mask.shape != subject_mask.shape:
+        raise ValueError("public_evidence_mask must match subject_mask")
+    return subject_mask & evidence_mask.to(dtype=torch.bool)
+
+
+def _targets_for_loss(
+    model: ToMBeliefBackbone,
+    targets: torch.Tensor,
+    effective_subject_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Keep the first-order loss input unchanged; hide excluded ToM2 rows."""
+
+    if model.tom_order == 1:
+        return targets
+    return targets * effective_subject_mask.unsqueeze(-1).to(
+        dtype=targets.dtype
+    )
 
 
 def _pair_distribution(
@@ -375,10 +450,16 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         output = _forward_batch(model, batch)
         logits, targets = _pair_distribution(output, batch)
+        effective_subject_mask = _effective_subject_mask(model, batch)
+        effective_targets = _targets_for_loss(
+            model,
+            targets,
+            effective_subject_mask,
+        )
         loss = masked_distribution_cross_entropy(
             logits,
-            targets,
-            batch["subject_mask"],
+            effective_targets,
+            effective_subject_mask,
         )
         loss.backward()
         if gradient_clip_norm > 0:
@@ -387,8 +468,9 @@ def train_one_epoch(
         accumulator.update(
             loss=loss,
             logits=logits,
-            targets=targets,
-            subject_mask=batch["subject_mask"],
+            targets=effective_targets,
+            subject_mask=effective_subject_mask,
+            original_subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
 
@@ -406,16 +488,23 @@ def evaluate_model(
         batch = _move_batch_to_device(raw_batch, device)
         output = _forward_batch(model, batch)
         logits, targets = _pair_distribution(output, batch)
+        effective_subject_mask = _effective_subject_mask(model, batch)
+        effective_targets = _targets_for_loss(
+            model,
+            targets,
+            effective_subject_mask,
+        )
         loss = masked_distribution_cross_entropy(
             logits,
-            targets,
-            batch["subject_mask"],
+            effective_targets,
+            effective_subject_mask,
         )
         accumulator.update(
             loss=loss,
             logits=logits,
-            targets=targets,
-            subject_mask=batch["subject_mask"],
+            targets=effective_targets,
+            subject_mask=effective_subject_mask,
+            original_subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
 
@@ -439,6 +528,8 @@ def checkpoint_task_contract(tom_order: int) -> dict[str, Any]:
         "pair_ordering": PAIR_ORDERING,
         "observer_readout": SECOND_ORDER_OBSERVER_READOUT,
         "train_player_augmentation": CYCLIC_ROTATION_VERSION,
+        "observer_event_conditioning": SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
+        "second_order_subject_supervision": SECOND_ORDER_SUBJECT_SUPERVISION,
     }
 
 

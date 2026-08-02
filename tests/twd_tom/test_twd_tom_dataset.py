@@ -1,5 +1,6 @@
 """Tests for strict current raw first-/second-order data adaptation."""
 
+import hashlib
 import json
 from collections import Counter
 from copy import deepcopy
@@ -17,7 +18,10 @@ from werewolf.models.twd_tom.dataset import (
     cyclically_rotate_second_order_sample,
     deterministic_cyclic_shift,
 )
-from werewolf.models.twd_tom.public_events import structured_event_tokens
+from werewolf.models.twd_tom.public_events import (
+    observer_public_action_counts,
+    structured_event_tokens,
+)
 from werewolf.models.twd_tom.schema import (
     PLAYER_NAMES,
     PLAYER_TO_ID,
@@ -26,12 +30,23 @@ from werewolf.models.twd_tom.schema import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TOM2_SPLIT_SHA256 = {
+    "train": "31b99dc26ba9724c6ee8390a184b01faca50ec830313fcac3e5c873e5fa1e1a8",
+    "val": "5b7f9206e4a8a59938a5aba50ba68f0d7c6cd9079b377d1a25aedd349151f0c8",
+    "test": "91622732b35dc0a6ca17dcb4b74292514306db128d9a2a9ee1f9538df2c03a6d",
+}
 
 
 def raw_sample(tom_order):
     name = "raw_tom.jsonl" if tom_order == 1 else "raw_tom2.jsonl"
     with (REPO_ROOT / "data" / "qwen25" / name).open(encoding="utf-8") as file:
         return json.loads(next(file))
+
+
+def test_second_order_formal_split_files_are_unchanged():
+    for split, expected in TOM2_SPLIT_SHA256.items():
+        path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
 
 
 def full_history_second_order_sample():
@@ -83,7 +98,55 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
     assert item["pair_targets"].shape == (7, 21)
+    assert item["public_evidence_mask"].shape == (7,)
+    assert item["observer_public_action_count"].shape == (7,)
     assert "suspicion_targets" not in item
+
+
+def test_public_evidence_counts_only_prior_player_generated_public_actions():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "turn_start",
+            "speaker": "player1",
+        },
+        {
+            "event_idx": 2,
+            "event_type": "public_speech",
+            "speaker": "player1",
+            "raw_text": "public text",
+            "sp_actions": [["player1", "support", "player2"]],
+        },
+        {
+            "event_idx": 3,
+            "event_type": "vote_result",
+            "votes": [
+                {"voter": "player1", "target": "player2"},
+                {"voter": "player3", "target": "player1"},
+            ],
+        },
+        {
+            "event_idx": 4,
+            "event_type": "exile_result",
+            "exiled_players": ["player2"],
+        },
+        {
+            "event_idx": 5,
+            "event_type": "death_announcement",
+            "dead_players": ["player4"],
+        },
+        {
+            "event_idx": 6,
+            "event_type": "turn_start",
+            "speaker": "player2",
+        },
+    ]
+    assert observer_public_action_counts(events) == (3, 0, 1, 0, 0, 0, 0)
 
 
 def test_first_order_pair_projection_semantics_are_unchanged():
@@ -162,6 +225,8 @@ def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
     second = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
     second_batch = collate_twd_tom_samples([second])
     assert second_batch["pair_targets"].shape == (1, 7, 21)
+    assert second_batch["public_evidence_mask"].shape == (1, 7)
+    assert second_batch["observer_public_action_count"].shape == (1, 7)
     assert "suspicion_targets" not in second_batch
     assert "known_werewolves" not in second_batch
     assert "known_non_werewolves" not in second_batch

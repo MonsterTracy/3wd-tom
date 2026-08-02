@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from script.twd_tom.audit_training_targets import audit_training_targets
+from werewolf.models.twd_tom.public_events import observer_public_action_counts
+from werewolf.models.twd_tom.schema import PLAYER_NAMES
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -14,7 +16,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _first_sample(split):
     path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
     with path.open(encoding="utf-8") as handle:
-        return json.loads(next(handle))
+        for line in handle:
+            sample = json.loads(line)
+            counts = observer_public_action_counts(sample["public_events"])
+            if any(
+                counts[index] > 0
+                and sample["belief_status"][player] == "ok"
+                for index, player in enumerate(PLAYER_NAMES)
+            ):
+                return sample
+    raise AssertionError(f"no public-evidence sample found in {path}")
 
 
 def test_seven_epoch_rotation_audit_is_seat_symmetric_and_read_only(tmp_path):
@@ -37,6 +48,17 @@ def test_seven_epoch_rotation_audit_is_seat_symmetric_and_read_only(tmp_path):
     validation = result["validation_without_augmentation"]["overall"]
     assert before["snapshot_count"] == validation["snapshot_count"] == 1
     assert after["snapshot_count"] == 7
+    for summary in (before, after, validation):
+        assert 0 < summary["public_evidence_valid_observer_row_count"] <= summary[
+            "valid_observer_row_count"
+        ]
+        assert 0 < summary["public_evidence_subject_fraction"] <= 1
+        assert "evidence_conditioned_target_pair_entropy" in summary
+        assert "evidence_conditioned_target_marginal_spread" in summary
+        assert "evidence_conditioned_target_observer_pairwise_tv" in summary
+        assert set(summary["public_evidence_coverage_by_observer"]) == set(
+            PLAYER_NAMES
+        )
     assert after["absolute_player_marginal_mean_gap"] == pytest.approx(0.0)
     assert all(
         value == pytest.approx(2.0 / 7.0)

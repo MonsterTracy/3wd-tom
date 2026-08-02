@@ -16,7 +16,9 @@ from script.twd_tom.eval import (
 from script.twd_tom.train import TrainingConfig, build_model, checkpoint_payload
 from werewolf.models.twd_tom.schema import (
     PAIR_ORDERING,
+    SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
+    SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
 from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
@@ -98,6 +100,14 @@ def test_new_second_order_checkpoint_has_strict_pair_contract(tmp_path):
     assert checkpoint["pair_ordering"] == PAIR_ORDERING
     assert checkpoint["observer_readout"] == SECOND_ORDER_OBSERVER_READOUT
     assert (
+        checkpoint["observer_event_conditioning"]
+        == SECOND_ORDER_OBSERVER_EVENT_CONDITIONING
+    )
+    assert (
+        checkpoint["second_order_subject_supervision"]
+        == SECOND_ORDER_SUBJECT_SUPERVISION
+    )
+    assert (
         checkpoint["train_player_augmentation"]
         == CYCLIC_ROTATION_VERSION
     )
@@ -123,11 +133,27 @@ def test_old_second_order_seven_class_checkpoint_is_rejected(tmp_path):
 
 @pytest.mark.parametrize(
     "field",
-    ["observer_readout", "train_player_augmentation"],
+    [
+        "observer_readout",
+        "train_player_augmentation",
+        "observer_event_conditioning",
+        "second_order_subject_supervision",
+    ],
 )
 def test_old_second_order_architecture_checkpoint_is_rejected(tmp_path, field):
     checkpoint = make_checkpoint(tmp_path, tom_order=2)
     checkpoint.pop(field)
+    with pytest.raises(ValueError, match=field):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["observer_event_conditioning", "second_order_subject_supervision"],
+)
+def test_mismatched_second_order_evidence_contract_is_rejected(tmp_path, field):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    checkpoint[field] = "wrong"
     with pytest.raises(ValueError, match=field):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 

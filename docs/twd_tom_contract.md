@@ -134,7 +134,15 @@ second-order observer's report is projected to the same canonical 21 pair
 classes using that observer's `known_werewolves` and
 `known_non_werewolves`. Those fields are supervision-side target-construction
 and audit data only: they do not appear in a second-order batch's model inputs,
-do not enter `forward`, and do not mask logits.
+do not enter `forward`, and do not mask logits. A second-order target row is
+included in loss and formal metrics only when it is valid under the existing
+`subject_mask` and that observer has already produced public evidence in the
+current pre-speech prefix. Public evidence means the observer's own completed
+public speech, each structured speech action attributed to that observer, or
+an already published vote by that observer. Turn starts, phase changes, exile
+and death announcements, and the pending current speech do not count. Silent
+target rows remain in the Dataset; only their effective supervision mask is
+false. First-order masking is unchanged.
 
 ## Game-level dataset split
 
@@ -192,11 +200,19 @@ backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
 `inputs_embeds`; it never loads pretrained weights or uses a tokenizer. The
 first-order readout adds the last non-padding event state to each observer
 embedding; rows also add one linear projection of that observer's private
-knowledge. The second-order readout instead uses the seven observer embeddings
-as queries over the complete padded-mask-aware public hidden-state sequence,
-then applies a residual LayerNorm. It remains public-only. Both paths use the
-same shared 21-class output projection and masked soft-target categorical cross
-entropy.
+knowledge. The second-order readout instead conditions every event token on
+each modeled observer. For canonical zero-based observer seat `i` and
+referenced player seat `j`, the shared relation index is `(j - i) mod 7`; a
+separate index 7 is used when that token field has no player. Existing
+structured fields are routed exactly as encoded: `turn_start` and
+`public_speech` speakers, `speech_action` subjects and objects, vote voters and
+targets, and exile/death objects. Three shared embedding tables cover speaker,
+subject, and object/target relations, with shared self-relation flags. The
+resulting relative public states have shape `[B,7,L,256]`; batch and observer
+dimensions are flattened to `[B*7,L,256]`, and shared observer queries of shape
+`[B*7,1,256]` use one shared attention module before residual LayerNorm. It
+remains public-only. Both paths use the same shared 21-class output projection
+and masked soft-target categorical cross entropy.
 
 Only the second-order training Dataset applies deterministic cyclic player-ID
 rotation. For epoch `e`, sample index `n`, and training seed `s`, its shift is
@@ -206,8 +222,12 @@ consecutive epochs cover all rotations for every sample. First-order data,
 validation, evaluation, and shadow inference retain their canonical IDs. New
 second-order checkpoints declare `observer_readout` as
 `public_event_query_attention_v1` and `train_player_augmentation` as
-`cyclic_rotation_v1`; checkpoints missing that architecture contract are
-rejected rather than converted.
+`cyclic_rotation_v1`. They additionally declare `observer_event_conditioning`
+as `cyclic_relative_player_relations_v1` and
+`second_order_subject_supervision` as `prior_public_action_mask_v1`;
+checkpoints missing or mismatching that architecture and supervision contract
+are rejected rather than converted. The first-order checkpoint contract is
+unchanged.
 
 For pair probabilities `q[i, omega]`, the sole player-level projection is
 
@@ -239,4 +259,8 @@ the fixed incidence projection above produces a `[7,7]` wolf-marginal matrix
 whose rows sum to two. Both are logged without logits, roles, private
 knowledge, or labels. No legacy `suspicion_matrix` alias is written. The result
 is not added to observations, prompts, actions, votes, environment state, or
-the original game log.
+the original game log. Each record also contains
+`observer_evidence_mask [7]` and `observer_public_action_count [7]`, calculated
+only from that same completed public prefix. Predictions remain present for
+all seven observers; an evidence-false row is an unsupported prior estimate,
+not a row backed by that observer's public behavior.

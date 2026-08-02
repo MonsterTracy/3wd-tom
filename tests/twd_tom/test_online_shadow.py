@@ -114,6 +114,8 @@ def test_strict_load_and_public_only_probability_matrix(
     assert "suspicion_matrix" not in record
     assert record["event_idx"] == public_events[-1]["event_idx"]
     assert record["public_event_count"] == len(public_events)
+    assert record["observer_evidence_mask"] == [False] * 7
+    assert record["observer_public_action_count"] == [0] * 7
 
     saved = json.loads((tmp_path / "shadow.jsonl").read_text(encoding="utf-8"))
     assert saved == record
@@ -127,6 +129,35 @@ def test_strict_load_and_public_only_probability_matrix(
         "targets",
     ):
         assert forbidden not in serialized
+
+
+def test_shadow_records_prior_public_speech_and_action_evidence(
+    tmp_path,
+    second_checkpoint,
+):
+    public_events = make_public_events(
+        [["player3", "support", "player4"]],
+        speaker_id=2,
+    )
+    with _new_shadow(tmp_path, second_checkpoint) as shadow:
+        record = shadow.record(
+            step_idx=0,
+            phase="1_day_speech",
+            speaker_id=2,
+            public_events=public_events,
+        )
+    assert record["observer_evidence_mask"] == [
+        False,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+    assert record["observer_public_action_count"] == [0, 1, 1, 0, 0, 0, 0]
+    assert len(record["pair_probability_matrix"]) == 7
+    assert len(record["wolf_marginal_matrix"]) == 7
 
 
 def test_old_seven_class_and_first_order_checkpoints_are_rejected(
@@ -322,6 +353,8 @@ def test_minimal_game_fixture_writes_one_real_shadow_record(
     assert len(records[0]["pair_probability_matrix"][0]) == 21
     assert len(records[0]["wolf_marginal_matrix"]) == 7
     assert len(records[0]["wolf_marginal_matrix"][0]) == 7
+    assert records[0]["observer_evidence_mask"] == [False] * 7
+    assert records[0]["observer_public_action_count"] == [0] * 7
     assert "suspicion_matrix" not in records[0]
 
 

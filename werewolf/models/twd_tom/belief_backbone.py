@@ -17,10 +17,11 @@ pretrained weights or tokenizer are used.
 
 First-order readout combines the final valid hidden state with one observer
 embedding per player and may additionally provide the current observer's two
-seven-player hard-knowledge vectors. Second-order readout uses those same
-observer embeddings as queries over the public hidden-state sequence. Both
-orders use the same sole 21-class pair output projection; only first-order
-inference consumes private knowledge.
+seven-player hard-knowledge vectors. Second-order readout adds shared cyclic
+observer-relative speaker, subject, and object/target relation embeddings to
+the public hidden sequence before using the observer embeddings as shared
+attention queries. Both orders use the same sole 21-class pair output
+projection; only first-order inference consumes private knowledge.
 
 This module does not consume raw public text, true roles, truth-derived
 labels, observer IDs, alive masks, or private event fields.
@@ -56,6 +57,30 @@ NUM_ATTENTION_HEADS = 8
 NUM_KEY_VALUE_HEADS = 4
 ATTENTION_DROPOUT = 0.1
 RMS_NORM_EPS = 1e-6
+NONE_RELATIVE_PLAYER_INDEX = NUM_PLAYERS
+
+
+def relative_player_indices(player_ids: torch.Tensor) -> torch.Tensor:
+    """Map absolute player IDs to each observer's cyclic relative index."""
+
+    if not isinstance(player_ids, torch.Tensor):
+        raise TypeError("player_ids must be a tensor")
+    if player_ids.ndim != 2:
+        raise ValueError("player_ids must have shape [B, L]")
+    if player_ids.dtype == torch.bool or torch.is_floating_point(player_ids):
+        raise TypeError("player_ids must use an integer dtype")
+    if torch.any(player_ids < 0) or torch.any(player_ids > NUM_PLAYERS):
+        raise ValueError("player_ids must contain IDs in [0, 7]")
+    observer_indices = torch.arange(
+        NUM_PLAYERS,
+        device=player_ids.device,
+    ).view(1, NUM_PLAYERS, 1)
+    relative = (player_ids.unsqueeze(1) - 1 - observer_indices) % NUM_PLAYERS
+    return torch.where(
+        player_ids.unsqueeze(1) == 0,
+        torch.full_like(relative, NONE_RELATIVE_PLAYER_INDEX),
+        relative,
+    )
 
 
 def _mapping_vocab_size(mapping: dict[str, int]) -> int:
@@ -193,6 +218,26 @@ class ToMBeliefBackbone(nn.Module):
             bias=False,
         )
         if self.tom_order == 2:
+            self.second_order_speaker_relative_embedding = nn.Embedding(
+                NUM_PLAYERS + 1,
+                HIDDEN_SIZE,
+                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+            )
+            self.second_order_subject_relative_embedding = nn.Embedding(
+                NUM_PLAYERS + 1,
+                HIDDEN_SIZE,
+                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+            )
+            self.second_order_object_relative_embedding = nn.Embedding(
+                NUM_PLAYERS + 1,
+                HIDDEN_SIZE,
+                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+            )
+            self.second_order_relation_flag_projection = nn.Linear(
+                3,
+                HIDDEN_SIZE,
+                bias=False,
+            )
             self.second_order_observer_query_attention = nn.MultiheadAttention(
                 embed_dim=HIDDEN_SIZE,
                 num_heads=NUM_ATTENTION_HEADS,
@@ -222,6 +267,21 @@ class ToMBeliefBackbone(nn.Module):
         ):
             nn.init.normal_(
                 embedding.weight,
+                mean=0.0,
+                std=0.02,
+            )
+
+        if self.tom_order == 2:
+            for embedding in (
+                self.second_order_speaker_relative_embedding,
+                self.second_order_subject_relative_embedding,
+                self.second_order_object_relative_embedding,
+            ):
+                nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+                with torch.no_grad():
+                    embedding.weight[NONE_RELATIVE_PLAYER_INDEX].zero_()
+            nn.init.normal_(
+                self.second_order_relation_flag_projection.weight,
                 mean=0.0,
                 std=0.02,
             )
@@ -378,12 +438,77 @@ class ToMBeliefBackbone(nn.Module):
             device=subject_ids.device,
         )
         if self.tom_order == 2:
+            speaker_token_mask = (
+                (event_type_ids == STRUCTURED_TOKEN_TO_ID["turn_start"])
+                | (event_type_ids == STRUCTURED_TOKEN_TO_ID["public_speech"])
+            )
+            subject_token_mask = (
+                (event_type_ids == STRUCTURED_TOKEN_TO_ID["speech_action"])
+                | (event_type_ids == STRUCTURED_TOKEN_TO_ID["vote"])
+            )
+            no_player = torch.zeros_like(subject_ids)
+            speaker_relative = relative_player_indices(
+                torch.where(speaker_token_mask, subject_ids, no_player)
+            )
+            subject_relative = relative_player_indices(
+                torch.where(subject_token_mask, subject_ids, no_player)
+            )
+            object_relative = relative_player_indices(object_ids)
+            relation_flags = torch.stack(
+                (
+                    speaker_relative == 0,
+                    subject_relative == 0,
+                    object_relative == 0,
+                ),
+                dim=-1,
+            ).to(dtype=hidden_states.dtype)
+            relative_public_hidden_states = (
+                hidden_states.unsqueeze(1)
+                + self.second_order_speaker_relative_embedding(
+                    speaker_relative
+                )
+                + self.second_order_subject_relative_embedding(
+                    subject_relative
+                )
+                + self.second_order_object_relative_embedding(
+                    object_relative
+                )
+                + self.second_order_relation_flag_projection(relation_flags)
+            )
+            relative_public_hidden_states = (
+                relative_public_hidden_states
+                * safe_attention_mask[:, None, :, None].to(
+                    dtype=hidden_states.dtype
+                )
+            )
+            sequence_length = hidden_states.shape[1]
+            flattened_relative_hidden = relative_public_hidden_states.reshape(
+                batch_size * self.config.num_players,
+                sequence_length,
+                HIDDEN_SIZE,
+            )
+            flattened_queries = observer_queries.reshape(
+                batch_size * self.config.num_players,
+                1,
+                HIDDEN_SIZE,
+            )
+            flattened_padding_mask = (
+                (~safe_attention_mask)
+                .unsqueeze(1)
+                .expand(-1, self.config.num_players, -1)
+                .reshape(batch_size * self.config.num_players, sequence_length)
+            )
             observer_context, _ = self.second_order_observer_query_attention(
-                query=observer_queries,
-                key=hidden_states,
-                value=hidden_states,
-                key_padding_mask=~safe_attention_mask,
+                query=flattened_queries,
+                key=flattened_relative_hidden,
+                value=flattened_relative_hidden,
+                key_padding_mask=flattened_padding_mask,
                 need_weights=False,
+            )
+            observer_context = observer_context.reshape(
+                batch_size,
+                self.config.num_players,
+                HIDDEN_SIZE,
             )
             observer_hidden_states = self.second_order_observer_query_layer_norm(
                 observer_queries + observer_context
@@ -400,7 +525,7 @@ class ToMBeliefBackbone(nn.Module):
 
         logits = self.output_projection(observer_hidden_states)
         probabilities = torch.softmax(logits, dim=-1)
-        return {
+        result = {
             "hidden_states": hidden_states,
             "pooled_hidden_state": pooled_hidden_state,
             "observer_hidden_states": observer_hidden_states,
@@ -411,6 +536,11 @@ class ToMBeliefBackbone(nn.Module):
                 probabilities
             ),
         }
+        if self.tom_order == 2:
+            result["relative_public_hidden_states"] = (
+                relative_public_hidden_states
+            )
+        return result
 
     def _validate_private_knowledge(
         self,
@@ -657,6 +787,8 @@ class ToMBeliefBackbone(nn.Module):
 __all__ = [
     "BACKBONE_NAME",
     "HIDDEN_SIZE",
+    "NONE_RELATIVE_PLAYER_INDEX",
     "ToMBeliefBackboneConfig",
     "ToMBeliefBackbone",
+    "relative_player_indices",
 ]

@@ -9,11 +9,17 @@ from transformers import Qwen2Model
 import werewolf.models.twd_tom.belief_backbone as backbone_module
 from werewolf.models.twd_tom.belief_backbone import (
     HIDDEN_SIZE,
+    NONE_RELATIVE_PLAYER_INDEX,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
+    relative_player_indices,
 )
 from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
-from werewolf.models.twd_tom.schema import NUM_WOLF_PAIR_CLASSES, PLAYER_TO_ID
+from werewolf.models.twd_tom.schema import (
+    ACTION_TO_ID,
+    NUM_WOLF_PAIR_CLASSES,
+    PLAYER_TO_ID,
+)
 
 
 def make_features():
@@ -89,6 +95,88 @@ def test_output_contract_and_last_non_padding_pooling(model):
         output["pooled_hidden_state"], output["hidden_states"][:, 1]
     )
     assert output["hidden_states"][:, 2].count_nonzero().item() == 0
+    assert "relative_public_hidden_states" not in output
+
+
+def test_relative_player_indices_use_self_cyclic_and_distinct_none_indices():
+    relative = relative_player_indices(
+        torch.tensor([[PLAYER_TO_ID["player1"], PLAYER_TO_ID["player7"], 0]])
+    )
+    assert relative.shape == (1, 7, 3)
+    assert relative[0, 0].tolist() == [0, 6, NONE_RELATIVE_PLAYER_INDEX]
+    assert relative[0, 6].tolist() == [1, 0, NONE_RELATIVE_PLAYER_INDEX]
+    assert NONE_RELATIVE_PLAYER_INDEX not in range(7)
+
+
+def test_relative_player_indices_are_equivariant_to_cyclic_rotation():
+    player_ids = torch.tensor([[1, 3, 7, 0]])
+    shift = 4
+    rotated_player_ids = torch.where(
+        player_ids == 0,
+        player_ids,
+        ((player_ids - 1 + shift) % 7) + 1,
+    )
+    original = relative_player_indices(player_ids)
+    rotated = relative_player_indices(rotated_player_ids)
+    rotated_observer_rows = torch.roll(rotated, shifts=-shift, dims=1)
+    torch.testing.assert_close(rotated_observer_rows, original)
+
+
+def test_second_order_routes_speaker_subject_and_object_relations():
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    ).eval()
+    observed = {}
+
+    def capture(name):
+        def hook(_module, args):
+            observed[name] = args[0].detach().clone()
+
+        return hook
+
+    handles = [
+        second_order.second_order_speaker_relative_embedding.register_forward_pre_hook(
+            capture("speaker")
+        ),
+        second_order.second_order_subject_relative_embedding.register_forward_pre_hook(
+            capture("subject")
+        ),
+        second_order.second_order_object_relative_embedding.register_forward_pre_hook(
+            capture("object")
+        ),
+    ]
+    features = {
+        "subject_ids": torch.tensor([[1, 2, 3]]),
+        "action_ids": torch.tensor([[0, ACTION_TO_ID["support"], 0]]),
+        "object_ids": torch.tensor([[0, 4, 5]]),
+        "event_type_ids": torch.tensor(
+            [[
+                STRUCTURED_TOKEN_TO_ID["turn_start"],
+                STRUCTURED_TOKEN_TO_ID["speech_action"],
+                STRUCTURED_TOKEN_TO_ID["vote"],
+            ]]
+        ),
+        "phase_ids": torch.zeros((1, 3), dtype=torch.long),
+        "day_values": torch.zeros((1, 3), dtype=torch.float32),
+        "attention_mask": torch.ones((1, 3), dtype=torch.long),
+    }
+    try:
+        with torch.no_grad():
+            output = second_order(**features)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert observed["speaker"][0, 0].tolist() == [0, 7, 7]
+    assert observed["subject"][0, 0].tolist() == [7, 1, 2]
+    assert observed["object"][0, 0].tolist() == [7, 3, 4]
+    assert output["relative_public_hidden_states"].shape == (
+        1,
+        7,
+        3,
+        HIDDEN_SIZE,
+    )
 
 
 def test_second_order_uses_the_same_single_pair_output_projection():
@@ -135,14 +223,20 @@ def test_second_order_observer_query_attention_shapes_and_padding_mask():
             output = second_order(**make_features())
     finally:
         handle.remove()
-    assert observed["query"].shape == (1, 7, HIDDEN_SIZE)
-    assert observed["key"].shape == (1, 3, HIDDEN_SIZE)
-    assert observed["value"].shape == (1, 3, HIDDEN_SIZE)
+    assert observed["query"].shape == (7, 1, HIDDEN_SIZE)
+    assert observed["key"].shape == (7, 3, HIDDEN_SIZE)
+    assert observed["value"].shape == (7, 3, HIDDEN_SIZE)
     assert torch.equal(
         observed["key_padding_mask"],
-        torch.tensor([[False, False, True]]),
+        torch.tensor([[False, False, True]]).expand(7, -1),
     )
     assert observed["need_weights"] is False
+    assert output["relative_public_hidden_states"].shape == (
+        1,
+        7,
+        3,
+        HIDDEN_SIZE,
+    )
     assert output["observer_hidden_states"].shape == (1, 7, HIDDEN_SIZE)
     assert output["observer_pair_logits"].shape == (1, 7, 21)
 
@@ -160,6 +254,14 @@ def test_second_order_uses_one_shared_attention_and_head():
     assert attentions == [second_order.second_order_observer_query_attention]
     assert second_order.output_projection.out_features == 21
     assert not hasattr(model, "second_order_observer_query_attention")
+    for field in (
+        "second_order_speaker_relative_embedding",
+        "second_order_subject_relative_embedding",
+        "second_order_object_relative_embedding",
+        "second_order_relation_flag_projection",
+    ):
+        assert hasattr(second_order, field)
+        assert not hasattr(model, field)
 
 
 def test_second_order_rejects_all_padding_before_query_attention(model):

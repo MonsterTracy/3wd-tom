@@ -16,7 +16,10 @@ from werewolf.models.twd_tom.belief_labels import (
     pair_probabilities_to_belief_marginals,
 )
 from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
-from werewolf.models.twd_tom.public_events import parse_public_phase
+from werewolf.models.twd_tom.public_events import (
+    observer_public_action_counts,
+    parse_public_phase,
+)
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
 from werewolf.models.twd_tom.schema import (
     CANONICAL_PLAYER_ORDERING,
@@ -140,6 +143,9 @@ class SecondOrderToMShadow:
                 pair_probabilities
             )
         latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+        public_action_counts = observer_public_action_counts(
+            snapshot.public_events
+        )
 
         pair_row_sums = pair_probabilities.sum(dim=-1)
         if not torch.allclose(
@@ -177,6 +183,10 @@ class SecondOrderToMShadow:
             "pair_ordering": PAIR_ORDERING,
             "player_ordering": list(CANONICAL_PLAYER_ORDERING),
             "public_event_count": len(snapshot.public_events),
+            "observer_evidence_mask": [
+                count > 0 for count in public_action_counts
+            ],
+            "observer_public_action_count": list(public_action_counts),
             "pair_probability_matrix": (
                 pair_probabilities[0].detach().cpu().tolist()
             ),

@@ -19,6 +19,7 @@ from werewolf.models.twd_tom.belief_labels import (
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
+    observer_public_action_counts,
     parse_public_phase,
     public_event_digest,
     public_speech_actions,
@@ -644,7 +645,14 @@ class TWDToMDataset(Dataset):
             "subject_mask": subject_mask,
             "metadata": metadata,
         }
-        if self.tom_order == 1:
+        if self.tom_order == 2:
+            public_action_counts = torch.tensor(
+                observer_public_action_counts(sample["public_events"]),
+                dtype=torch.int64,
+            )
+            item["observer_public_action_count"] = public_action_counts
+            item["public_evidence_mask"] = public_action_counts > 0
+        else:
             known_wolves = torch.zeros((NUM_PLAYERS, NUM_PLAYERS), dtype=torch.float32)
             known_non_wolves = torch.zeros_like(known_wolves)
             subject = normalize_player(sample["observer_ids"][0])
@@ -707,6 +715,19 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         )
         result["known_non_werewolves"] = torch.stack(
             [item["known_non_werewolves"] for item in batch]
+        )
+    else:
+        if any(
+            "public_evidence_mask" not in item
+            or "observer_public_action_count" not in item
+            for item in batch
+        ):
+            raise ValueError("second-order samples require public evidence fields")
+        result["public_evidence_mask"] = torch.stack(
+            [item["public_evidence_mask"] for item in batch]
+        )
+        result["observer_public_action_count"] = torch.stack(
+            [item["observer_public_action_count"] for item in batch]
         )
     return result
 

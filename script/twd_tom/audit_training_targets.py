@@ -1,4 +1,4 @@
-"""Read-only seat-bias audit for second-order ToM target datasets."""
+"""Read-only seat-bias and public-evidence audit for second-order targets."""
 
 from __future__ import annotations
 
@@ -35,19 +35,31 @@ def _distribution_summary(values: list[float]) -> dict[str, int | float]:
 class _TargetAuditAccumulator:
     def __init__(self) -> None:
         self.valid_row_count = 0
+        self.public_evidence_valid_row_count = 0
         self.snapshot_count = 0
+        self.valid_rows_by_observer = torch.zeros(7, dtype=torch.int64)
+        self.evidence_rows_by_observer = torch.zeros(7, dtype=torch.int64)
         self.marginal_sums = torch.zeros(7, dtype=torch.float64)
         self.top_counts = torch.zeros(7, dtype=torch.int64)
         self.pair_entropies: list[float] = []
         self.marginal_spreads: list[float] = []
         self.observer_pairwise_tv: list[float] = []
+        self.evidence_pair_entropies: list[float] = []
+        self.evidence_marginal_spreads: list[float] = []
+        self.evidence_observer_pairwise_tv: list[float] = []
 
     def update(self, item: Mapping[str, Any]) -> None:
         targets = item["pair_targets"].to(dtype=torch.float64)
         mask = item["subject_mask"].to(dtype=torch.bool)
+        evidence_mask = item["public_evidence_mask"].to(dtype=torch.bool)
+        effective_mask = mask & evidence_mask
         valid_targets = targets[mask]
+        evidence_targets = targets[effective_mask]
         self.snapshot_count += 1
         self.valid_row_count += valid_targets.shape[0]
+        self.public_evidence_valid_row_count += evidence_targets.shape[0]
+        self.valid_rows_by_observer += mask.to(dtype=torch.int64)
+        self.evidence_rows_by_observer += effective_mask.to(dtype=torch.int64)
         if valid_targets.numel() == 0:
             return
         marginals = pair_probabilities_to_belief_marginals(targets)[mask]
@@ -65,15 +77,60 @@ class _TargetAuditAccumulator:
         if valid_targets.shape[0] >= 2:
             pairwise_tv = 0.5 * torch.pdist(valid_targets, p=1)
             self.observer_pairwise_tv.append(float(pairwise_tv.mean().item()))
+        if evidence_targets.numel():
+            evidence_marginals = pair_probabilities_to_belief_marginals(
+                targets
+            )[effective_mask]
+            evidence_entropies = -(
+                evidence_targets
+                * evidence_targets.clamp_min(
+                    torch.finfo(torch.float64).tiny
+                ).log()
+            ).sum(dim=-1)
+            self.evidence_pair_entropies.extend(evidence_entropies.tolist())
+            self.evidence_marginal_spreads.extend(
+                (
+                    evidence_marginals.max(dim=-1).values
+                    - evidence_marginals.min(dim=-1).values
+                ).tolist()
+            )
+        if evidence_targets.shape[0] >= 2:
+            evidence_pairwise_tv = 0.5 * torch.pdist(evidence_targets, p=1)
+            self.evidence_observer_pairwise_tv.append(
+                float(evidence_pairwise_tv.mean().item())
+            )
 
     def finalize(self) -> dict[str, Any]:
         if self.valid_row_count:
             marginal_means = self.marginal_sums / self.valid_row_count
         else:
             marginal_means = torch.zeros_like(self.marginal_sums)
+        silent_count = (
+            self.valid_row_count - self.public_evidence_valid_row_count
+        )
+        evidence_fraction = (
+            self.public_evidence_valid_row_count / self.valid_row_count
+            if self.valid_row_count
+            else 0.0
+        )
         return {
             "snapshot_count": self.snapshot_count,
             "valid_observer_row_count": self.valid_row_count,
+            "public_evidence_valid_observer_row_count": (
+                self.public_evidence_valid_row_count
+            ),
+            "silent_observer_row_count": silent_count,
+            "silent_observer_row_fraction": 1.0 - evidence_fraction,
+            "public_evidence_subject_fraction": evidence_fraction,
+            "public_evidence_coverage_by_observer": {
+                player: (
+                    float(self.evidence_rows_by_observer[index].item())
+                    / int(self.valid_rows_by_observer[index].item())
+                    if int(self.valid_rows_by_observer[index].item()) > 0
+                    else 0.0
+                )
+                for index, player in enumerate(PLAYER_NAMES)
+            },
             "mean_target_marginal_by_player": {
                 player: float(marginal_means[index].item())
                 for index, player in enumerate(PLAYER_NAMES)
@@ -88,6 +145,15 @@ class _TargetAuditAccumulator:
             ),
             "target_observer_pairwise_tv": _distribution_summary(
                 self.observer_pairwise_tv
+            ),
+            "evidence_conditioned_target_pair_entropy": (
+                _distribution_summary(self.evidence_pair_entropies)
+            ),
+            "evidence_conditioned_target_marginal_spread": (
+                _distribution_summary(self.evidence_marginal_spreads)
+            ),
+            "evidence_conditioned_target_observer_pairwise_tv": (
+                _distribution_summary(self.evidence_observer_pairwise_tv)
             ),
             "absolute_player_marginal_mean_gap": float(
                 (marginal_means.max() - marginal_means.min()).item()
@@ -160,6 +226,18 @@ def audit_training_targets(
         for value in section["overall"]["mean_target_marginal_by_player"].values()
     ):
         raise RuntimeError("target audit produced non-finite player marginals")
+    for split_name in (
+        "train_before_augmentation",
+        "validation_without_augmentation",
+    ):
+        fraction = result[split_name]["overall"][
+            "public_evidence_subject_fraction"
+        ]
+        if fraction < 0.05:
+            raise RuntimeError(
+                f"{split_name} public-evidence coverage is abnormally low: "
+                f"{fraction:.6f}"
+            )
     return result
 
 

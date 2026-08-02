@@ -238,6 +238,21 @@ def public_speech_actions(events: Any) -> list[list[str]]:
     ]
 
 
+def observer_public_action_counts(events: Any) -> tuple[int, ...]:
+    """Count prior public speeches, speech actions, and votes per player."""
+
+    counts = [0] * len(PLAYER_NAMES)
+    for event in normalize_public_events(events):
+        if event["event_type"] == "public_speech":
+            counts[PLAYER_TO_ID[event["speaker"]] - 1] += 1
+            for subject, _action, _object in event["sp_actions"]:
+                counts[PLAYER_TO_ID[subject] - 1] += 1
+        elif event["event_type"] == "vote_result":
+            for vote in event["votes"]:
+                counts[PLAYER_TO_ID[vote["voter"]] - 1] += 1
+    return tuple(counts)
+
+
 def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
     """Project public events into the exact raw-text-free model token content."""
 
@@ -334,6 +349,7 @@ __all__ = [
     "copy_public_events",
     "normalize_public_event",
     "normalize_public_events",
+    "observer_public_action_counts",
     "parse_public_phase",
     "public_event_digest",
     "public_speech_actions",

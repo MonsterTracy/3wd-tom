@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from torch.utils.data import RandomSampler, SequentialSampler
+from torch.utils.data import RandomSampler, SequentialSampler, SubsetRandomSampler
 from transformers import Qwen2Model
 
 import script.twd_tom.train as train_module
@@ -18,8 +18,10 @@ from script.twd_tom.eval import (
 )
 from script.twd_tom.train import (
     TrainingConfig,
+    _effective_subject_mask,
     _forward_batch,
     _move_batch_to_device,
+    _targets_for_loss,
     build_arg_parser,
     build_data_loader,
     build_model,
@@ -28,11 +30,19 @@ from script.twd_tom.train import (
     run_training,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
+from werewolf.models.twd_tom.belief_backbone import (
+    ToMBeliefBackbone,
+    ToMBeliefBackboneConfig,
+)
 from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
 from werewolf.models.twd_tom.schema import (
+    PLAYER_NAMES,
+    SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
+    SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
+from werewolf.models.twd_tom.public_events import observer_public_action_counts
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +61,20 @@ COLLAPSE_DIAGNOSTIC_KEYS = {
 def _source_sample(tom_order: int, split: str) -> dict:
     path = REPO_ROOT / "data" / "qwen25" / f"tom{tom_order}" / f"{split}.jsonl"
     with path.open(encoding="utf-8") as handle:
-        return json.loads(next(handle))
+        for line in handle:
+            sample = json.loads(line)
+            if tom_order == 1:
+                return sample
+            action_counts = observer_public_action_counts(
+                sample["public_events"]
+            )
+            if any(
+                action_counts[index] > 0
+                and sample["belief_status"][player] == "ok"
+                for index, player in enumerate(PLAYER_NAMES)
+            ):
+                return sample
+    raise AssertionError(f"no public-evidence sample found in {path}")
 
 
 def _write_sample(path: Path, sample: dict) -> None:
@@ -180,7 +203,7 @@ def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
     assert train_dataset.enable_cyclic_rotation is True
     assert validation_dataset.enable_cyclic_rotation is False
     assert train_dataset.augmentation_seed == config.seed
-    assert isinstance(train_loader.sampler, RandomSampler)
+    assert isinstance(train_loader.sampler, SubsetRandomSampler)
     assert isinstance(validation_loader.sampler, SequentialSampler)
     validation_before = validation_dataset[0]
     validation_dataset.set_epoch(5)
@@ -335,6 +358,14 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
         assert saved_evaluation["pair_class_count"] == 21
         assert saved_evaluation["model_config"]["pair_class_count"] == 21
         assert "mean_pair_cross_entropy" in evaluation["metrics"]
+        for field in (
+            "observer_event_conditioning",
+            "second_order_subject_supervision",
+        ):
+            assert field not in best
+            assert field not in saved_summary
+            assert field not in history[0]
+            assert field not in saved_evaluation
     else:
         result_payloads = (best, saved_summary, history[0], saved_evaluation)
         assert all(
@@ -371,9 +402,29 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
             == CYCLIC_ROTATION_VERSION
             for payload in result_payloads
         )
+        assert all(
+            payload["observer_event_conditioning"]
+            == SECOND_ORDER_OBSERVER_EVENT_CONDITIONING
+            for payload in result_payloads
+        )
+        assert all(
+            payload["second_order_subject_supervision"]
+            == SECOND_ORDER_SUBJECT_SUPERVISION
+            for payload in result_payloads
+        )
         assert COLLAPSE_DIAGNOSTIC_KEYS <= set(evaluation["metrics"])
         assert COLLAPSE_DIAGNOSTIC_KEYS <= set(best["train_metrics"])
         assert COLLAPSE_DIAGNOSTIC_KEYS <= set(best["validation_metrics"])
+        for metrics in (
+            evaluation["metrics"],
+            best["train_metrics"],
+            best["validation_metrics"],
+        ):
+            assert metrics["public_evidence_valid_subject_count"] >= 1
+            assert metrics["valid_subject_count"] == metrics[
+                "public_evidence_valid_subject_count"
+            ]
+            assert 0 < metrics["public_evidence_subject_fraction"] <= 1
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
@@ -393,8 +444,12 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     output = _forward_batch(model, batch)
     loss = masked_distribution_cross_entropy(
         output["observer_pair_logits"],
-        batch["pair_targets"],
-        batch["subject_mask"],
+        _targets_for_loss(
+            model,
+            batch["pair_targets"],
+            _effective_subject_mask(model, batch),
+        ),
+        _effective_subject_mask(model, batch),
     )
     loss.backward()
     assert output["observer_pair_logits"].shape == (1, 7, 21)
@@ -405,6 +460,60 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     source = inspect.getsource(train_module.train_one_epoch)
     assert source.count("masked_distribution_cross_entropy") == 1
     assert "masked_pair_cross_entropy" not in source
+
+
+def test_effective_subject_mask_is_second_order_evidence_intersection_only():
+    first_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=1,
+    )
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    subject_mask = torch.tensor([[True, True, False, True, False, False, False]])
+    evidence_mask = torch.tensor([[True, False, True, False, False, False, False]])
+    batch = {
+        "subject_mask": subject_mask,
+        "public_evidence_mask": evidence_mask,
+    }
+    assert torch.equal(_effective_subject_mask(first_order, batch), subject_mask)
+    assert torch.equal(
+        _effective_subject_mask(second_order, batch),
+        subject_mask & evidence_mask,
+    )
+
+
+def test_second_order_loss_aggregates_only_public_evidence_rows():
+    logits = torch.zeros((1, 7, 21))
+    targets = torch.zeros_like(logits)
+    targets[0, 0, 0] = 1
+    targets[0, 1, 1] = 1
+    logits[0, 0, 0] = 5
+    logits[0, 1, 1] = -5
+    original_mask = torch.tensor(
+        [[True, True, False, False, False, False, False]]
+    )
+    evidence_mask = torch.tensor(
+        [[True, False, False, False, False, False, False]]
+    )
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    effective = _effective_subject_mask(
+        second_order,
+        {
+            "subject_mask": original_mask,
+            "public_evidence_mask": evidence_mask,
+        },
+    )
+    loss_targets = _targets_for_loss(second_order, targets, effective)
+    assert targets[0, 1, 1] == 1
+    assert loss_targets[0, 1].count_nonzero() == 0
+    actual = masked_distribution_cross_entropy(logits, loss_targets, effective)
+    expected = -torch.log_softmax(logits[0, 0], dim=-1)[0]
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("value", [0, 3, True, None, "1"])
