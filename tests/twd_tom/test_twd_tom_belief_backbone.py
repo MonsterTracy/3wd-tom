@@ -91,20 +91,27 @@ def test_output_contract_and_last_non_padding_pooling(model):
     assert output["hidden_states"][:, 2].count_nonzero().item() == 0
 
 
-def test_second_order_has_one_seven_class_suspicion_output_projection():
+def test_second_order_uses_the_same_single_pair_output_projection():
     second_order = ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=8),
         tom_order=2,
     ).eval()
     with torch.no_grad():
         output = second_order(**make_features())
-    assert second_order.output_projection.out_features == 7
-    assert output["observer_suspicion_logits"].shape == (1, 7, 7)
-    assert output["observer_suspicion_logits"] is output["suspicion_logits"]
-    assert output["suspicion_probabilities"].shape == (1, 7, 7)
-    assert "observer_pair_logits" not in output
-    assert "pair_probabilities" not in output
-    assert "belief_matrix" not in output
+    assert second_order.output_projection.out_features == NUM_WOLF_PAIR_CLASSES
+    assert output["observer_pair_logits"].shape == (1, 7, 21)
+    assert output["observer_pair_logits"] is output["pair_logits"]
+    assert output["pair_probabilities"].shape == (1, 7, 21)
+    assert output["belief_matrix"].shape == (1, 7, 7)
+    torch.testing.assert_close(
+        output["pair_probabilities"].sum(dim=-1),
+        torch.ones((1, 7)),
+    )
+    torch.testing.assert_close(
+        output["belief_matrix"].sum(dim=-1),
+        torch.full((1, 7), 2.0),
+    )
+    assert "observer_suspicion_logits" not in output
     assert not hasattr(second_order, "pair_output_projection")
     assert not hasattr(second_order, "suspicion_output_projection")
 

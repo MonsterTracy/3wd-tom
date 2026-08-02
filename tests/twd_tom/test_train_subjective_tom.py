@@ -28,7 +28,7 @@ from script.twd_tom.train import (
     run_training,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
-from werewolf.models.twd_tom.schema import SUSPICION_TARGET_ENCODING
+from werewolf.models.twd_tom.schema import SECOND_ORDER_TARGET_ENCODING
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,16 +42,6 @@ def _source_sample(tom_order: int, split: str) -> dict:
 
 def _write_sample(path: Path, sample: dict) -> None:
     path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
-
-
-def _contains_key(value, key):
-    if isinstance(value, dict):
-        return key in value or any(
-            _contains_key(nested, key) for nested in value.values()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_key(nested, key) for nested in value)
-    return False
 
 
 def _training_config(
@@ -302,29 +292,30 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     else:
         result_payloads = (best, saved_summary, history[0], saved_evaluation)
         assert all(
-            payload["target_encoding"] == SUSPICION_TARGET_ENCODING
+            payload["target_encoding"] == SECOND_ORDER_TARGET_ENCODING
             for payload in result_payloads
         )
         assert all(
-            payload["output_class_count"] == 7
+            payload["output_class_count"] == 21
             for payload in result_payloads
-        )
-        assert tuple(best["canonical_player_ordering"]) == tuple(
-            f"player{index}" for index in range(1, 8)
         )
         assert all(
-            not _contains_key(payload, "pair_class_count")
+            payload["pair_class_count"] == 21
             for payload in result_payloads
         )
-        assert "pair_ordering" not in best
+        assert all(
+            payload["pair_ordering"]
+            == "global_lexicographic_two_player_combinations"
+            for payload in result_payloads
+        )
         assert "projection_version" not in best
         assert set(evaluation["metrics"]) >= {
-            "mean_suspicion_cross_entropy",
-            "mean_suspicion_kl_divergence",
-            "mean_suspicion_total_variation",
-            "mean_suspicion_mae",
+            "mean_pair_cross_entropy",
+            "mean_pair_kl_divergence",
+            "mean_pair_total_variation",
+            "mean_marginal_mae",
         }
-        assert not any("pair" in name for name in evaluation["metrics"])
+        assert not any("suspicion" in name for name in evaluation["metrics"])
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
@@ -342,15 +333,15 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     model = build_model(config)
     batch = _move_batch_to_device(raw_batch, torch.device("cpu"))
     output = _forward_batch(model, batch)
-    logits_name = (
-        "observer_pair_logits" if tom_order == 1 else "observer_suspicion_logits"
-    )
-    target_name = "pair_targets" if tom_order == 1 else "suspicion_targets"
     loss = masked_distribution_cross_entropy(
-        output[logits_name], batch[target_name], batch["subject_mask"]
+        output["observer_pair_logits"],
+        batch["pair_targets"],
+        batch["subject_mask"],
     )
     loss.backward()
-    assert output[logits_name].shape == (1, 7, 21 if tom_order == 1 else 7)
+    assert output["observer_pair_logits"].shape == (1, 7, 21)
+    assert "observer_suspicion_logits" not in output
+    assert "suspicion_targets" not in batch
     assert torch.isfinite(loss)
     assert model.output_projection.weight.grad is not None
     source = inspect.getsource(train_module.train_one_epoch)

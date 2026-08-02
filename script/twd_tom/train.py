@@ -26,10 +26,7 @@ from werewolf.models.twd_tom.dataset import (
     collate_twd_tom_samples,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
-from werewolf.models.twd_tom.metrics import (
-    compute_subjective_pair_metrics,
-    compute_subjective_suspicion_metrics,
-)
+from werewolf.models.twd_tom.metrics import compute_subjective_pair_metrics
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
     PUBLIC_EVENT_SCHEMA_VERSION,
@@ -37,12 +34,10 @@ from werewolf.models.twd_tom.public_events import (
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import (
-    CANONICAL_PLAYER_ORDERING,
-    NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
     PROJECTION_VERSION,
-    SUSPICION_TARGET_ENCODING,
+    SECOND_ORDER_TARGET_ENCODING,
     TARGET_ENCODING,
 )
 
@@ -246,14 +241,9 @@ def _move_batch_to_device(
         "attention_mask",
         "subject_mask",
     ]
-    target_fields = [
-        field
-        for field in ("pair_targets", "suspicion_targets")
-        if field in batch
-    ]
-    if len(target_fields) != 1:
-        raise ValueError("batch must contain exactly one order-specific target")
-    fields.append(target_fields[0])
+    if "pair_targets" not in batch:
+        raise ValueError("batch must contain pair_targets")
+    fields.append("pair_targets")
     moved = {field: batch[field].to(device) for field in fields}
     for field in ("known_werewolves", "known_non_werewolves"):
         if field in batch:
@@ -286,8 +276,7 @@ def _forward_batch(
 class MetricAccumulator:
     """Aggregate row-weighted training metrics."""
 
-    def __init__(self, *, tom_order: int) -> None:
-        self.tom_order = _tom_order(tom_order)
+    def __init__(self) -> None:
         self.valid_subject_count = 0
         self.loss_sum = 0.0
         self.metric_sums: dict[str, float] = {}
@@ -300,12 +289,11 @@ class MetricAccumulator:
         targets: torch.Tensor,
         subject_mask: torch.Tensor,
     ) -> None:
-        metric_function = (
-            compute_subjective_pair_metrics
-            if self.tom_order == 1
-            else compute_subjective_suspicion_metrics
+        metrics = compute_subjective_pair_metrics(
+            logits,
+            targets,
+            subject_mask,
         )
-        metrics = metric_function(logits, targets, subject_mask)
         valid_count = int(metrics["valid_subject_count"])
         self.valid_subject_count += valid_count
         self.loss_sum += float(loss.detach().item()) * valid_count
@@ -331,14 +319,11 @@ class MetricAccumulator:
         return result
 
 
-def _order_specific_distribution(
-    model: ToMBeliefBackbone,
+def _pair_distribution(
     output: Mapping[str, torch.Tensor],
     batch: Mapping[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if model.tom_order == 1:
-        return output["observer_pair_logits"], batch["pair_targets"]
-    return output["observer_suspicion_logits"], batch["suspicion_targets"]
+    return output["observer_pair_logits"], batch["pair_targets"]
 
 
 def train_one_epoch(
@@ -350,12 +335,12 @@ def train_one_epoch(
     gradient_clip_norm: float,
 ) -> dict[str, int | float]:
     model.train()
-    accumulator = MetricAccumulator(tom_order=model.tom_order)
+    accumulator = MetricAccumulator()
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         optimizer.zero_grad(set_to_none=True)
         output = _forward_batch(model, batch)
-        logits, targets = _order_specific_distribution(model, output, batch)
+        logits, targets = _pair_distribution(output, batch)
         loss = masked_distribution_cross_entropy(
             logits,
             targets,
@@ -382,11 +367,11 @@ def evaluate_model(
     device: torch.device,
 ) -> dict[str, int | float]:
     model.eval()
-    accumulator = MetricAccumulator(tom_order=model.tom_order)
+    accumulator = MetricAccumulator()
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         output = _forward_batch(model, batch)
-        logits, targets = _order_specific_distribution(model, output, batch)
+        logits, targets = _pair_distribution(output, batch)
         loss = masked_distribution_cross_entropy(
             logits,
             targets,
@@ -414,21 +399,17 @@ def checkpoint_task_contract(tom_order: int) -> dict[str, Any]:
             "pair_ordering": PAIR_ORDERING,
         }
     return {
-        "target_encoding": SUSPICION_TARGET_ENCODING,
-        "output_class_count": NUM_PLAYERS,
-        "canonical_player_ordering": CANONICAL_PLAYER_ORDERING,
+        "target_encoding": SECOND_ORDER_TARGET_ENCODING,
+        "output_class_count": NUM_WOLF_PAIR_CLASSES,
+        "pair_class_count": NUM_WOLF_PAIR_CLASSES,
+        "pair_ordering": PAIR_ORDERING,
     }
 
 
 def result_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
-    """Serialize model fields without a false second-order pair contract."""
+    """Serialize the shared 21-pair model construction fields."""
 
-    if model.tom_order == 1:
-        return asdict(model.config)
-    return {
-        "num_players": model.config.num_players,
-        "max_seq_len": model.config.max_seq_len,
-    }
+    return asdict(model.config)
 
 
 def checkpoint_payload(

@@ -61,13 +61,23 @@ def test_shapes_targets_and_mask_are_strict():
         masked_distribution_cross_entropy(logits, targets.zero_(), mask.long())
 
 
-@pytest.mark.parametrize("class_count", [7, 21])
-def test_same_soft_target_cross_entropy_supports_both_orders(class_count):
-    logits = torch.zeros((1, 7, class_count), requires_grad=True)
+@pytest.mark.parametrize("tom_order", [1, 2])
+def test_same_pair_cross_entropy_supports_both_orders(tom_order):
+    logits = torch.zeros((1, 7, 21), requires_grad=True)
     targets = torch.zeros_like(logits)
-    targets[0, 4].fill_(1.0 / class_count)
+    targets[0, 4].fill_(1.0 / 21)
     mask = torch.zeros((1, 7), dtype=torch.bool)
     mask[0, 4] = True
     loss = masked_distribution_cross_entropy(logits, targets, mask)
-    assert loss.item() == pytest.approx(math.log(class_count))
+    assert loss.item() == pytest.approx(math.log(21))
     loss.backward()
+
+
+def test_seven_class_distribution_is_not_a_formal_loss_space():
+    logits = torch.zeros((1, 7, 7))
+    targets = torch.zeros_like(logits)
+    targets[0, 0, 0] = 1.0
+    mask = torch.zeros((1, 7), dtype=torch.bool)
+    mask[0, 0] = True
+    with pytest.raises(ValueError, match="21 pair classes"):
+        masked_distribution_cross_entropy(logits, targets, mask)

@@ -7,7 +7,8 @@ seven-player Werewolf: two Werewolves, one Seer, one Witch, and three
 Villagers. First-order ToM predicts a distribution over the 21 canonical
 two-Werewolf pairs from public history plus the current observer's private
 knowledge. Second-order ToM predicts, from public history alone, each modeled
-observer's suspicion distribution over the seven canonical players. Dead
+observer's internal distribution over the same 21 two-Werewolf worlds. The
+two orders differ only in model input scope, not native belief space. Dead
 players remain valid identity candidates but do not produce reports. The
 three-way decision subsystem is outside this contract.
 
@@ -128,11 +129,12 @@ The formal Dataset reads the current annotated split files directly. With
 `--tom-order 1` it requires one current speaker observer, exposes only that
 observer's two seven-player private-knowledge vectors, and projects the report
 to the canonical 21 pair classes. With `--tom-order 2` it may supervise
-multiple observers and exposes no private-knowledge model tensors. For each
-valid second-order observer with suspicion set `S`, each player in a nonempty
-`S` receives probability `1 / |S|`; an empty `S` becomes the uniform
-seven-player distribution. The observer itself is not excluded. `known_*`
-remains audit metadata and does not alter this target.
+multiple observers and exposes no private-knowledge model tensors. Each valid
+second-order observer's report is projected to the same canonical 21 pair
+classes using that observer's `known_werewolves` and
+`known_non_werewolves`. Those fields are supervision-side target-construction
+and audit data only: they do not appear in a second-order batch's model inputs,
+do not enter `forward`, and do not mask logits.
 
 ## Game-level dataset split
 
@@ -191,6 +193,37 @@ backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
 last non-padding event state is added to each observer embedding. First-order
 rows also add one linear projection of that observer's private knowledge and
 the single output projection produces `[B,7,21]` pair logits. Second-order rows
-remain public-only and their order-specific output projection produces
-`[B,7,7]` player-suspicion logits. Both orders use the same masked soft-target
-categorical cross entropy. Three-way decision remains outside this contract.
+remain public-only and the same 21-class projection produces `[B,7,21]` pair
+logits. Both orders use the same masked soft-target categorical cross entropy.
+
+For pair probabilities `q[i, omega]`, the sole player-level projection is
+
+`m[i,j] = sum_{omega containing player j} q[i,omega]`.
+
+The resulting marginal matrix has shape `[7,7]`; each value is the probability
+that the corresponding player belongs to the two-Werewolf pair, so every row
+sums to two. It is not a seven-class softmax, is not divided by two, and its
+diagonal is not masked. A diagonal entry means that the modeled observer's
+predicted pair belief includes that observer as a Werewolf; it is not a
+separate notion of self-suspicion. The joint pair distribution cannot in
+general be recovered from these marginals. Three-way decision remains outside
+this contract.
+
+## Online second-order shadow inference
+
+`run_random.py` can load one explicit second-order checkpoint and write an
+independent JSONL prediction log. The three shadow arguments—checkpoint,
+device, and output path—must be supplied together. The output path must be new
+and its parent directory must already exist. The optional `--random_seed`
+exposes the runtime's existing deterministic role/profile assignment control;
+shadow mode never changes it implicitly.
+
+At each `speech` or `speech_pk` turn, inference runs after the matching
+`turn_start` has entered `public_events` and before the acting agent generates
+its speech. The model receives only the canonical structured public-event
+prefix. It produces a `[7,21]` pair-probability matrix whose rows sum to one;
+the fixed incidence projection above produces a `[7,7]` wolf-marginal matrix
+whose rows sum to two. Both are logged without logits, roles, private
+knowledge, or labels. No legacy `suspicion_matrix` alias is written. The result
+is not added to observations, prompts, actions, votes, environment state, or
+the original game log.

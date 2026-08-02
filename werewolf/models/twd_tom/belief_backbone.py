@@ -18,9 +18,8 @@ pretrained weights or tokenizer are used.
 The final valid hidden state is combined with one observer embedding per
 player. First-order samples may additionally provide the current observer's
 two seven-player hard-knowledge vectors. A single linear projection maps those
-vectors into the hidden size. The sole output projection is fixed at model
-construction to 21 pair classes for first-order ToM or seven player-suspicion
-classes for second-order ToM.
+vectors into the hidden size. Both ToM orders use the same sole 21-class pair
+output projection; only first-order inference consumes private knowledge.
 
 This module does not consume raw public text, true roles, truth-derived
 labels, observer IDs, alive masks, or private event fields.
@@ -195,11 +194,7 @@ class ToMBeliefBackbone(nn.Module):
 
         self.output_projection = nn.Linear(
             HIDDEN_SIZE,
-            (
-                self.config.pair_class_count
-                if self.tom_order == 1
-                else self.config.num_players
-            ),
+            self.config.pair_class_count,
         )
 
         self._reset_parameters()
@@ -259,7 +254,7 @@ class ToMBeliefBackbone(nn.Module):
         known_werewolves: torch.Tensor | None = None,
         known_non_werewolves: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Encode actions and predict the order-specific observer distribution.
+        """Encode actions and predict observer pair distributions.
 
         Args:
             subject_ids: Integer tensor with shape ``[B, T]``.
@@ -271,9 +266,9 @@ class ToMBeliefBackbone(nn.Module):
 
         Returns:
             A dictionary with ``hidden_states`` (``[B, T, 256]``),
-            ``pooled_hidden_state`` (``[B, 256]``), and the order-specific
-            observer logits and probabilities. First-order output has 21 pair
-            classes; second-order output has seven player-suspicion classes.
+            ``pooled_hidden_state`` (``[B, 256]``), observer pair logits and
+            probabilities with shape ``[B, 7, 21]``, and the derived player
+            marginals with shape ``[B, 7, 7]``.
         """
 
         (
@@ -373,31 +368,17 @@ class ToMBeliefBackbone(nn.Module):
 
         logits = self.output_projection(observer_hidden_states)
         probabilities = torch.softmax(logits, dim=-1)
-        result = {
+        return {
             "hidden_states": hidden_states,
             "pooled_hidden_state": pooled_hidden_state,
             "observer_hidden_states": observer_hidden_states,
+            "observer_pair_logits": logits,
+            "pair_logits": logits,
+            "pair_probabilities": probabilities,
+            "belief_matrix": pair_probabilities_to_belief_marginals(
+                probabilities
+            ),
         }
-        if self.tom_order == 1:
-            result.update(
-                {
-                    "observer_pair_logits": logits,
-                    "pair_logits": logits,
-                    "pair_probabilities": probabilities,
-                    "belief_matrix": pair_probabilities_to_belief_marginals(
-                        probabilities
-                    ),
-                }
-            )
-        else:
-            result.update(
-                {
-                    "observer_suspicion_logits": logits,
-                    "suspicion_logits": logits,
-                    "suspicion_probabilities": probabilities,
-                }
-            )
-        return result
 
     def _validate_private_knowledge(
         self,

@@ -14,8 +14,10 @@ from script.twd_tom.eval import (
     evaluate_checkpoint,
 )
 from script.twd_tom.train import TrainingConfig, build_model, checkpoint_payload
-from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
-from werewolf.models.twd_tom.schema import SUSPICION_TARGET_ENCODING
+from werewolf.models.twd_tom.schema import (
+    PAIR_ORDERING,
+    SECOND_ORDER_TARGET_ENCODING,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,33 +88,28 @@ def test_incompatible_state_dict_is_rejected(tmp_path):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 
-def test_new_second_order_checkpoint_has_strict_suspicion_contract(tmp_path):
+def test_new_second_order_checkpoint_has_strict_pair_contract(tmp_path):
     checkpoint = make_checkpoint(tmp_path, tom_order=2)
-    assert checkpoint["target_encoding"] == SUSPICION_TARGET_ENCODING
-    assert checkpoint["output_class_count"] == 7
-    assert tuple(checkpoint["canonical_player_ordering"]) == tuple(
-        f"player{index}" for index in range(1, 8)
-    )
-    assert "pair_class_count" not in checkpoint
-    assert "pair_ordering" not in checkpoint
+    assert checkpoint["target_encoding"] == SECOND_ORDER_TARGET_ENCODING
+    assert checkpoint["output_class_count"] == 21
+    assert checkpoint["pair_class_count"] == 21
+    assert checkpoint["pair_ordering"] == PAIR_ORDERING
     assert "projection_version" not in checkpoint
-    assert "pair_class_count" not in checkpoint["model_config"]
+    assert checkpoint["model_config"]["pair_class_count"] == 21
 
 
-def test_order_specific_result_model_config_excludes_second_order_pair_count(
-    tmp_path,
-):
+def test_both_result_model_configs_record_pair_count(tmp_path):
     first = make_checkpoint(tmp_path / "first", tom_order=1)
     second = make_checkpoint(tmp_path / "second", tom_order=2)
     assert first["model_config"]["pair_class_count"] == 21
-    assert second["output_class_count"] == 7
-    assert "pair_class_count" not in second["model_config"]
+    assert second["output_class_count"] == 21
+    assert second["model_config"]["pair_class_count"] == 21
 
 
-def test_old_second_order_pair_checkpoint_is_rejected(tmp_path):
-    checkpoint = make_checkpoint(tmp_path, tom_order=1)
-    checkpoint["tom_order"] = 2
-    checkpoint["model_input_scope"] = TOM_INPUT_SCOPES[2]
+def test_old_second_order_seven_class_checkpoint_is_rejected(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    checkpoint["target_encoding"] = "classic7_player_suspicion_distribution_v1"
+    checkpoint["output_class_count"] = 7
     with pytest.raises(ValueError, match="target_encoding"):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 

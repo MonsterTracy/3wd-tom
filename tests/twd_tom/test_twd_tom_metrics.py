@@ -6,10 +6,7 @@ import math
 import pytest
 import torch
 
-from werewolf.models.twd_tom.metrics import (
-    compute_subjective_pair_metrics,
-    compute_subjective_suspicion_metrics,
-)
+from werewolf.models.twd_tom.metrics import compute_subjective_pair_metrics
 from werewolf.models.twd_tom.schema import (
     NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
@@ -119,26 +116,13 @@ def test_pair_metrics_api_has_three_explicit_parameters():
     )
 
 
-def test_second_order_suspicion_metrics_are_direct_player_distributions():
-    logits = torch.zeros((1, NUM_PLAYERS, NUM_PLAYERS))
+@pytest.mark.parametrize("tom_order", [1, 2])
+def test_both_orders_use_only_pair_and_marginal_metrics(tom_order):
+    logits = torch.zeros((1, NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES))
     targets = torch.zeros_like(logits)
-    targets[0, 2, 1] = 0.5
-    targets[0, 2, 5] = 0.5
+    targets[0, 2, 5] = 1.0
     mask = torch.zeros((1, NUM_PLAYERS), dtype=torch.bool)
     mask[0, 2] = True
-    metrics = compute_subjective_suspicion_metrics(logits, targets, mask)
-    assert set(metrics) == {
-        "valid_subject_count",
-        "mean_suspicion_cross_entropy",
-        "mean_suspicion_kl_divergence",
-        "mean_suspicion_total_variation",
-        "mean_suspicion_mae",
-    }
-    assert metrics["mean_suspicion_cross_entropy"] == pytest.approx(math.log(7))
-    assert metrics["mean_suspicion_kl_divergence"] == pytest.approx(
-        math.log(7 / 2)
-    )
-    assert metrics["mean_suspicion_total_variation"] == pytest.approx(5 / 7)
-    expected_mae = (2 * abs(0.5 - 1 / 7) + 5 / 7) / 7
-    assert metrics["mean_suspicion_mae"] == pytest.approx(expected_mae)
-    assert not any("pair" in key or "marginal" in key for key in metrics)
+    metrics = compute_subjective_pair_metrics(logits, targets, mask)
+    assert set(metrics) == EXPECTED_KEYS
+    assert not any("suspicion" in key for key in metrics)

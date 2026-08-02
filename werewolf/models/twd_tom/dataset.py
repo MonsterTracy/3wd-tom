@@ -34,7 +34,6 @@ from werewolf.models.twd_tom.schema import (
     NUM_WOLF_PAIR_CLASSES,
     PLAYER_NAMES,
     PLAYER_TO_ID,
-    canonicalize_player_set,
     normalize_player,
     validate_player_suspicion,
 )
@@ -161,23 +160,6 @@ def _require_non_empty_text(value: Any, *, field_name: str) -> str:
     return value
 
 
-def _suspicion_distribution(value: Any) -> torch.Tensor:
-    """Encode one suspicion set without consulting private knowledge."""
-
-    players = canonicalize_player_set(
-        value,
-        field_name="suspected_werewolves",
-    )
-    target = torch.zeros(NUM_PLAYERS, dtype=torch.float64)
-    if not players:
-        target.fill_(1.0 / NUM_PLAYERS)
-        return target
-    probability = 1.0 / len(players)
-    for player in players:
-        target[PLAYER_TO_ID[player] - 1] = probability
-    return target
-
-
 def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
     """Validate one current raw training record without repairing it."""
 
@@ -251,7 +233,6 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         for field_name in mapping_fields
     }
 
-    target_field = "_pair_targets" if tom_order == 1 else "_suspicion_targets"
     targets: dict[str, torch.Tensor | None] = {}
     for subject in sorted(expected_subjects, key=PLAYER_TO_ID.__getitem__):
         known_wolves = mappings["known_werewolves"][subject]
@@ -273,24 +254,21 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
                 raise ValueError(f"{subject} status=ok requires null belief error")
             if not isinstance(suspicion, list):
                 raise ValueError(f"{subject} status=ok requires a suspicion list")
-            if tom_order == 1:
-                normalized_suspicion = validate_player_suspicion(
-                    suspicion,
-                    closed_wolves,
-                    closed_non_wolves,
+            normalized_suspicion = validate_player_suspicion(
+                suspicion,
+                closed_wolves,
+                closed_non_wolves,
+            )
+            if suspicion != normalized_suspicion:
+                raise ValueError(
+                    f"{subject} suspected_werewolves must use canonical order"
                 )
-                if suspicion != normalized_suspicion:
-                    raise ValueError(
-                        f"{subject} suspected_werewolves must use canonical order"
-                    )
-                targets[subject] = suspicion_set_to_pair_target(
-                    normalized_suspicion,
-                    closed_wolves,
-                    closed_non_wolves,
-                    dtype=torch.float64,
-                )
-            else:
-                targets[subject] = _suspicion_distribution(suspicion)
+            targets[subject] = suspicion_set_to_pair_target(
+                normalized_suspicion,
+                closed_wolves,
+                closed_non_wolves,
+                dtype=torch.float64,
+            )
         else:
             if suspicion is not None:
                 raise ValueError(
@@ -364,7 +342,7 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
     normalized["public_events"] = public_events
     for field_name, value in mappings.items():
         normalized[field_name] = value
-    normalized[target_field] = targets
+    normalized["_pair_targets"] = targets
     return normalized
 
 
@@ -445,17 +423,12 @@ class TWDToMDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
         features = self.feature_builder.encode_events(sample["public_events"])
-        if self.tom_order == 1:
-            target_name = "pair_targets"
-            stored_target_name = "_pair_targets"
-            target_width = NUM_WOLF_PAIR_CLASSES
-        else:
-            target_name = "suspicion_targets"
-            stored_target_name = "_suspicion_targets"
-            target_width = NUM_PLAYERS
-        targets = torch.zeros((NUM_PLAYERS, target_width), dtype=self.target_dtype)
+        targets = torch.zeros(
+            (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES),
+            dtype=self.target_dtype,
+        )
         subject_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
-        for subject, target in sample[stored_target_name].items():
+        for subject, target in sample["_pair_targets"].items():
             if target is None:
                 continue
             subject_index = PLAYER_TO_ID[subject] - 1
@@ -478,7 +451,7 @@ class TWDToMDataset(Dataset):
         }
         item: dict[str, Any] = {
             **features,
-            target_name: targets,
+            "pair_targets": targets,
             "subject_mask": subject_mask,
             "metadata": metadata,
         }
@@ -506,9 +479,8 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
     has_private = "known_werewolves" in batch[0]
     if any(("known_werewolves" in item) != has_private for item in batch):
         raise ValueError("a batch cannot mix first- and second-order samples")
-    target_name = "pair_targets" if has_private else "suspicion_targets"
-    if any(target_name not in item for item in batch):
-        raise ValueError("a batch cannot mix first- and second-order targets")
+    if any("pair_targets" not in item for item in batch):
+        raise ValueError("every sample must contain pair_targets")
 
     feature_fields = (
         "subject_ids",
@@ -533,7 +505,7 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
 
     result: dict[str, Any] = {
         **padded,
-        target_name: torch.stack([item[target_name] for item in batch]),
+        "pair_targets": torch.stack([item["pair_targets"] for item in batch]),
         "subject_mask": torch.stack([item["subject_mask"] for item in batch]),
         "metadata": {
             field_name: [deepcopy(item["metadata"][field_name]) for item in batch]

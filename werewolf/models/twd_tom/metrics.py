@@ -67,43 +67,4 @@ def compute_subjective_pair_metrics(
     }
 
 
-@torch.no_grad()
-def compute_subjective_suspicion_metrics(
-    suspicion_logits: torch.Tensor,
-    suspicion_targets: torch.Tensor,
-    subject_mask: torch.Tensor,
-) -> dict[str, int | float]:
-    """Compare seven-player suspicion distributions on supervised rows."""
-
-    per_subject_kl = masked_distribution_kl_divergence(
-        suspicion_logits,
-        suspicion_targets,
-        subject_mask,
-        reduction="none",
-    )
-    valid_mask = subject_mask.to(device=suspicion_logits.device, dtype=torch.bool)
-    targets = suspicion_targets.to(
-        device=suspicion_logits.device,
-        dtype=suspicion_logits.dtype,
-    )
-    log_probabilities = F.log_softmax(suspicion_logits, dim=-1)
-    probabilities = log_probabilities.exp()
-    cross_entropy = -(targets * log_probabilities).sum(dim=-1)
-    total_variation = 0.5 * (probabilities - targets).abs().sum(dim=-1)
-    mae = (probabilities - targets).abs().mean(dim=-1)
-    return {
-        "valid_subject_count": int(valid_mask.sum().item()),
-        "mean_suspicion_cross_entropy": _masked_mean(cross_entropy, valid_mask),
-        "mean_suspicion_kl_divergence": _masked_mean(per_subject_kl, valid_mask),
-        "mean_suspicion_total_variation": _masked_mean(
-            total_variation,
-            valid_mask,
-        ),
-        "mean_suspicion_mae": _masked_mean(mae, valid_mask),
-    }
-
-
-__all__ = [
-    "compute_subjective_pair_metrics",
-    "compute_subjective_suspicion_metrics",
-]
+__all__ = ["compute_subjective_pair_metrics"]

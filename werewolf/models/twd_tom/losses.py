@@ -162,10 +162,10 @@ def _validate_distribution_loss_inputs(
         class_count,
     )
 
-    if class_count not in (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES):
+    if class_count != NUM_WOLF_PAIR_CLASSES:
         raise ValueError(
-            "logits final dimension must contain 7 suspicion classes "
-            "or 21 pair classes"
+            f"logits final dimension must contain {NUM_WOLF_PAIR_CLASSES} "
+            "pair classes"
         )
 
     if tuple(logits.shape) != expected_shape:

@@ -35,6 +35,9 @@ from werewolf.models.twd_tom.collector import (
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
 )
+from werewolf.models.twd_tom.shadow import (
+    SecondOrderToMShadow,
+)
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
@@ -72,6 +75,7 @@ def eval(
     roles_,
     sample_collector=None,
     call_audit=None,
+    tom2_shadow=None,
 ):
     """Run one game and optionally collect subjective ToM samples.
 
@@ -101,19 +105,26 @@ def eval(
         trigger = getattr(env, "phase", None)
 
         if (
-            sample_collector is not None
-            and trigger in PUBLIC_SPEECH_EVENTS
+            trigger in PUBLIC_SPEECH_EVENTS
         ):
-            sample_collector.record(
-                env,
-                step_idx=step_idx,
-                trigger=trigger,
-                phase=action_phase,
-                speaker_id=current_act_idx,
-                observer_ids=(
-                    _alive_observer_ids(env)
-                ),
-            )
+            if tom2_shadow is not None:
+                tom2_shadow.record(
+                    step_idx=step_idx,
+                    phase=action_phase,
+                    speaker_id=current_act_idx,
+                    public_events=env.public_events,
+                )
+            if sample_collector is not None:
+                sample_collector.record(
+                    env,
+                    step_idx=step_idx,
+                    trigger=trigger,
+                    phase=action_phase,
+                    speaker_id=current_act_idx,
+                    observer_ids=(
+                        _alive_observer_ids(env)
+                    ),
+                )
 
         audit_context = (
             call_audit.gameplay_context(
@@ -766,6 +777,11 @@ def main_cli(args):
         log_save_path=(
             args.log_save_path
         ),
+        random_seed=getattr(
+            args,
+            "random_seed",
+            None,
+        ),
         backends=backend_map,
     )
 
@@ -805,6 +821,7 @@ def main_cli(args):
 
     begin = time.time()
     sample_collector = None
+    tom2_shadow = None
 
     sample_path = getattr(
         args,
@@ -812,22 +829,30 @@ def main_cli(args):
         None,
     )
 
-    if sample_path is not None:
-        game_id = os.path.basename(
-            os.path.normpath(
-                args.log_save_path
-            )
+    game_id = os.path.basename(
+        os.path.normpath(
+            args.log_save_path
         )
-
-        sample_collector = (
-            build_twd_tom_sample_collector(
-                agent_list=agent_list,
-                output_path=sample_path,
-                game_id=game_id,
-            )
-        )
+    )
+    shadow_options = _resolve_tom2_shadow_options(args)
 
     try:
+        if sample_path is not None:
+            sample_collector = (
+                build_twd_tom_sample_collector(
+                    agent_list=agent_list,
+                    output_path=sample_path,
+                    game_id=game_id,
+                )
+            )
+        if shadow_options is not None:
+            checkpoint_path, device, output_path = shadow_options
+            tom2_shadow = SecondOrderToMShadow(
+                checkpoint_path=checkpoint_path,
+                device=device,
+                output_path=output_path,
+                game_id=game_id,
+            )
         result = eval(
             env,
             agent_list,
@@ -835,10 +860,13 @@ def main_cli(args):
             sample_collector=(
                 sample_collector
             ),
+            tom2_shadow=tom2_shadow,
         )
     finally:
         if sample_collector is not None:
             sample_collector.close()
+        if tom2_shadow is not None:
+            tom2_shadow.close()
 
     print(
         time.time() - begin,
@@ -873,6 +901,12 @@ def build_arg_parser() -> (
     )
 
     parser.add_argument(
+        "--random_seed",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
         "--twd_tom_sample_path",
         type=str,
         default=None,
@@ -882,7 +916,43 @@ def build_arg_parser() -> (
         ),
     )
 
+    parser.add_argument(
+        "--twd_tom2_shadow_checkpoint",
+        type=str,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--twd_tom2_shadow_device",
+        type=str,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--twd_tom2_shadow_output_path",
+        type=str,
+        default=None,
+    )
+
     return parser
+
+
+def _resolve_tom2_shadow_options(args):
+    values = (
+        getattr(args, "twd_tom2_shadow_checkpoint", None),
+        getattr(args, "twd_tom2_shadow_device", None),
+        getattr(args, "twd_tom2_shadow_output_path", None),
+    )
+    if values == (None, None, None):
+        return None
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError(
+            "second-order shadow checkpoint, device, and output path "
+            "must be provided together"
+        )
+    if values[1] == "auto":
+        raise ValueError("second-order shadow device must be explicit")
+    return values
 
 
 if __name__ == "__main__":

@@ -182,3 +182,13 @@ def test_marginals_have_shape_and_valid_rows_sum_to_two():
     marginals = pair_probabilities_to_belief_marginals(probabilities)
     assert marginals.shape == (2, 7, 7)
     assert torch.allclose(marginals.sum(-1), torch.full((2, 7), 2.0))
+
+
+def test_one_hot_pair_projects_to_two_players_without_masking_diagonal():
+    probabilities = torch.zeros((1, 7, 21))
+    probabilities[0, 0, 0] = 1.0
+    marginals = pair_probabilities_to_belief_marginals(probabilities)
+    assert marginals[0, 0].tolist() == pytest.approx(
+        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    assert marginals[0, 0, 0].item() == pytest.approx(1.0)
