@@ -2,13 +2,14 @@
 
 ## Research target
 
-The ToM subsystem collects second-order multi-agent suspicion in fixed-role,
+The ToM subsystem collects observer-specific suspicion in fixed-role,
 seven-player Werewolf: two Werewolves, one Seer, one Witch, and three
-Villagers. For every alive observer, it records which players that observer
-currently considers relatively more suspicious. A separate deterministic
-offline projection maps these reports to beliefs over the original two
-Werewolves. Dead players remain valid identity candidates but do not produce
-reports. The three-way decision subsystem is outside this contract.
+Villagers. First-order ToM predicts a distribution over the 21 canonical
+two-Werewolf pairs from public history plus the current observer's private
+knowledge. Second-order ToM predicts, from public history alone, each modeled
+observer's suspicion distribution over the seven canonical players. Dead
+players remain valid identity candidates but do not produce reports. The
+three-way decision subsystem is outside this contract.
 
 ## Time and information boundary
 
@@ -88,7 +89,7 @@ pair-support reporter remains only in Git history and has no runtime parser
 or fallback. Raw JSONL stores `suspected_werewolves` and does not create pair
 support, pair targets, or marginals.
 
-## Offline pair projection
+## Audit-only offline pair projection
 
 The sole current projected schema is
 `classic7_pre_speech_suspicion_pair_distribution_v2`, produced explicitly
@@ -120,15 +121,18 @@ Projected JSONL retains the raw suspicion and audit metadata and adds
 `pair_targets`, projection metadata, and deterministic-encoding flags.
 Non-`ok` observers keep their status and error and receive a null target.
 Projection and split utilities continue to validate that stored targets match
-the declared projection. They are not the formal model-training input.
+the declared projection. They are not the formal model-training input and do
+not define the second-order output space.
 
-The formal Dataset reads the current annotated raw files directly. With
-`--tom-order 1` it selects `data/qwen25/raw_tom.jsonl`, requires one current
-speaker observer, and exposes only that observer's two seven-player private
-knowledge vectors. With `--tom-order 2` it selects
-`data/qwen25/raw_tom2.jsonl`, may supervise multiple observers, and exposes no
-private-knowledge model tensors. Both orders project `suspected_werewolves`
-to the same canonical 21 pair classes in memory.
+The formal Dataset reads the current annotated split files directly. With
+`--tom-order 1` it requires one current speaker observer, exposes only that
+observer's two seven-player private-knowledge vectors, and projects the report
+to the canonical 21 pair classes. With `--tom-order 2` it may supervise
+multiple observers and exposes no private-knowledge model tensors. For each
+valid second-order observer with suspicion set `S`, each player in a nonempty
+`S` receives probability `1 / |S|`; an empty `S` becomes the uniform
+seven-player distribution. The observer itself is not excluded. `known_*`
+remains audit metadata and does not alter this target.
 
 ## Game-level dataset split
 
@@ -185,8 +189,8 @@ The model input is the structured `public_events` projection. Its sole
 backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
 `inputs_embeds`; it never loads pretrained weights or uses a tokenizer. The
 last non-padding event state is added to each observer embedding. First-order
-rows also add one linear projection of that observer's private knowledge;
-second-order rows remain public-only. The observer pair head outputs
-`[B,7,21]`; `[B,7,7]` membership marginals are derived deterministically, and
-training uses masked soft-target cross entropy. Three-way decision remains
-outside this contract.
+rows also add one linear projection of that observer's private knowledge and
+the single output projection produces `[B,7,21]` pair logits. Second-order rows
+remain public-only and their order-specific output projection produces
+`[B,7,7]` player-suspicion logits. Both orders use the same masked soft-target
+categorical cross entropy. Three-way decision remains outside this contract.

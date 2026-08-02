@@ -14,6 +14,8 @@ from script.twd_tom.eval import (
     evaluate_checkpoint,
 )
 from script.twd_tom.train import TrainingConfig, build_model, checkpoint_payload
+from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
+from werewolf.models.twd_tom.schema import SUSPICION_TARGET_ENCODING
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,11 +44,13 @@ def make_checkpoint(tmp_path, tom_order=1):
     )
 
 
-def test_qwen2_checkpoint_restores_strictly(tmp_path):
-    checkpoint = make_checkpoint(tmp_path)
+@pytest.mark.parametrize("tom_order", [1, 2])
+def test_qwen2_checkpoint_restores_strictly(tmp_path, tom_order):
+    checkpoint = make_checkpoint(tmp_path, tom_order=tom_order)
     restored = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
     assert isinstance(restored.transformer, Qwen2Model)
     assert restored.config.max_seq_len == 64
+    assert restored.tom_order == tom_order
     for name, expected in checkpoint["model_state_dict"].items():
         torch.testing.assert_close(restored.state_dict()[name], expected)
 
@@ -79,6 +83,27 @@ def test_incompatible_state_dict_is_rejected(tmp_path):
     checkpoint = make_checkpoint(tmp_path)
     checkpoint["model_state_dict"].pop("output_projection.bias")
     with pytest.raises(ValueError, match="state_dict"):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+def test_new_second_order_checkpoint_has_strict_suspicion_contract(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    assert checkpoint["target_encoding"] == SUSPICION_TARGET_ENCODING
+    assert checkpoint["output_class_count"] == 7
+    assert tuple(checkpoint["canonical_player_ordering"]) == tuple(
+        f"player{index}" for index in range(1, 8)
+    )
+    assert "pair_class_count" not in checkpoint
+    assert "pair_ordering" not in checkpoint
+    assert "projection_version" not in checkpoint
+    assert "pair_class_count" not in checkpoint["model_config"]
+
+
+def test_old_second_order_pair_checkpoint_is_rejected(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=1)
+    checkpoint["tom_order"] = 2
+    checkpoint["model_input_scope"] = TOM_INPUT_SCOPES[2]
+    with pytest.raises(ValueError, match="target_encoding"):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 

@@ -25,8 +25,11 @@ from werewolf.models.twd_tom.dataset import (
     TWDToMDataset,
     collate_twd_tom_samples,
 )
-from werewolf.models.twd_tom.losses import masked_pair_cross_entropy
-from werewolf.models.twd_tom.metrics import compute_subjective_pair_metrics
+from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
+from werewolf.models.twd_tom.metrics import (
+    compute_subjective_pair_metrics,
+    compute_subjective_suspicion_metrics,
+)
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
     PUBLIC_EVENT_SCHEMA_VERSION,
@@ -34,9 +37,12 @@ from werewolf.models.twd_tom.public_events import (
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import (
+    CANONICAL_PLAYER_ORDERING,
+    NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
     PROJECTION_VERSION,
+    SUSPICION_TARGET_ENCODING,
     TARGET_ENCODING,
 )
 
@@ -161,7 +167,8 @@ def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
     """Build the single fixed Qwen2 backbone."""
 
     return ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(max_seq_len=config.max_seq_len)
+        ToMBeliefBackboneConfig(max_seq_len=config.max_seq_len),
+        tom_order=config.tom_order,
     )
 
 
@@ -229,7 +236,7 @@ def _move_batch_to_device(
     batch: Mapping[str, Any],
     device: torch.device,
 ) -> dict[str, torch.Tensor]:
-    fields = (
+    fields = [
         "subject_ids",
         "action_ids",
         "object_ids",
@@ -237,9 +244,16 @@ def _move_batch_to_device(
         "phase_ids",
         "day_values",
         "attention_mask",
-        "pair_targets",
         "subject_mask",
-    )
+    ]
+    target_fields = [
+        field
+        for field in ("pair_targets", "suspicion_targets")
+        if field in batch
+    ]
+    if len(target_fields) != 1:
+        raise ValueError("batch must contain exactly one order-specific target")
+    fields.append(target_fields[0])
     moved = {field: batch[field].to(device) for field in fields}
     for field in ("known_werewolves", "known_non_werewolves"):
         if field in batch:
@@ -272,7 +286,8 @@ def _forward_batch(
 class MetricAccumulator:
     """Aggregate row-weighted training metrics."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tom_order: int) -> None:
+        self.tom_order = _tom_order(tom_order)
         self.valid_subject_count = 0
         self.loss_sum = 0.0
         self.metric_sums: dict[str, float] = {}
@@ -281,13 +296,16 @@ class MetricAccumulator:
         self,
         *,
         loss: torch.Tensor,
-        pair_logits: torch.Tensor,
-        pair_targets: torch.Tensor,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
         subject_mask: torch.Tensor,
     ) -> None:
-        metrics = compute_subjective_pair_metrics(
-            pair_logits, pair_targets, subject_mask
+        metric_function = (
+            compute_subjective_pair_metrics
+            if self.tom_order == 1
+            else compute_subjective_suspicion_metrics
         )
+        metrics = metric_function(logits, targets, subject_mask)
         valid_count = int(metrics["valid_subject_count"])
         self.valid_subject_count += valid_count
         self.loss_sum += float(loss.detach().item()) * valid_count
@@ -313,6 +331,16 @@ class MetricAccumulator:
         return result
 
 
+def _order_specific_distribution(
+    model: ToMBeliefBackbone,
+    output: Mapping[str, torch.Tensor],
+    batch: Mapping[str, torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if model.tom_order == 1:
+        return output["observer_pair_logits"], batch["pair_targets"]
+    return output["observer_suspicion_logits"], batch["suspicion_targets"]
+
+
 def train_one_epoch(
     model: ToMBeliefBackbone,
     data_loader: DataLoader,
@@ -322,13 +350,16 @@ def train_one_epoch(
     gradient_clip_norm: float,
 ) -> dict[str, int | float]:
     model.train()
-    accumulator = MetricAccumulator()
+    accumulator = MetricAccumulator(tom_order=model.tom_order)
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         optimizer.zero_grad(set_to_none=True)
         output = _forward_batch(model, batch)
-        loss = masked_pair_cross_entropy(
-            output["pair_logits"], batch["pair_targets"], batch["subject_mask"]
+        logits, targets = _order_specific_distribution(model, output, batch)
+        loss = masked_distribution_cross_entropy(
+            logits,
+            targets,
+            batch["subject_mask"],
         )
         loss.backward()
         if gradient_clip_norm > 0:
@@ -336,8 +367,8 @@ def train_one_epoch(
         optimizer.step()
         accumulator.update(
             loss=loss,
-            pair_logits=output["pair_logits"],
-            pair_targets=batch["pair_targets"],
+            logits=logits,
+            targets=targets,
             subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
@@ -351,20 +382,53 @@ def evaluate_model(
     device: torch.device,
 ) -> dict[str, int | float]:
     model.eval()
-    accumulator = MetricAccumulator()
+    accumulator = MetricAccumulator(tom_order=model.tom_order)
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         output = _forward_batch(model, batch)
-        loss = masked_pair_cross_entropy(
-            output["pair_logits"], batch["pair_targets"], batch["subject_mask"]
+        logits, targets = _order_specific_distribution(model, output, batch)
+        loss = masked_distribution_cross_entropy(
+            logits,
+            targets,
+            batch["subject_mask"],
         )
         accumulator.update(
             loss=loss,
-            pair_logits=output["pair_logits"],
-            pair_targets=batch["pair_targets"],
+            logits=logits,
+            targets=targets,
             subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
+
+
+def checkpoint_task_contract(tom_order: int) -> dict[str, Any]:
+    """Return the strict order-specific target and output contract."""
+
+    if _tom_order(tom_order) == 1:
+        return {
+            "target_encoding": TARGET_ENCODING,
+            "projection_version": PROJECTION_VERSION,
+            "target_distribution_is_reporter_probability": False,
+            "target_distribution_is_deterministic_encoding": True,
+            "pair_class_count": NUM_WOLF_PAIR_CLASSES,
+            "pair_ordering": PAIR_ORDERING,
+        }
+    return {
+        "target_encoding": SUSPICION_TARGET_ENCODING,
+        "output_class_count": NUM_PLAYERS,
+        "canonical_player_ordering": CANONICAL_PLAYER_ORDERING,
+    }
+
+
+def checkpoint_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
+    """Serialize model construction fields without a false second-order pair contract."""
+
+    if model.tom_order == 1:
+        return asdict(model.config)
+    return {
+        "num_players": model.config.num_players,
+        "max_seq_len": model.config.max_seq_len,
+    }
 
 
 def checkpoint_payload(
@@ -386,12 +450,7 @@ def checkpoint_payload(
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
         "public_phase_to_id": dict(PHASE_TO_ID),
-        "target_encoding": TARGET_ENCODING,
-        "projection_version": PROJECTION_VERSION,
-        "target_distribution_is_reporter_probability": False,
-        "target_distribution_is_deterministic_encoding": True,
-        "pair_class_count": NUM_WOLF_PAIR_CLASSES,
-        "pair_ordering": PAIR_ORDERING,
+        **checkpoint_task_contract(config.tom_order),
         "backbone": BACKBONE_NAME,
         "epoch": epoch,
         "train_dataset_path": str(config.resolved_dataset_path.resolve()),
@@ -399,7 +458,7 @@ def checkpoint_payload(
             config.resolved_validation_dataset_path.resolve()
         ),
         "training_config": asdict(config),
-        "model_config": asdict(model.config),
+        "model_config": checkpoint_model_config(model),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": dict(train_metrics),

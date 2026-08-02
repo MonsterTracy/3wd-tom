@@ -1,17 +1,4 @@
-"""Losses for subjective two-Werewolf pair distributions.
-
-The model predicts one distribution over 21 possible Werewolf pairs
-for every belief subject:
-
-    pair_logits:  [B, 7, 21]
-    pair_targets: [B, 7, 21]
-    subject_mask:   [B, 7]
-
-Only rows selected by ``subject_mask`` contribute to the loss.
-
-The targets are global joint pair distributions. They are
-not true-role labels and are not independent binary probabilities.
-"""
+"""Masked categorical losses for observer-specific distributions."""
 
 from __future__ import annotations
 
@@ -31,18 +18,18 @@ VALID_REDUCTIONS = {
 }
 
 
-def masked_pair_cross_entropy(
-    pair_logits: torch.Tensor,
-    pair_targets: torch.Tensor,
+def masked_distribution_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
     subject_mask: torch.Tensor,
     *,
     reduction: str = "mean",
 ) -> torch.Tensor:
     """Compute soft-target cross entropy over supervised observer rows."""
 
-    pair_logits, pair_targets, subject_mask = _validate_pair_loss_inputs(
-        pair_logits=pair_logits,
-        pair_targets=pair_targets,
+    logits, targets, subject_mask = _validate_distribution_loss_inputs(
+        logits=logits,
+        targets=targets,
         subject_mask=subject_mask,
         reduction=reduction,
     )
@@ -51,7 +38,7 @@ def masked_pair_cross_entropy(
         raise ValueError("subject_mask must select at least one valid observer")
 
     per_subject_loss = -(
-        pair_targets * F.log_softmax(pair_logits, dim=-1)
+        targets * F.log_softmax(logits, dim=-1)
     ).sum(dim=-1)
     masked_loss = per_subject_loss * subject_mask.to(per_subject_loss.dtype)
     if reduction == "none":
@@ -62,81 +49,38 @@ def masked_pair_cross_entropy(
     return total_loss / valid_subject_count.to(dtype=total_loss.dtype)
 
 
-def masked_pair_kl_divergence(
-    pair_logits: torch.Tensor,
-    pair_targets: torch.Tensor,
+def masked_distribution_kl_divergence(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
     subject_mask: torch.Tensor,
     *,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    """Compute KL divergence over valid subjective-belief rows.
-
-    Args:
-        pair_logits:
-            Floating-point tensor with shape ``[B, 7, 21]``. The final
-            dimension contains unnormalized scores over pair classes.
-
-        pair_targets:
-            Floating-point tensor with shape ``[B, 7, 21]``.
-
-            Every supervised row must:
-
-            - contain only non-negative values;
-            - sum to one.
-
-            Every unsupervised row must remain all zero.
-
-        subject_mask:
-            Boolean tensor with shape ``[B, 7]``.
-
-            ``True`` means that the corresponding subject row contains
-            a valid subjective target and contributes to the loss.
-
-        reduction:
-            ``"none"``:
-                Return masked per-subject losses with shape ``[B, 7]``.
-
-            ``"sum"``:
-                Sum over all valid subject rows.
-
-            ``"mean"``:
-                Average over valid subject rows.
-
-                If a batch contains no valid rows, return a
-                differentiable scalar zero.
-
-    Returns:
-        A loss tensor determined by ``reduction``.
-
-    Notes:
-        KL divergence differs from soft-label cross entropy only by the
-        entropy of the fixed target distribution. They therefore have
-        the same gradients with respect to model logits.
-    """
+    """Compute target-to-prediction KL over valid observer rows."""
 
     (
-        pair_logits,
-        pair_targets,
+        logits,
+        targets,
         subject_mask,
-    ) = _validate_pair_loss_inputs(
-        pair_logits=pair_logits,
-        pair_targets=pair_targets,
+    ) = _validate_distribution_loss_inputs(
+        logits=logits,
+        targets=targets,
         subject_mask=subject_mask,
         reduction=reduction,
     )
 
     log_probabilities = F.log_softmax(
-        pair_logits,
+        logits,
         dim=-1,
     )
 
-    per_pair_loss = F.kl_div(
+    per_class_loss = F.kl_div(
         log_probabilities,
-        pair_targets,
+        targets,
         reduction="none",
     )
 
-    per_subject_loss = per_pair_loss.sum(
+    per_subject_loss = per_class_loss.sum(
         dim=-1
     )
 
@@ -164,17 +108,17 @@ def masked_pair_kl_divergence(
     if valid_subject_count.item() == 0:
         # Keep the returned zero connected to the computation graph so
         # backward() remains valid for an all-failed collection batch.
-        return pair_logits.sum() * 0.0
+        return logits.sum() * 0.0
 
     return total_loss / valid_subject_count.to(
         dtype=total_loss.dtype
     )
 
 
-def _validate_pair_loss_inputs(
+def _validate_distribution_loss_inputs(
     *,
-    pair_logits: torch.Tensor,
-    pair_targets: torch.Tensor,
+    logits: torch.Tensor,
+    targets: torch.Tensor,
     subject_mask: torch.Tensor,
     reduction: str,
 ) -> tuple[
@@ -192,8 +136,8 @@ def _validate_pair_loss_inputs(
         )
 
     tensors = {
-        "pair_logits": pair_logits,
-        "pair_targets": pair_targets,
+        "logits": logits,
+        "targets": targets,
         "subject_mask": subject_mask,
     }
 
@@ -206,35 +150,30 @@ def _validate_pair_loss_inputs(
                 f"{field_name} must be a tensor"
             )
 
-    if pair_logits.ndim != 3:
-        raise ValueError(
-            "pair_logits must have shape [B, 7, 21]"
-        )
+    if logits.ndim != 3:
+        raise ValueError("logits must have shape [B, 7, C]")
 
-    batch_size = pair_logits.shape[0]
+    batch_size = logits.shape[0]
+    class_count = logits.shape[2]
 
-    expected_pair_shape = (
+    expected_shape = (
         batch_size,
         NUM_PLAYERS,
-        NUM_WOLF_PAIR_CLASSES,
+        class_count,
     )
 
-    if (
-        tuple(pair_logits.shape)
-        != expected_pair_shape
-    ):
+    if class_count not in (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES):
         raise ValueError(
-            "pair_logits must have shape "
-            f"[B, {NUM_PLAYERS}, {NUM_WOLF_PAIR_CLASSES}]"
+            "logits final dimension must contain 7 suspicion classes "
+            "or 21 pair classes"
         )
 
-    if (
-        tuple(pair_targets.shape)
-        != expected_pair_shape
-    ):
+    if tuple(logits.shape) != expected_shape:
+        raise ValueError(f"logits must have shape [B, {NUM_PLAYERS}, C]")
+
+    if tuple(targets.shape) != expected_shape:
         raise ValueError(
-            "pair_targets must have the same "
-            "shape as pair_logits"
+            "targets must have the same shape as logits"
         )
 
     expected_mask_shape = (
@@ -257,18 +196,18 @@ def _validate_pair_loss_inputs(
         )
 
     if not torch.is_floating_point(
-        pair_logits
+        logits
     ):
         raise TypeError(
-            "pair_logits must use a "
+            "logits must use a "
             "floating-point dtype"
         )
 
     if not torch.is_floating_point(
-        pair_targets
+        targets
     ):
         raise TypeError(
-            "pair_targets must use a "
+            "targets must use a "
             "floating-point dtype"
         )
 
@@ -278,39 +217,39 @@ def _validate_pair_loss_inputs(
         )
 
     if not torch.isfinite(
-        pair_logits
+        logits
     ).all():
         raise ValueError(
-            "pair_logits must contain only "
+            "logits must contain only "
             "finite values"
         )
 
     if not torch.isfinite(
-        pair_targets
+        targets
     ).all():
         raise ValueError(
-            "pair_targets must contain only "
+            "targets must contain only "
             "finite values"
         )
 
     if torch.any(
-        pair_targets < 0.0
+        targets < 0.0
     ):
         raise ValueError(
-            "pair_targets cannot contain "
+            "targets cannot contain "
             "negative values"
         )
 
-    pair_targets = pair_targets.to(
-        device=pair_logits.device,
-        dtype=pair_logits.dtype,
+    targets = targets.to(
+        device=logits.device,
+        dtype=logits.dtype,
     )
 
     subject_mask = subject_mask.to(
-        device=pair_logits.device,
+        device=logits.device,
     )
 
-    row_sums = pair_targets.sum(
+    row_sums = targets.sum(
         dim=-1
     )
 
@@ -330,11 +269,11 @@ def _validate_pair_loss_inputs(
             atol=1e-6,
         ):
             raise ValueError(
-                "every supervised pair target "
+                "every supervised target "
                 "row must sum to one"
             )
 
-    invalid_rows = pair_targets[
+    invalid_rows = targets[
         ~subject_mask
     ]
 
@@ -345,19 +284,19 @@ def _validate_pair_loss_inputs(
         )
     ):
         raise ValueError(
-            "unsupervised pair target rows "
+            "unsupervised target rows "
             "must remain all zero"
         )
 
     return (
-        pair_logits,
-        pair_targets,
+        logits,
+        targets,
         subject_mask,
     )
 
 
 __all__ = [
     "VALID_REDUCTIONS",
-    "masked_pair_cross_entropy",
-    "masked_pair_kl_divergence",
+    "masked_distribution_cross_entropy",
+    "masked_distribution_kl_divergence",
 ]

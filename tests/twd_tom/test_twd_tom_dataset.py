@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import werewolf.models.twd_tom.dataset as dataset_module
 from werewolf.models.twd_tom.belief_labels import suspicion_set_to_pair_target
 from werewolf.models.twd_tom.dataset import TWDToMDataset, collate_twd_tom_samples
 from werewolf.models.twd_tom.schema import PLAYER_TO_ID
@@ -35,6 +36,8 @@ def test_first_order_uses_only_current_observer_private_knowledge():
     other_rows[observer_index] = False
     assert item["known_werewolves"][other_rows].count_nonzero().item() == 0
     assert item["known_non_werewolves"][other_rows].count_nonzero().item() == 0
+    assert item["pair_targets"].shape == (7, 21)
+    assert "suspicion_targets" not in item
 
 
 def test_second_order_has_multiple_targets_and_no_private_model_inputs():
@@ -44,13 +47,13 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
     assert len(sample["observer_ids"]) > 1
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
-    assert item["pair_targets"].shape == (7, 21)
+    assert item["suspicion_targets"].shape == (7, 7)
+    assert "pair_targets" not in item
 
 
-@pytest.mark.parametrize("tom_order", [1, 2])
-def test_pair_projection_semantics_are_unchanged(tom_order):
-    sample = raw_sample(tom_order)
-    item = TWDToMDataset([sample], tom_order=tom_order)[0]
+def test_first_order_pair_projection_semantics_are_unchanged():
+    sample = raw_sample(1)
+    item = TWDToMDataset([sample], tom_order=1)[0]
     subject = next(
         name for name, status in sample["belief_status"].items() if status == "ok"
     )
@@ -64,6 +67,93 @@ def test_pair_projection_semantics_are_unchanged(tom_order):
     )
 
 
+def _second_order_target(sample, subject):
+    item = TWDToMDataset([sample], tom_order=2)[0]
+    return item["suspicion_targets"][PLAYER_TO_ID[subject] - 1]
+
+
+def test_second_order_non_empty_suspicion_is_uniform_over_reported_players():
+    sample = raw_sample(2)
+    subject = next(name for name, status in sample["belief_status"].items() if status == "ok")
+    sample["suspected_werewolves"][subject] = ["player2", "player6"]
+    expected = torch.tensor([0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 0.0])
+    torch.testing.assert_close(_second_order_target(sample, subject), expected)
+
+
+def test_second_order_empty_suspicion_is_uniform_over_all_players():
+    sample = raw_sample(2)
+    subject = next(name for name, status in sample["belief_status"].items() if status == "ok")
+    sample["suspected_werewolves"][subject] = []
+    torch.testing.assert_close(
+        _second_order_target(sample, subject),
+        torch.full((7,), 1.0 / 7.0),
+    )
+
+
+def test_second_order_suspicion_keeps_the_observer_itself():
+    sample = raw_sample(2)
+    subject = next(name for name, status in sample["belief_status"].items() if status == "ok")
+    sample["suspected_werewolves"][subject] = [subject]
+    expected = torch.zeros(7)
+    expected[PLAYER_TO_ID[subject] - 1] = 1.0
+    torch.testing.assert_close(_second_order_target(sample, subject), expected)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "first_value", "second_value"),
+    [
+        ("known_werewolves", [], ["player1"]),
+        ("known_non_werewolves", [], ["player7"]),
+    ],
+)
+def test_second_order_target_does_not_depend_on_private_knowledge(
+    field_name,
+    first_value,
+    second_value,
+):
+    sample = raw_sample(2)
+    subject = next(name for name, status in sample["belief_status"].items() if status == "ok")
+    sample["suspected_werewolves"][subject] = ["player2", "player6"]
+    sample["known_werewolves"][subject] = []
+    sample["known_non_werewolves"][subject] = []
+    first = deepcopy(sample)
+    second = deepcopy(sample)
+    first[field_name][subject] = first_value
+    second[field_name][subject] = second_value
+    torch.testing.assert_close(
+        _second_order_target(first, subject),
+        _second_order_target(second, subject),
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_suspicion",
+    ["player1", ["player8"], ["player2", "player2"]],
+)
+def test_second_order_suspicion_ids_are_strict(invalid_suspicion):
+    sample = raw_sample(2)
+    subject = next(name for name, status in sample["belief_status"].items() if status == "ok")
+    sample["suspected_werewolves"][subject] = invalid_suspicion
+    with pytest.raises(
+        (TypeError, ValueError),
+        match="suspicion list|suspected_werewolves|duplicate",
+    ):
+        TWDToMDataset([sample], tom_order=2)
+
+
+def test_second_order_never_calls_pair_projection(monkeypatch):
+    def fail_pair_projection(*args, **kwargs):
+        raise AssertionError("second-order target must not use pair projection")
+
+    monkeypatch.setattr(
+        dataset_module,
+        "suspicion_set_to_pair_target",
+        fail_pair_projection,
+    )
+    item = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
+    assert item["suspicion_targets"].shape == (7, 7)
+
+
 def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
     first = TWDToMDataset([raw_sample(1)], tom_order=1)[0]
     first_batch = collate_twd_tom_samples([first])
@@ -73,6 +163,8 @@ def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
 
     second = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
     second_batch = collate_twd_tom_samples([second])
+    assert second_batch["suspicion_targets"].shape == (1, 7, 7)
+    assert "pair_targets" not in second_batch
     assert "known_werewolves" not in second_batch
     assert "known_non_werewolves" not in second_batch
 

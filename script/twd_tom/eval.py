@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from script.twd_tom.train import (
     RAW_DATASET_PATHS,
+    checkpoint_task_contract,
     count_supervised_subjects,
     evaluate_model,
     resolve_device,
@@ -36,12 +37,6 @@ from werewolf.models.twd_tom.public_events import (
     STRUCTURED_TOKEN_TO_ID,
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.schema import (
-    NUM_WOLF_PAIR_CLASSES,
-    PAIR_ORDERING,
-    PROJECTION_VERSION,
-    TARGET_ENCODING,
-)
 
 
 @dataclass(frozen=True)
@@ -110,12 +105,7 @@ def build_model_from_checkpoint(
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
         "public_phase_to_id": dict(PHASE_TO_ID),
-        "target_encoding": TARGET_ENCODING,
-        "projection_version": PROJECTION_VERSION,
-        "target_distribution_is_reporter_probability": False,
-        "target_distribution_is_deterministic_encoding": True,
-        "pair_class_count": NUM_WOLF_PAIR_CLASSES,
-        "pair_ordering": PAIR_ORDERING,
+        **checkpoint_task_contract(tom_order),
         "backbone": BACKBONE_NAME,
     }
     for field_name, expected_value in expected.items():
@@ -134,7 +124,7 @@ def build_model_from_checkpoint(
     state_dict = checkpoint.get("model_state_dict")
     if not isinstance(state_dict, Mapping):
         raise TypeError("checkpoint has no valid model_state_dict")
-    model = ToMBeliefBackbone(model_config)
+    model = ToMBeliefBackbone(model_config, tom_order=tom_order)
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as exc:
@@ -232,10 +222,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "tom_order": tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[tom_order],
-        "target_encoding": TARGET_ENCODING,
-        "projection_version": PROJECTION_VERSION,
-        "pair_class_count": NUM_WOLF_PAIR_CLASSES,
-        "pair_ordering": PAIR_ORDERING,
+        **checkpoint_task_contract(tom_order),
         "backbone": BACKBONE_NAME,
         "device": str(device),
         "checkpoint_path": str(checkpoint_path),

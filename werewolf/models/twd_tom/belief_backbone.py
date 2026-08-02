@@ -18,8 +18,9 @@ pretrained weights or tokenizer are used.
 The final valid hidden state is combined with one observer embedding per
 player. First-order samples may additionally provide the current observer's
 two seven-player hard-knowledge vectors. A single linear projection maps those
-vectors into the hidden size. The shared output head then predicts one pair
-distribution per observer with shape ``[batch_size, num_players, 21]``.
+vectors into the hidden size. The sole output projection is fixed at model
+construction to 21 pair classes for first-order ToM or seven player-suspicion
+classes for second-order ToM.
 
 This module does not consume raw public text, true roles, truth-derived
 labels, observer IDs, alive masks, or private event fields.
@@ -103,8 +104,18 @@ class ToMBeliefBackbone(nn.Module):
     def __init__(
         self,
         config: ToMBeliefBackboneConfig | None = None,
+        *,
+        tom_order: int = 1,
     ):
         super().__init__()
+
+        if (
+            isinstance(tom_order, bool)
+            or not isinstance(tom_order, int)
+            or tom_order not in (1, 2)
+        ):
+            raise ValueError("tom_order must be 1 or 2")
+        self.tom_order = tom_order
 
         self.config = (
             ToMBeliefBackboneConfig()
@@ -184,7 +195,11 @@ class ToMBeliefBackbone(nn.Module):
 
         self.output_projection = nn.Linear(
             HIDDEN_SIZE,
-            self.config.pair_class_count,
+            (
+                self.config.pair_class_count
+                if self.tom_order == 1
+                else self.config.num_players
+            ),
         )
 
         self._reset_parameters()
@@ -244,7 +259,7 @@ class ToMBeliefBackbone(nn.Module):
         known_werewolves: torch.Tensor | None = None,
         known_non_werewolves: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Encode actions and predict pair distributions and marginals.
+        """Encode actions and predict the order-specific observer distribution.
 
         Args:
             subject_ids: Integer tensor with shape ``[B, T]``.
@@ -256,9 +271,9 @@ class ToMBeliefBackbone(nn.Module):
 
         Returns:
             A dictionary with ``hidden_states`` (``[B, T, 256]``),
-            ``pooled_hidden_state`` (``[B, 256]``), ``observer_pair_logits``
-            (``[B, 7, 21]``), pair probabilities, and the derived
-            ``belief_matrix`` with shape ``[B, 7, 7]``.
+            ``pooled_hidden_state`` (``[B, 256]``), and the order-specific
+            observer logits and probabilities. First-order output has 21 pair
+            classes; second-order output has seven player-suspicion classes.
         """
 
         (
@@ -340,6 +355,10 @@ class ToMBeliefBackbone(nn.Module):
             pooled_hidden_state.unsqueeze(1)
             + self.observer_embedding(observer_ids).unsqueeze(0)
         )
+        if self.tom_order == 2 and (
+            known_werewolves is not None or known_non_werewolves is not None
+        ):
+            raise ValueError("second-order ToM does not accept private knowledge")
         private_knowledge = self._validate_private_knowledge(
             known_werewolves=known_werewolves,
             known_non_werewolves=known_non_werewolves,
@@ -352,24 +371,33 @@ class ToMBeliefBackbone(nn.Module):
                 + self.private_knowledge_projection(private_knowledge)
             )
 
-        pair_logits = self.output_projection(observer_hidden_states)
-        pair_probabilities = torch.softmax(
-            pair_logits,
-            dim=-1,
-        )
-        belief_matrix = pair_probabilities_to_belief_marginals(
-            pair_probabilities
-        )
-
-        return {
+        logits = self.output_projection(observer_hidden_states)
+        probabilities = torch.softmax(logits, dim=-1)
+        result = {
             "hidden_states": hidden_states,
             "pooled_hidden_state": pooled_hidden_state,
             "observer_hidden_states": observer_hidden_states,
-            "observer_pair_logits": pair_logits,
-            "pair_logits": pair_logits,
-            "pair_probabilities": pair_probabilities,
-            "belief_matrix": belief_matrix,
         }
+        if self.tom_order == 1:
+            result.update(
+                {
+                    "observer_pair_logits": logits,
+                    "pair_logits": logits,
+                    "pair_probabilities": probabilities,
+                    "belief_matrix": pair_probabilities_to_belief_marginals(
+                        probabilities
+                    ),
+                }
+            )
+        else:
+            result.update(
+                {
+                    "observer_suspicion_logits": logits,
+                    "suspicion_logits": logits,
+                    "suspicion_probabilities": probabilities,
+                }
+            )
+        return result
 
     def _validate_private_knowledge(
         self,

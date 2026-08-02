@@ -67,6 +67,8 @@ PLAYER_NAMES: tuple[str, ...] = tuple(
     f"player{player_id}"
     for player_id in range(1, NUM_PLAYERS + 1)
 )
+CANONICAL_PLAYER_ORDERING = PLAYER_NAMES
+SUSPICION_TARGET_ENCODING = "classic7_player_suspicion_distribution_v1"
 
 
 CANONICAL_WOLF_PAIRS: tuple[tuple[str, str], ...] = tuple(
@@ -386,6 +388,8 @@ __all__ = [
     "TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING",
     "PAD_TOKEN",
     "PLAYER_NAMES",
+    "CANONICAL_PLAYER_ORDERING",
+    "SUSPICION_TARGET_ENCODING",
     "ACTION_NAMES",
     "GUESS_ROLE_NAMES",
     "PLAYER_TO_ID",

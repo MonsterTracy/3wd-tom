@@ -1,11 +1,11 @@
-"""Minimal valid-row pair-distribution metrics."""
+"""Order-specific metrics for observer belief distributions."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-from werewolf.models.twd_tom.losses import masked_pair_kl_divergence
+from werewolf.models.twd_tom.losses import masked_distribution_kl_divergence
 from werewolf.models.twd_tom.belief_labels import (
     pair_probabilities_to_belief_marginals,
 )
@@ -24,7 +24,7 @@ def compute_subjective_pair_metrics(
 ) -> dict[str, int | float]:
     """Compute required metrics without using truth or support weighting."""
 
-    per_subject_kl = masked_pair_kl_divergence(
+    per_subject_kl = masked_distribution_kl_divergence(
         pair_logits,
         pair_targets,
         subject_mask,
@@ -67,4 +67,43 @@ def compute_subjective_pair_metrics(
     }
 
 
-__all__ = ["compute_subjective_pair_metrics"]
+@torch.no_grad()
+def compute_subjective_suspicion_metrics(
+    suspicion_logits: torch.Tensor,
+    suspicion_targets: torch.Tensor,
+    subject_mask: torch.Tensor,
+) -> dict[str, int | float]:
+    """Compare seven-player suspicion distributions on supervised rows."""
+
+    per_subject_kl = masked_distribution_kl_divergence(
+        suspicion_logits,
+        suspicion_targets,
+        subject_mask,
+        reduction="none",
+    )
+    valid_mask = subject_mask.to(device=suspicion_logits.device, dtype=torch.bool)
+    targets = suspicion_targets.to(
+        device=suspicion_logits.device,
+        dtype=suspicion_logits.dtype,
+    )
+    log_probabilities = F.log_softmax(suspicion_logits, dim=-1)
+    probabilities = log_probabilities.exp()
+    cross_entropy = -(targets * log_probabilities).sum(dim=-1)
+    total_variation = 0.5 * (probabilities - targets).abs().sum(dim=-1)
+    mae = (probabilities - targets).abs().mean(dim=-1)
+    return {
+        "valid_subject_count": int(valid_mask.sum().item()),
+        "mean_suspicion_cross_entropy": _masked_mean(cross_entropy, valid_mask),
+        "mean_suspicion_kl_divergence": _masked_mean(per_subject_kl, valid_mask),
+        "mean_suspicion_total_variation": _masked_mean(
+            total_variation,
+            valid_mask,
+        ),
+        "mean_suspicion_mae": _masked_mean(mae, valid_mask),
+    }
+
+
+__all__ = [
+    "compute_subjective_pair_metrics",
+    "compute_subjective_suspicion_metrics",
+]

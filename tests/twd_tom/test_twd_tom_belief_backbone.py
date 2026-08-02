@@ -91,6 +91,24 @@ def test_output_contract_and_last_non_padding_pooling(model):
     assert output["hidden_states"][:, 2].count_nonzero().item() == 0
 
 
+def test_second_order_has_one_seven_class_suspicion_output_projection():
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    ).eval()
+    with torch.no_grad():
+        output = second_order(**make_features())
+    assert second_order.output_projection.out_features == 7
+    assert output["observer_suspicion_logits"].shape == (1, 7, 7)
+    assert output["observer_suspicion_logits"] is output["suspicion_logits"]
+    assert output["suspicion_probabilities"].shape == (1, 7, 7)
+    assert "observer_pair_logits" not in output
+    assert "pair_probabilities" not in output
+    assert "belief_matrix" not in output
+    assert not hasattr(second_order, "pair_output_projection")
+    assert not hasattr(second_order, "suspicion_output_projection")
+
+
 def test_first_order_private_projection_changes_only_its_observer(model):
     features = make_features()
     wolves = torch.zeros((1, 7, 7))
@@ -119,6 +137,20 @@ def test_private_inputs_are_strict_and_optional(model):
             **make_features(),
             known_werewolves=bad,
             known_non_werewolves=torch.zeros_like(bad),
+        )
+
+
+def test_second_order_rejects_private_inputs():
+    model = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    private = torch.zeros((1, 7, 7))
+    with pytest.raises(ValueError, match="does not accept private knowledge"):
+        model(
+            **make_features(),
+            known_werewolves=private,
+            known_non_werewolves=private,
         )
 
 
