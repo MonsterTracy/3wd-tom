@@ -16,8 +16,10 @@ from script.twd_tom.eval import (
 from script.twd_tom.train import TrainingConfig, build_model, checkpoint_payload
 from werewolf.models.twd_tom.schema import (
     PAIR_ORDERING,
+    SECOND_ORDER_OBSERVER_READOUT,
     SECOND_ORDER_TARGET_ENCODING,
 )
+from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +96,11 @@ def test_new_second_order_checkpoint_has_strict_pair_contract(tmp_path):
     assert checkpoint["output_class_count"] == 21
     assert checkpoint["pair_class_count"] == 21
     assert checkpoint["pair_ordering"] == PAIR_ORDERING
+    assert checkpoint["observer_readout"] == SECOND_ORDER_OBSERVER_READOUT
+    assert (
+        checkpoint["train_player_augmentation"]
+        == CYCLIC_ROTATION_VERSION
+    )
     assert "projection_version" not in checkpoint
     assert checkpoint["model_config"]["pair_class_count"] == 21
 
@@ -111,6 +118,17 @@ def test_old_second_order_seven_class_checkpoint_is_rejected(tmp_path):
     checkpoint["target_encoding"] = "classic7_player_suspicion_distribution_v1"
     checkpoint["output_class_count"] = 7
     with pytest.raises(ValueError, match="target_encoding"):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["observer_readout", "train_player_augmentation"],
+)
+def test_old_second_order_architecture_checkpoint_is_rejected(tmp_path, field):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    checkpoint.pop(field)
+    with pytest.raises(ValueError, match=field):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 

@@ -15,11 +15,12 @@ The causal backbone is a randomly initialized Hugging Face ``Qwen2Model`` that
 receives the structured action embeddings through ``inputs_embeds``. No
 pretrained weights or tokenizer are used.
 
-The final valid hidden state is combined with one observer embedding per
-player. First-order samples may additionally provide the current observer's
-two seven-player hard-knowledge vectors. A single linear projection maps those
-vectors into the hidden size. Both ToM orders use the same sole 21-class pair
-output projection; only first-order inference consumes private knowledge.
+First-order readout combines the final valid hidden state with one observer
+embedding per player and may additionally provide the current observer's two
+seven-player hard-knowledge vectors. Second-order readout uses those same
+observer embeddings as queries over the public hidden-state sequence. Both
+orders use the same sole 21-class pair output projection; only first-order
+inference consumes private knowledge.
 
 This module does not consume raw public text, true roles, truth-derived
 labels, observer IDs, alive masks, or private event fields.
@@ -191,6 +192,15 @@ class ToMBeliefBackbone(nn.Module):
             HIDDEN_SIZE,
             bias=False,
         )
+        if self.tom_order == 2:
+            self.second_order_observer_query_attention = nn.MultiheadAttention(
+                embed_dim=HIDDEN_SIZE,
+                num_heads=NUM_ATTENTION_HEADS,
+                batch_first=True,
+            )
+            self.second_order_observer_query_layer_norm = nn.LayerNorm(
+                HIDDEN_SIZE
+            )
 
         self.output_projection = nn.Linear(
             HIDDEN_SIZE,
@@ -307,6 +317,12 @@ class ToMBeliefBackbone(nn.Module):
         safe_attention_mask = attention_mask.clone()
         empty_rows = safe_attention_mask.sum(dim=1) == 0
 
+        if self.tom_order == 2 and empty_rows.any():
+            raise ValueError(
+                "second-order observer query attention requires a non-empty "
+                "public history"
+            )
+
         if empty_rows.any():
             safe_attention_mask[empty_rows, 0] = True
             hidden_states = hidden_states.clone()
@@ -346,9 +362,10 @@ class ToMBeliefBackbone(nn.Module):
             self.config.num_players,
             device=subject_ids.device,
         )
-        observer_hidden_states = (
-            pooled_hidden_state.unsqueeze(1)
-            + self.observer_embedding(observer_ids).unsqueeze(0)
+        observer_queries = (
+            self.observer_embedding(observer_ids)
+            .unsqueeze(0)
+            .expand(batch_size, -1, -1)
         )
         if self.tom_order == 2 and (
             known_werewolves is not None or known_non_werewolves is not None
@@ -360,6 +377,21 @@ class ToMBeliefBackbone(nn.Module):
             batch_size=batch_size,
             device=subject_ids.device,
         )
+        if self.tom_order == 2:
+            observer_context, _ = self.second_order_observer_query_attention(
+                query=observer_queries,
+                key=hidden_states,
+                value=hidden_states,
+                key_padding_mask=~safe_attention_mask,
+                need_weights=False,
+            )
+            observer_hidden_states = self.second_order_observer_query_layer_norm(
+                observer_queries + observer_context
+            )
+        else:
+            observer_hidden_states = (
+                pooled_hidden_state.unsqueeze(1) + observer_queries
+            )
         if private_knowledge is not None:
             observer_hidden_states = (
                 observer_hidden_states

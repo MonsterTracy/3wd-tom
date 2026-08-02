@@ -40,6 +40,7 @@ from werewolf.models.twd_tom.losses import (
     masked_distribution_kl_divergence,
 )
 from werewolf.models.twd_tom.metrics import (
+    compute_subjective_pair_diagnostics,
     compute_subjective_pair_metrics,
 )
 from werewolf.models.twd_tom.samples import (
@@ -61,6 +62,7 @@ __all__ = [
     "load_twd_tom_jsonl",
     "masked_distribution_cross_entropy",
     "masked_distribution_kl_divergence",
+    "compute_subjective_pair_diagnostics",
     "compute_subjective_pair_metrics",
     "SAMPLE_SCHEMA_VERSION",
     "make_twd_tom_sample",

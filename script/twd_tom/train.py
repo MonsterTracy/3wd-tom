@@ -21,12 +21,16 @@ from werewolf.models.twd_tom.belief_backbone import (
     ToMBeliefBackboneConfig,
 )
 from werewolf.models.twd_tom.dataset import (
+    CYCLIC_ROTATION_VERSION,
     TOM_INPUT_SCOPES,
     TWDToMDataset,
     collate_twd_tom_samples,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
-from werewolf.models.twd_tom.metrics import compute_subjective_pair_metrics
+from werewolf.models.twd_tom.metrics import (
+    compute_subjective_pair_diagnostics,
+    compute_subjective_pair_metrics,
+)
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
     PUBLIC_EVENT_SCHEMA_VERSION,
@@ -38,6 +42,7 @@ from werewolf.models.twd_tom.schema import (
     PAIR_ORDERING,
     PROJECTION_VERSION,
     SECOND_ORDER_TARGET_ENCODING,
+    SECOND_ORDER_OBSERVER_READOUT,
     TARGET_ENCODING,
 )
 
@@ -179,6 +184,8 @@ def build_data_loader(
         dataset_path,
         tom_order=config.tom_order,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
+        enable_cyclic_rotation=config.tom_order == 2 and shuffle,
+        augmentation_seed=config.seed,
     )
     if len(dataset) == 0:
         raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
@@ -276,10 +283,12 @@ def _forward_batch(
 class MetricAccumulator:
     """Aggregate row-weighted training metrics."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, tom_order: int) -> None:
+        self.include_collapse_diagnostics = _tom_order(tom_order) == 2
         self.valid_subject_count = 0
         self.loss_sum = 0.0
         self.metric_sums: dict[str, float] = {}
+        self.metric_weights: dict[str, int] = {}
 
     def update(
         self,
@@ -294,13 +303,34 @@ class MetricAccumulator:
             targets,
             subject_mask,
         )
+        if self.include_collapse_diagnostics:
+            metrics.update(
+                compute_subjective_pair_diagnostics(
+                    logits,
+                    targets,
+                    subject_mask,
+                )
+            )
         valid_count = int(metrics["valid_subject_count"])
+        pairwise_snapshot_count = int(
+            (subject_mask.to(dtype=torch.int64).sum(dim=-1) >= 2).sum().item()
+        )
         self.valid_subject_count += valid_count
         self.loss_sum += float(loss.detach().item()) * valid_count
         for name, value in metrics.items():
             if name != "valid_subject_count":
+                weight = (
+                    pairwise_snapshot_count
+                    if name.endswith("observer_pairwise_tv")
+                    else valid_count
+                )
+                if weight == 0:
+                    continue
                 self.metric_sums[name] = self.metric_sums.get(name, 0.0) + (
-                    float(value) * valid_count
+                    float(value) * weight
+                )
+                self.metric_weights[name] = (
+                    self.metric_weights.get(name, 0) + weight
                 )
 
     def finalize(self) -> dict[str, int | float]:
@@ -310,12 +340,16 @@ class MetricAccumulator:
             "valid_subject_count": self.valid_subject_count,
             "mean_loss": self.loss_sum / self.valid_subject_count,
         }
-        result.update(
-            {
-                name: value / self.valid_subject_count
-                for name, value in self.metric_sums.items()
-            }
-        )
+        result.update({
+            name: value / self.metric_weights[name]
+            for name, value in self.metric_sums.items()
+        })
+        if self.include_collapse_diagnostics:
+            for name in (
+                "mean_target_observer_pairwise_tv",
+                "mean_predicted_observer_pairwise_tv",
+            ):
+                result.setdefault(name, 0.0)
         return result
 
 
@@ -335,7 +369,7 @@ def train_one_epoch(
     gradient_clip_norm: float,
 ) -> dict[str, int | float]:
     model.train()
-    accumulator = MetricAccumulator()
+    accumulator = MetricAccumulator(tom_order=model.tom_order)
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         optimizer.zero_grad(set_to_none=True)
@@ -367,7 +401,7 @@ def evaluate_model(
     device: torch.device,
 ) -> dict[str, int | float]:
     model.eval()
-    accumulator = MetricAccumulator()
+    accumulator = MetricAccumulator(tom_order=model.tom_order)
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         output = _forward_batch(model, batch)
@@ -403,6 +437,8 @@ def checkpoint_task_contract(tom_order: int) -> dict[str, Any]:
         "output_class_count": NUM_WOLF_PAIR_CLASSES,
         "pair_class_count": NUM_WOLF_PAIR_CLASSES,
         "pair_ordering": PAIR_ORDERING,
+        "observer_readout": SECOND_ORDER_OBSERVER_READOUT,
+        "train_player_augmentation": CYCLIC_ROTATION_VERSION,
     }
 
 
@@ -477,6 +513,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     best_epoch = 0
     best_validation_mean_loss = float("inf")
     for epoch in range(1, config.epochs + 1):
+        train_dataset.set_epoch(epoch)
         train_metrics = train_one_epoch(
             model,
             train_loader,

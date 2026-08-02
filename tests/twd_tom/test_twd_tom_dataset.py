@@ -1,6 +1,7 @@
 """Tests for strict current raw first-/second-order data adaptation."""
 
 import json
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 
@@ -9,8 +10,19 @@ import torch
 
 import werewolf.models.twd_tom.dataset as dataset_module
 from werewolf.models.twd_tom.belief_labels import suspicion_set_to_pair_target
-from werewolf.models.twd_tom.dataset import TWDToMDataset, collate_twd_tom_samples
-from werewolf.models.twd_tom.schema import PLAYER_TO_ID
+from werewolf.models.twd_tom.dataset import (
+    SUBJECT_MAPPING_FIELDS,
+    TWDToMDataset,
+    collate_twd_tom_samples,
+    cyclically_rotate_second_order_sample,
+    deterministic_cyclic_shift,
+)
+from werewolf.models.twd_tom.public_events import structured_event_tokens
+from werewolf.models.twd_tom.schema import (
+    PLAYER_NAMES,
+    PLAYER_TO_ID,
+    canonical_wolf_pairs,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +32,29 @@ def raw_sample(tom_order):
     name = "raw_tom.jsonl" if tom_order == 1 else "raw_tom2.jsonl"
     with (REPO_ROOT / "data" / "qwen25" / name).open(encoding="utf-8") as file:
         return json.loads(next(file))
+
+
+def full_history_second_order_sample():
+    required = {
+        "public_speech",
+        "vote_result",
+        "exile_result",
+        "death_announcement",
+    }
+    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
+    with path.open(encoding="utf-8") as file:
+        return next(
+            sample
+            for sample in (json.loads(line) for line in file)
+            if required
+            <= {event["event_type"] for event in sample["public_events"]}
+        )
+
+
+def rotated_player(player, shift):
+    if player is None:
+        return None
+    return PLAYER_NAMES[(PLAYER_TO_ID[player] - 1 + shift) % 7]
 
 
 def test_first_order_uses_only_current_observer_private_knowledge():
@@ -190,3 +225,167 @@ def test_raw_text_never_changes_model_features():
         "phase_ids", "day_values", "attention_mask",
     ):
         assert torch.equal(first_item[field], second_item[field])
+
+
+def test_cyclic_rotation_identity_composition_and_detachment():
+    sample = full_history_second_order_sample()
+    original = deepcopy(sample)
+    assert cyclically_rotate_second_order_sample(sample, shift=0) == sample
+    assert cyclically_rotate_second_order_sample(sample, shift=7) == sample
+    sequential = cyclically_rotate_second_order_sample(
+        cyclically_rotate_second_order_sample(sample, shift=2),
+        shift=4,
+    )
+    combined = cyclically_rotate_second_order_sample(sample, shift=6)
+    assert sequential == combined
+    assert sample == original
+
+
+def test_cyclic_rotation_updates_every_structured_player_field():
+    sample = full_history_second_order_sample()
+    rotated = cyclically_rotate_second_order_sample(sample, shift=3)
+    assert rotated["speaker_id"] == ((sample["speaker_id"] - 1 + 3) % 7) + 1
+    assert rotated["observer_ids"] == [
+        ((player_id - 1 + 3) % 7) + 1
+        for player_id in sample["observer_ids"]
+    ]
+    for field_name in SUBJECT_MAPPING_FIELDS:
+        assert set(rotated[field_name]) == {
+            rotated_player(subject, 3) for subject in sample[field_name]
+        }
+    for field_name in (
+        "suspected_werewolves",
+        "known_werewolves",
+        "known_non_werewolves",
+    ):
+        for subject, values in sample[field_name].items():
+            rotated_values = rotated[field_name][rotated_player(subject, 3)]
+            assert set(rotated_values or []) == {
+                rotated_player(player, 3) for player in values or []
+            }
+    original_tokens = structured_event_tokens(sample["public_events"])
+    rotated_tokens = structured_event_tokens(rotated["public_events"])
+    assert [token["token_type"] for token in rotated_tokens] == [
+        token["token_type"] for token in original_tokens
+    ]
+    expected_tokens = Counter(
+        (
+            token["token_type"],
+            rotated_player(token["subject"], 3),
+            token["action"],
+            rotated_player(token["object"], 3),
+            token["phase"],
+            token["day"],
+        )
+        for token in original_tokens
+    )
+    actual_tokens = Counter(
+        (
+            token["token_type"],
+            token["subject"],
+            token["action"],
+            token["object"],
+            token["phase"],
+            token["day"],
+        )
+        for token in rotated_tokens
+    )
+    assert actual_tokens == expected_tokens
+    assert [event["event_idx"] for event in rotated["public_events"]] == [
+        event["event_idx"] for event in sample["public_events"]
+    ]
+    assert [event["event_type"] for event in rotated["public_events"]] == [
+        event["event_type"] for event in sample["public_events"]
+    ]
+    assert [
+        event.get("raw_text")
+        for event in rotated["public_events"]
+        if event["event_type"] == "public_speech"
+    ] == [
+        event.get("raw_text")
+        for event in sample["public_events"]
+        if event["event_type"] == "public_speech"
+    ]
+
+
+def test_rotated_one_hot_pair_target_uses_canonical_pair_class():
+    sample = raw_sample(2)
+    subject = next(
+        name for name, status in sample["belief_status"].items() if status == "ok"
+    )
+    pair = ["player1", "player3"]
+    sample["known_werewolves"][subject] = pair
+    sample["known_non_werewolves"][subject] = [
+        player for player in PLAYER_NAMES if player not in pair
+    ]
+    sample["suspected_werewolves"][subject] = pair
+    rotated = cyclically_rotate_second_order_sample(sample, shift=2)
+    item = TWDToMDataset([rotated], tom_order=2)[0]
+    rotated_subject = rotated_player(subject, 2)
+    rotated_pair = tuple(
+        sorted(
+            (rotated_player(player, 2) for player in pair),
+            key=PLAYER_TO_ID.__getitem__,
+        )
+    )
+    pair_index = canonical_wolf_pairs().index(rotated_pair)
+    target = item["pair_targets"][PLAYER_TO_ID[rotated_subject] - 1]
+    assert target.shape == (21,)
+    assert target[pair_index] == 1
+    assert target.sum() == 1
+
+
+def test_train_rotation_is_deterministic_epoch_dependent_and_train_only():
+    sample = raw_sample(2)
+    original = deepcopy(sample)
+    first = TWDToMDataset(
+        [sample],
+        tom_order=2,
+        enable_cyclic_rotation=True,
+        augmentation_seed=42,
+    )
+    second = TWDToMDataset(
+        [sample],
+        tom_order=2,
+        enable_cyclic_rotation=True,
+        augmentation_seed=42,
+    )
+    observed_speakers = set()
+    for epoch in range(7):
+        first.set_epoch(epoch)
+        second.set_epoch(epoch)
+        first_item = first[0]
+        second_item = second[0]
+        assert torch.equal(first_item["pair_targets"], second_item["pair_targets"])
+        assert first_item["metadata"] == second_item["metadata"]
+        assert first_item["pair_targets"].shape == (7, 21)
+        torch.testing.assert_close(
+            first_item["pair_targets"][first_item["subject_mask"]].sum(dim=-1),
+            torch.ones(int(first_item["subject_mask"].sum().item())),
+        )
+        assert "known_werewolves" not in first_item
+        assert "known_non_werewolves" not in first_item
+        observed_speakers.add(first_item["metadata"]["speaker_id"])
+        assert deterministic_cyclic_shift(
+            seed=42, epoch=epoch, sample_index=0
+        ) == deterministic_cyclic_shift(seed=42, epoch=epoch, sample_index=0)
+    assert len(observed_speakers) == 7
+    validation = TWDToMDataset([sample], tom_order=2)
+    unchanged = validation[0]
+    validation.set_epoch(6)
+    assert torch.equal(unchanged["pair_targets"], validation[0]["pair_targets"])
+    assert unchanged["metadata"] == validation[0]["metadata"]
+    assert sample == original
+    with pytest.raises(ValueError, match="tom_order=2"):
+        TWDToMDataset(
+            [raw_sample(1)],
+            tom_order=1,
+            enable_cyclic_rotation=True,
+        )
+
+
+def test_cyclic_rotation_rejects_illegal_player_id():
+    sample = raw_sample(2)
+    sample["public_events"][-1]["speaker"] = "player8"
+    with pytest.raises(ValueError, match="canonical player"):
+        cyclically_rotate_second_order_sample(sample, shift=1)

@@ -58,6 +58,27 @@ ANNOTATED_LABEL_PROVENANCE = (
     "mixed_original_self_report_and_expert_pre_speech_completion_v1"
 )
 SOURCE_LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
+CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
+
+SUBJECT_MAPPING_FIELDS = (
+    "suspected_werewolves",
+    "known_werewolves",
+    "known_non_werewolves",
+    "belief_status",
+    "belief_errors",
+    "agent_backend_ids",
+    "observer_annotation_confidence",
+    "observer_label_provenance",
+    "source_belief_errors",
+    "source_belief_status",
+)
+_PLAYER_LIST_MAPPING_FIELDS = frozenset(
+    {
+        "suspected_werewolves",
+        "known_werewolves",
+        "known_non_werewolves",
+    }
+)
 
 RAW_TRAINING_SAMPLE_FIELDS = frozenset(
     {
@@ -160,6 +181,147 @@ def _require_non_empty_text(value: Any, *, field_name: str) -> str:
     return value
 
 
+def deterministic_cyclic_shift(
+    *,
+    seed: int,
+    epoch: int,
+    sample_index: int,
+) -> int:
+    """Return the reproducible classic-seven rotation for one train item."""
+
+    for field_name, value in {
+        "seed": seed,
+        "epoch": epoch,
+        "sample_index": sample_index,
+    }.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{field_name} must be a non-negative integer")
+    return (seed + epoch + sample_index) % NUM_PLAYERS
+
+
+def _rotate_player_name(value: Any, *, shift: int) -> str:
+    if not isinstance(value, str) or value not in PLAYER_NAMES:
+        raise ValueError("rotated player IDs must be canonical player1...player7")
+    player_index = PLAYER_TO_ID[value] - 1
+    return PLAYER_NAMES[(player_index + shift) % NUM_PLAYERS]
+
+
+def _rotate_player_number(value: Any, *, shift: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("rotated numeric player IDs must be integers")
+    if not 1 <= value <= NUM_PLAYERS:
+        raise ValueError("rotated numeric player IDs must be in [1, 7]")
+    return ((value - 1 + shift) % NUM_PLAYERS) + 1
+
+
+def _rotate_player_list(value: Any, *, shift: int) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("rotated player collections must be sequences")
+    rotated = [_rotate_player_name(player, shift=shift) for player in value]
+    return sorted(rotated, key=PLAYER_TO_ID.__getitem__)
+
+
+def cyclically_rotate_second_order_sample(
+    sample: Mapping[str, Any],
+    *,
+    shift: int,
+) -> dict[str, Any]:
+    """Rotate every structured player ID in one detached raw sample."""
+
+    if not isinstance(sample, Mapping):
+        raise TypeError("sample must be a mapping")
+    if isinstance(shift, bool) or not isinstance(shift, int):
+        raise TypeError("shift must be an integer")
+    shift %= NUM_PLAYERS
+    rotated = deepcopy(dict(sample))
+    if rotated.get("tom_order") != 2:
+        raise ValueError("cyclic player rotation is restricted to tom_order=2")
+
+    rotated["observer_ids"] = [
+        _rotate_player_number(player_id, shift=shift)
+        for player_id in rotated["observer_ids"]
+    ]
+    rotated["speaker_id"] = _rotate_player_number(
+        rotated["speaker_id"],
+        shift=shift,
+    )
+
+    for field_name in SUBJECT_MAPPING_FIELDS:
+        mapping = rotated[field_name]
+        if not isinstance(mapping, Mapping):
+            raise TypeError(f"{field_name} must be a mapping")
+        remapped: dict[str, Any] = {}
+        for subject, value in mapping.items():
+            rotated_subject = _rotate_player_name(subject, shift=shift)
+            if rotated_subject in remapped:
+                raise ValueError(f"duplicate rotated subject in {field_name}")
+            remapped[rotated_subject] = (
+                _rotate_player_list(value, shift=shift)
+                if field_name in _PLAYER_LIST_MAPPING_FIELDS
+                else deepcopy(value)
+            )
+        rotated[field_name] = remapped
+
+    for event in rotated["public_events"]:
+        event_type = event.get("event_type")
+        if event_type in {"turn_start", "public_speech"}:
+            event["speaker"] = _rotate_player_name(
+                event["speaker"],
+                shift=shift,
+            )
+        if event_type == "public_speech":
+            event["sp_actions"] = [
+                [
+                    _rotate_player_name(action[0], shift=shift),
+                    action[1],
+                    _rotate_player_name(action[2], shift=shift),
+                ]
+                for action in event["sp_actions"]
+            ]
+        elif event_type == "vote_result":
+            votes = [
+                {
+                    "voter": _rotate_player_name(
+                        vote["voter"],
+                        shift=shift,
+                    ),
+                    "target": (
+                        None
+                        if vote["target"] is None
+                        else _rotate_player_name(
+                            vote["target"],
+                            shift=shift,
+                        )
+                    ),
+                }
+                for vote in event["votes"]
+            ]
+            event["votes"] = sorted(
+                votes,
+                key=lambda vote: PLAYER_TO_ID[vote["voter"]],
+            )
+        elif event_type == "exile_result":
+            event["exiled_players"] = _rotate_player_list(
+                event["exiled_players"],
+                shift=shift,
+            )
+        elif event_type == "death_announcement":
+            event["dead_players"] = _rotate_player_list(
+                event["dead_players"],
+                shift=shift,
+            )
+
+    rotated["public_event_digest"] = public_event_digest(
+        rotated["public_events"]
+    )
+    rotated["structured_input_digest"] = structured_input_digest(
+        rotated["public_events"]
+    )
+    return rotated
+
+
 def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
     """Validate one current raw training record without repairing it."""
 
@@ -212,25 +374,13 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
             "first-order samples must supervise only the current speaker observer"
         )
 
-    mapping_fields = (
-        "suspected_werewolves",
-        "known_werewolves",
-        "known_non_werewolves",
-        "belief_status",
-        "belief_errors",
-        "agent_backend_ids",
-        "observer_annotation_confidence",
-        "observer_label_provenance",
-        "source_belief_errors",
-        "source_belief_status",
-    )
     mappings = {
         field_name: _normalize_subject_mapping(
             sample.get(field_name),
             field_name=field_name,
             expected_subjects=expected_subjects,
         )
-        for field_name in mapping_fields
+        for field_name in SUBJECT_MAPPING_FIELDS
     }
 
     targets: dict[str, torch.Tensor | None] = {}
@@ -377,12 +527,26 @@ class TWDToMDataset(Dataset):
         tom_order: int,
         feature_builder: PublicEventFeatureBuilder | None = None,
         target_dtype: torch.dtype = torch.float32,
+        enable_cyclic_rotation: bool = False,
+        augmentation_seed: int = 0,
     ):
         self.tom_order = _validate_tom_order(tom_order)
+        if not isinstance(enable_cyclic_rotation, bool):
+            raise TypeError("enable_cyclic_rotation must be boolean")
+        if enable_cyclic_rotation and self.tom_order != 2:
+            raise ValueError("cyclic player rotation is restricted to tom_order=2")
+        if (
+            isinstance(augmentation_seed, bool)
+            or not isinstance(augmentation_seed, int)
+            or augmentation_seed < 0
+        ):
+            raise ValueError("augmentation_seed must be a non-negative integer")
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
+        self._raw_samples = [deepcopy(dict(sample)) for sample in samples]
         self.samples = [
-            _normalize_sample(sample, tom_order=self.tom_order) for sample in samples
+            _normalize_sample(sample, tom_order=self.tom_order)
+            for sample in self._raw_samples
         ]
         last_prefix_by_game: dict[str, list[dict[str, Any]]] = {}
         for sample in self.samples:
@@ -400,6 +564,9 @@ class TWDToMDataset(Dataset):
         if not isinstance(target_dtype, torch.dtype) or not target_dtype.is_floating_point:
             raise TypeError("target_dtype must be a floating-point dtype")
         self.target_dtype = target_dtype
+        self.enable_cyclic_rotation = enable_cyclic_rotation
+        self.augmentation_seed = augmentation_seed
+        self._epoch = 0
 
     @classmethod
     def from_jsonl(
@@ -409,19 +576,41 @@ class TWDToMDataset(Dataset):
         tom_order: int,
         feature_builder: PublicEventFeatureBuilder | None = None,
         target_dtype: torch.dtype = torch.float32,
+        enable_cyclic_rotation: bool = False,
+        augmentation_seed: int = 0,
     ) -> "TWDToMDataset":
         return cls(
             load_twd_tom_jsonl(path),
             tom_order=tom_order,
             feature_builder=feature_builder,
             target_dtype=target_dtype,
+            enable_cyclic_rotation=enable_cyclic_rotation,
+            augmentation_seed=augmentation_seed,
         )
 
     def __len__(self) -> int:
         return len(self.samples)
 
+    def set_epoch(self, epoch: int) -> None:
+        """Select the deterministic train-only rotation epoch."""
+
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise ValueError("epoch must be a non-negative integer")
+        self._epoch = epoch
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
+        if self.enable_cyclic_rotation:
+            shift = deterministic_cyclic_shift(
+                seed=self.augmentation_seed,
+                epoch=self._epoch,
+                sample_index=index,
+            )
+            rotated = cyclically_rotate_second_order_sample(
+                self._raw_samples[index],
+                shift=shift,
+            )
+            sample = _normalize_sample(rotated, tom_order=2)
         features = self.feature_builder.encode_events(sample["public_events"])
         targets = torch.zeros(
             (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES),
@@ -523,9 +712,13 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
 
 
 __all__ = [
+    "CYCLIC_ROTATION_VERSION",
     "RAW_TRAINING_SAMPLE_FIELDS",
+    "SUBJECT_MAPPING_FIELDS",
     "TOM_INPUT_SCOPES",
     "TWDToMDataset",
     "collate_twd_tom_samples",
+    "cyclically_rotate_second_order_sample",
+    "deterministic_cyclic_shift",
     "load_twd_tom_jsonl",
 ]

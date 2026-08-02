@@ -190,11 +190,24 @@ a later structured-input collision study.
 The model input is the structured `public_events` projection. Its sole
 backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
 `inputs_embeds`; it never loads pretrained weights or uses a tokenizer. The
-last non-padding event state is added to each observer embedding. First-order
-rows also add one linear projection of that observer's private knowledge and
-the single output projection produces `[B,7,21]` pair logits. Second-order rows
-remain public-only and the same 21-class projection produces `[B,7,21]` pair
-logits. Both orders use the same masked soft-target categorical cross entropy.
+first-order readout adds the last non-padding event state to each observer
+embedding; rows also add one linear projection of that observer's private
+knowledge. The second-order readout instead uses the seven observer embeddings
+as queries over the complete padded-mask-aware public hidden-state sequence,
+then applies a residual LayerNorm. It remains public-only. Both paths use the
+same shared 21-class output projection and masked soft-target categorical cross
+entropy.
+
+Only the second-order training Dataset applies deterministic cyclic player-ID
+rotation. For epoch `e`, sample index `n`, and training seed `s`, its shift is
+`(s + e + n) mod 7`; every structured player field and supervision mapping is
+rotated consistently before rebuilding the canonical pair target. Seven
+consecutive epochs cover all rotations for every sample. First-order data,
+validation, evaluation, and shadow inference retain their canonical IDs. New
+second-order checkpoints declare `observer_readout` as
+`public_event_query_attention_v1` and `train_player_augmentation` as
+`cyclic_rotation_v1`; checkpoints missing that architecture contract are
+rejected rather than converted.
 
 For pair probabilities `q[i, omega]`, the sole player-level projection is
 

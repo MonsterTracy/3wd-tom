@@ -6,7 +6,10 @@ import math
 import pytest
 import torch
 
-from werewolf.models.twd_tom.metrics import compute_subjective_pair_metrics
+from werewolf.models.twd_tom.metrics import (
+    compute_subjective_pair_diagnostics,
+    compute_subjective_pair_metrics,
+)
 from werewolf.models.twd_tom.schema import (
     NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
@@ -22,6 +25,16 @@ EXPECTED_KEYS = {
     "mean_marginal_row_sum_error",
     "mean_predicted_diagonal_marginal",
     "mean_target_diagonal_marginal",
+}
+DIAGNOSTIC_KEYS = {
+    "mean_target_pair_entropy",
+    "mean_predicted_pair_entropy",
+    "mean_target_pair_top1_top2_margin",
+    "mean_predicted_pair_top1_top2_margin",
+    "mean_target_marginal_spread",
+    "mean_predicted_marginal_spread",
+    "mean_target_observer_pairwise_tv",
+    "mean_predicted_observer_pairwise_tv",
 }
 
 
@@ -126,3 +139,40 @@ def test_both_orders_use_only_pair_and_marginal_metrics(tom_order):
     metrics = compute_subjective_pair_metrics(logits, targets, mask)
     assert set(metrics) == EXPECTED_KEYS
     assert not any("suspicion" in key for key in metrics)
+
+
+def test_collapse_diagnostics_are_finite_and_match_known_pair_rows():
+    targets = torch.zeros((1, NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES))
+    targets[0, 0, 0] = 1
+    targets[0, 1, 1] = 1
+    mask = torch.zeros((1, NUM_PLAYERS), dtype=torch.bool)
+    mask[0, :2] = True
+    logits = targets.clamp_min(torch.finfo(torch.float32).tiny).log()
+    diagnostics = compute_subjective_pair_diagnostics(logits, targets, mask)
+    assert set(diagnostics) == DIAGNOSTIC_KEYS
+    assert all(math.isfinite(value) for value in diagnostics.values())
+    assert diagnostics["mean_target_pair_entropy"] == pytest.approx(0.0)
+    assert diagnostics["mean_target_pair_top1_top2_margin"] == pytest.approx(1.0)
+    assert diagnostics["mean_target_marginal_spread"] == pytest.approx(1.0)
+    assert diagnostics["mean_target_observer_pairwise_tv"] == pytest.approx(1.0)
+    assert diagnostics["mean_predicted_observer_pairwise_tv"] == pytest.approx(
+        1.0
+    )
+
+
+def test_observer_pairwise_tv_skips_snapshots_with_fewer_than_two_rows():
+    targets = torch.zeros((2, NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES))
+    targets[0, 0, 0] = 1
+    targets[1, 0, 0] = 1
+    targets[1, 1, 1] = 1
+    mask = torch.zeros((2, NUM_PLAYERS), dtype=torch.bool)
+    mask[0, 0] = True
+    mask[1, :2] = True
+    logits = targets.clamp_min(torch.finfo(torch.float32).tiny).log()
+    diagnostics = compute_subjective_pair_diagnostics(logits, targets, mask)
+    assert diagnostics["mean_target_observer_pairwise_tv"] == pytest.approx(1.0)
+    only_one = compute_subjective_pair_diagnostics(
+        logits[:1], targets[:1], mask[:1]
+    )
+    assert only_one["mean_target_observer_pairwise_tv"] == 0.0
+    assert only_one["mean_predicted_observer_pairwise_tv"] == 0.0

@@ -28,10 +28,24 @@ from script.twd_tom.train import (
     run_training,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
-from werewolf.models.twd_tom.schema import SECOND_ORDER_TARGET_ENCODING
+from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
+from werewolf.models.twd_tom.schema import (
+    SECOND_ORDER_OBSERVER_READOUT,
+    SECOND_ORDER_TARGET_ENCODING,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+COLLAPSE_DIAGNOSTIC_KEYS = {
+    "mean_target_pair_entropy",
+    "mean_predicted_pair_entropy",
+    "mean_target_pair_top1_top2_margin",
+    "mean_predicted_pair_top1_top2_margin",
+    "mean_target_marginal_spread",
+    "mean_predicted_marginal_spread",
+    "mean_target_observer_pairwise_tv",
+    "mean_predicted_observer_pairwise_tv",
+}
 
 
 def _source_sample(tom_order: int, split: str) -> dict:
@@ -158,6 +172,26 @@ def test_train_and_validation_loader_shuffle_contract(tmp_path):
     assert isinstance(validation_loader.sampler, SequentialSampler)
 
 
+def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
+    config = _training_config(tmp_path, 2)
+    train_loader, train_dataset, validation_loader, validation_dataset = (
+        build_training_data_loaders(config)
+    )
+    assert train_dataset.enable_cyclic_rotation is True
+    assert validation_dataset.enable_cyclic_rotation is False
+    assert train_dataset.augmentation_seed == config.seed
+    assert isinstance(train_loader.sampler, RandomSampler)
+    assert isinstance(validation_loader.sampler, SequentialSampler)
+    validation_before = validation_dataset[0]
+    validation_dataset.set_epoch(5)
+    validation_after = validation_dataset[0]
+    assert torch.equal(
+        validation_before["pair_targets"],
+        validation_after["pair_targets"],
+    )
+    assert validation_before["metadata"] == validation_after["metadata"]
+
+
 @pytest.mark.parametrize("empty_split", ["train", "validation"])
 def test_train_and_validation_must_be_non_empty(tmp_path, empty_split):
     config = _training_config(tmp_path, 1)
@@ -190,8 +224,14 @@ def test_validation_does_not_change_weights_or_create_gradients(tmp_path):
 def test_each_epoch_validates_and_equal_loss_keeps_earlier_best(tmp_path, monkeypatch):
     config = _training_config(tmp_path, 1, epochs=3)
     train_epochs = []
+    dataset_epochs = []
     validation_losses = iter((2.0, 1.0, 1.0))
     validation_calls = []
+    original_set_epoch = train_module.TWDToMDataset.set_epoch
+
+    def capture_set_epoch(dataset, epoch):
+        dataset_epochs.append(epoch)
+        original_set_epoch(dataset, epoch)
 
     def fake_train_one_epoch(model, data_loader, optimizer, **kwargs):
         epoch = len(train_epochs) + 1
@@ -207,9 +247,15 @@ def test_each_epoch_validates_and_equal_loss_keeps_earlier_best(tmp_path, monkey
 
     monkeypatch.setattr(train_module, "train_one_epoch", fake_train_one_epoch)
     monkeypatch.setattr(train_module, "evaluate_model", fake_evaluate_model)
+    monkeypatch.setattr(
+        train_module.TWDToMDataset,
+        "set_epoch",
+        capture_set_epoch,
+    )
     summary = run_training(config)
 
     assert train_epochs == [1, 2, 3]
+    assert dataset_epochs == [1, 2, 3]
     assert validation_calls == [2.0, 1.0, 1.0]
     assert summary["best_epoch"] == 2
     assert summary["best_validation_mean_loss"] == 1.0
@@ -316,6 +362,18 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
             "mean_marginal_mae",
         }
         assert not any("suspicion" in name for name in evaluation["metrics"])
+        assert all(
+            payload["observer_readout"] == SECOND_ORDER_OBSERVER_READOUT
+            for payload in result_payloads
+        )
+        assert all(
+            payload["train_player_augmentation"]
+            == CYCLIC_ROTATION_VERSION
+            for payload in result_payloads
+        )
+        assert COLLAPSE_DIAGNOSTIC_KEYS <= set(evaluation["metrics"])
+        assert COLLAPSE_DIAGNOSTIC_KEYS <= set(best["train_metrics"])
+        assert COLLAPSE_DIAGNOSTIC_KEYS <= set(best["validation_metrics"])
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])

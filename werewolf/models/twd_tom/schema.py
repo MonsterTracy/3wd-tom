@@ -69,6 +69,7 @@ PLAYER_NAMES: tuple[str, ...] = tuple(
 )
 CANONICAL_PLAYER_ORDERING = PLAYER_NAMES
 SECOND_ORDER_TARGET_ENCODING = "classic7_second_order_wolf_pair_distribution_v2"
+SECOND_ORDER_OBSERVER_READOUT = "public_event_query_attention_v1"
 
 
 CANONICAL_WOLF_PAIRS: tuple[tuple[str, str], ...] = tuple(
@@ -390,6 +391,7 @@ __all__ = [
     "PLAYER_NAMES",
     "CANONICAL_PLAYER_ORDERING",
     "SECOND_ORDER_TARGET_ENCODING",
+    "SECOND_ORDER_OBSERVER_READOUT",
     "ACTION_NAMES",
     "GUESS_ROLE_NAMES",
     "PLAYER_TO_ID",

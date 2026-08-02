@@ -116,6 +116,68 @@ def test_second_order_uses_the_same_single_pair_output_projection():
     assert not hasattr(second_order, "suspicion_output_projection")
 
 
+def test_second_order_observer_query_attention_shapes_and_padding_mask():
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    ).eval()
+    observed = {}
+
+    def capture(_module, _args, kwargs):
+        observed.update(kwargs)
+
+    handle = second_order.second_order_observer_query_attention.register_forward_pre_hook(
+        capture,
+        with_kwargs=True,
+    )
+    try:
+        with torch.no_grad():
+            output = second_order(**make_features())
+    finally:
+        handle.remove()
+    assert observed["query"].shape == (1, 7, HIDDEN_SIZE)
+    assert observed["key"].shape == (1, 3, HIDDEN_SIZE)
+    assert observed["value"].shape == (1, 3, HIDDEN_SIZE)
+    assert torch.equal(
+        observed["key_padding_mask"],
+        torch.tensor([[False, False, True]]),
+    )
+    assert observed["need_weights"] is False
+    assert output["observer_hidden_states"].shape == (1, 7, HIDDEN_SIZE)
+    assert output["observer_pair_logits"].shape == (1, 7, 21)
+
+
+def test_second_order_uses_one_shared_attention_and_head():
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    attentions = [
+        module
+        for module in second_order.modules()
+        if isinstance(module, torch.nn.MultiheadAttention)
+    ]
+    assert attentions == [second_order.second_order_observer_query_attention]
+    assert second_order.output_projection.out_features == 21
+    assert not hasattr(model, "second_order_observer_query_attention")
+
+
+def test_second_order_rejects_all_padding_before_query_attention(model):
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    features = {
+        name: torch.zeros_like(value)
+        for name, value in make_features().items()
+    }
+    with pytest.raises(ValueError, match="non-empty public history"):
+        second_order(**features)
+    with torch.no_grad():
+        first_order = model(**features)
+    assert first_order["observer_pair_logits"].shape == (1, 7, 21)
+
+
 def test_first_order_private_projection_changes_only_its_observer(model):
     features = make_features()
     wolves = torch.zeros((1, 7, 7))

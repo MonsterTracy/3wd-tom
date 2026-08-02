@@ -16,6 +16,44 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
     return float(selected.mean().item()) if selected.numel() else 0.0
 
 
+def _distribution_entropy(probabilities: torch.Tensor) -> torch.Tensor:
+    safe_log = probabilities.clamp_min(
+        torch.finfo(probabilities.dtype).tiny
+    ).log()
+    return -(probabilities * safe_log).sum(dim=-1)
+
+
+def _top1_top2_margin(probabilities: torch.Tensor) -> torch.Tensor:
+    top_two = probabilities.topk(2, dim=-1).values
+    return top_two[..., 0] - top_two[..., 1]
+
+
+def _mean_observer_pairwise_tv(
+    probabilities: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> float:
+    snapshot_means = []
+    for snapshot, snapshot_mask in zip(probabilities, valid_mask):
+        valid_rows = snapshot[snapshot_mask]
+        if valid_rows.shape[0] < 2:
+            continue
+        pairwise_tv = 0.5 * (
+            valid_rows.unsqueeze(1) - valid_rows.unsqueeze(0)
+        ).abs().sum(dim=-1)
+        upper_triangle = torch.triu_indices(
+            valid_rows.shape[0],
+            valid_rows.shape[0],
+            offset=1,
+            device=valid_rows.device,
+        )
+        snapshot_means.append(
+            pairwise_tv[upper_triangle[0], upper_triangle[1]].mean()
+        )
+    if not snapshot_means:
+        return 0.0
+    return float(torch.stack(snapshot_means).mean().item())
+
+
 @torch.no_grad()
 def compute_subjective_pair_metrics(
     pair_logits: torch.Tensor,
@@ -67,4 +105,53 @@ def compute_subjective_pair_metrics(
     }
 
 
-__all__ = ["compute_subjective_pair_metrics"]
+@torch.no_grad()
+def compute_subjective_pair_diagnostics(
+    pair_logits: torch.Tensor,
+    pair_targets: torch.Tensor,
+    subject_mask: torch.Tensor,
+) -> dict[str, float]:
+    """Measure pair sharpness, marginal spread, and observer diversity."""
+
+    compute_subjective_pair_metrics(pair_logits, pair_targets, subject_mask)
+    valid_mask = subject_mask.to(device=pair_logits.device, dtype=torch.bool)
+    targets = pair_targets.to(device=pair_logits.device, dtype=pair_logits.dtype)
+    probabilities = F.softmax(pair_logits, dim=-1)
+    predicted_marginals = pair_probabilities_to_belief_marginals(probabilities)
+    target_marginals = pair_probabilities_to_belief_marginals(targets)
+    return {
+        "mean_target_pair_entropy": _masked_mean(
+            _distribution_entropy(targets), valid_mask
+        ),
+        "mean_predicted_pair_entropy": _masked_mean(
+            _distribution_entropy(probabilities), valid_mask
+        ),
+        "mean_target_pair_top1_top2_margin": _masked_mean(
+            _top1_top2_margin(targets), valid_mask
+        ),
+        "mean_predicted_pair_top1_top2_margin": _masked_mean(
+            _top1_top2_margin(probabilities), valid_mask
+        ),
+        "mean_target_marginal_spread": _masked_mean(
+            target_marginals.max(dim=-1).values
+            - target_marginals.min(dim=-1).values,
+            valid_mask,
+        ),
+        "mean_predicted_marginal_spread": _masked_mean(
+            predicted_marginals.max(dim=-1).values
+            - predicted_marginals.min(dim=-1).values,
+            valid_mask,
+        ),
+        "mean_target_observer_pairwise_tv": _mean_observer_pairwise_tv(
+            targets, valid_mask
+        ),
+        "mean_predicted_observer_pairwise_tv": _mean_observer_pairwise_tv(
+            probabilities, valid_mask
+        ),
+    }
+
+
+__all__ = [
+    "compute_subjective_pair_diagnostics",
+    "compute_subjective_pair_metrics",
+]
