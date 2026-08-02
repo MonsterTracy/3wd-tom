@@ -1,4 +1,4 @@
-"""Read-only seat-bias and public-evidence audit for second-order targets."""
+"""Read-only seat-bias and latest-public-action audit for ToM2 targets."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import statistics
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -35,31 +36,58 @@ def _distribution_summary(values: list[float]) -> dict[str, int | float]:
 class _TargetAuditAccumulator:
     def __init__(self) -> None:
         self.valid_row_count = 0
-        self.public_evidence_valid_row_count = 0
+        self.update_valid_row_count = 0
         self.snapshot_count = 0
-        self.valid_rows_by_observer = torch.zeros(7, dtype=torch.int64)
-        self.evidence_rows_by_observer = torch.zeros(7, dtype=torch.int64)
+        self.latest_action_snapshot_count = 0
+        self.update_valid_snapshot_count = 0
+        self.update_rows_by_actor = torch.zeros(7, dtype=torch.int64)
+        self.valid_observer_count_distribution: Counter[int] = Counter()
+        self.latest_action_type_counts: Counter[str] = Counter()
+        self.multi_actor_speech_examples: list[dict[str, Any]] = []
         self.marginal_sums = torch.zeros(7, dtype=torch.float64)
         self.top_counts = torch.zeros(7, dtype=torch.int64)
         self.pair_entropies: list[float] = []
         self.marginal_spreads: list[float] = []
         self.observer_pairwise_tv: list[float] = []
-        self.evidence_pair_entropies: list[float] = []
-        self.evidence_marginal_spreads: list[float] = []
-        self.evidence_observer_pairwise_tv: list[float] = []
+        self.update_pair_entropies: list[float] = []
+        self.update_marginal_spreads: list[float] = []
+        self.update_observer_pairwise_tv: list[float] = []
 
     def update(self, item: Mapping[str, Any]) -> None:
         targets = item["pair_targets"].to(dtype=torch.float64)
         mask = item["subject_mask"].to(dtype=torch.bool)
-        evidence_mask = item["public_evidence_mask"].to(dtype=torch.bool)
-        effective_mask = mask & evidence_mask
+        update_mask = item["latest_completed_public_action_mask"].to(
+            dtype=torch.bool
+        )
+        effective_mask = mask & update_mask
         valid_targets = targets[mask]
-        evidence_targets = targets[effective_mask]
+        update_targets = targets[effective_mask]
+        actor_ids = item["metadata"][
+            "latest_completed_public_action_actor_ids"
+        ]
+        action_type = item["metadata"][
+            "latest_completed_public_action_type"
+        ]
         self.snapshot_count += 1
         self.valid_row_count += valid_targets.shape[0]
-        self.public_evidence_valid_row_count += evidence_targets.shape[0]
-        self.valid_rows_by_observer += mask.to(dtype=torch.int64)
-        self.evidence_rows_by_observer += effective_mask.to(dtype=torch.int64)
+        self.update_valid_row_count += update_targets.shape[0]
+        effective_count = int(effective_mask.sum().item())
+        self.valid_observer_count_distribution[effective_count] += 1
+        self.update_rows_by_actor += effective_mask.to(dtype=torch.int64)
+        if actor_ids:
+            self.latest_action_snapshot_count += 1
+        if effective_count:
+            self.update_valid_snapshot_count += 1
+        self.latest_action_type_counts[action_type or "none"] += 1
+        if action_type == "public_speech" and len(actor_ids) > 1:
+            self.multi_actor_speech_examples.append(
+                {
+                    "game_id": item["metadata"]["game_id"],
+                    "step_idx": item["metadata"]["step_idx"],
+                    "actor_ids": list(actor_ids),
+                    "reason": "speech_action_subject_differs_from_speaker",
+                }
+            )
         if valid_targets.numel() == 0:
             return
         marginals = pair_probabilities_to_belief_marginals(targets)[mask]
@@ -77,27 +105,27 @@ class _TargetAuditAccumulator:
         if valid_targets.shape[0] >= 2:
             pairwise_tv = 0.5 * torch.pdist(valid_targets, p=1)
             self.observer_pairwise_tv.append(float(pairwise_tv.mean().item()))
-        if evidence_targets.numel():
-            evidence_marginals = pair_probabilities_to_belief_marginals(
+        if update_targets.numel():
+            update_marginals = pair_probabilities_to_belief_marginals(
                 targets
             )[effective_mask]
-            evidence_entropies = -(
-                evidence_targets
-                * evidence_targets.clamp_min(
+            update_entropies = -(
+                update_targets
+                * update_targets.clamp_min(
                     torch.finfo(torch.float64).tiny
                 ).log()
             ).sum(dim=-1)
-            self.evidence_pair_entropies.extend(evidence_entropies.tolist())
-            self.evidence_marginal_spreads.extend(
+            self.update_pair_entropies.extend(update_entropies.tolist())
+            self.update_marginal_spreads.extend(
                 (
-                    evidence_marginals.max(dim=-1).values
-                    - evidence_marginals.min(dim=-1).values
+                    update_marginals.max(dim=-1).values
+                    - update_marginals.min(dim=-1).values
                 ).tolist()
             )
-        if evidence_targets.shape[0] >= 2:
-            evidence_pairwise_tv = 0.5 * torch.pdist(evidence_targets, p=1)
-            self.evidence_observer_pairwise_tv.append(
-                float(evidence_pairwise_tv.mean().item())
+        if update_targets.shape[0] >= 2:
+            update_pairwise_tv = 0.5 * torch.pdist(update_targets, p=1)
+            self.update_observer_pairwise_tv.append(
+                float(update_pairwise_tv.mean().item())
             )
 
     def finalize(self) -> dict[str, Any]:
@@ -105,32 +133,51 @@ class _TargetAuditAccumulator:
             marginal_means = self.marginal_sums / self.valid_row_count
         else:
             marginal_means = torch.zeros_like(self.marginal_sums)
-        silent_count = (
-            self.valid_row_count - self.public_evidence_valid_row_count
+        latest_action_fraction = (
+            self.latest_action_snapshot_count / self.snapshot_count
+            if self.snapshot_count
+            else 0.0
         )
-        evidence_fraction = (
-            self.public_evidence_valid_row_count / self.valid_row_count
-            if self.valid_row_count
+        update_valid_fraction = (
+            self.update_valid_snapshot_count / self.snapshot_count
+            if self.snapshot_count
             else 0.0
         )
         return {
             "snapshot_count": self.snapshot_count,
             "valid_observer_row_count": self.valid_row_count,
-            "public_evidence_valid_observer_row_count": (
-                self.public_evidence_valid_row_count
+            "latest_completed_public_action_snapshot_count": (
+                self.latest_action_snapshot_count
             ),
-            "silent_observer_row_count": silent_count,
-            "silent_observer_row_fraction": 1.0 - evidence_fraction,
-            "public_evidence_subject_fraction": evidence_fraction,
-            "public_evidence_coverage_by_observer": {
-                player: (
-                    float(self.evidence_rows_by_observer[index].item())
-                    / int(self.valid_rows_by_observer[index].item())
-                    if int(self.valid_rows_by_observer[index].item()) > 0
-                    else 0.0
+            "no_latest_completed_public_action_snapshot_count": (
+                self.snapshot_count - self.latest_action_snapshot_count
+            ),
+            "latest_completed_public_action_snapshot_fraction": (
+                latest_action_fraction
+            ),
+            "update_valid_snapshot_count": self.update_valid_snapshot_count,
+            "filtered_snapshot_count": (
+                self.snapshot_count - self.update_valid_snapshot_count
+            ),
+            "latest_action_snapshot_fraction": update_valid_fraction,
+            "update_valid_observer_row_count": self.update_valid_row_count,
+            "valid_observer_count_per_snapshot_distribution": {
+                str(count): frequency
+                for count, frequency in sorted(
+                    self.valid_observer_count_distribution.items()
                 )
+            },
+            "latest_completed_public_action_type_counts": dict(
+                sorted(self.latest_action_type_counts.items())
+            ),
+            "update_rows_by_actor_id": {
+                player: int(self.update_rows_by_actor[index].item())
                 for index, player in enumerate(PLAYER_NAMES)
             },
+            "multi_actor_speech_snapshot_count": len(
+                self.multi_actor_speech_examples
+            ),
+            "multi_actor_speech_examples": self.multi_actor_speech_examples,
             "mean_target_marginal_by_player": {
                 player: float(marginal_means[index].item())
                 for index, player in enumerate(PLAYER_NAMES)
@@ -146,14 +193,14 @@ class _TargetAuditAccumulator:
             "target_observer_pairwise_tv": _distribution_summary(
                 self.observer_pairwise_tv
             ),
-            "evidence_conditioned_target_pair_entropy": (
-                _distribution_summary(self.evidence_pair_entropies)
+            "update_conditioned_target_pair_entropy": (
+                _distribution_summary(self.update_pair_entropies)
             ),
-            "evidence_conditioned_target_marginal_spread": (
-                _distribution_summary(self.evidence_marginal_spreads)
+            "update_conditioned_target_marginal_spread": (
+                _distribution_summary(self.update_marginal_spreads)
             ),
-            "evidence_conditioned_target_observer_pairwise_tv": (
-                _distribution_summary(self.evidence_observer_pairwise_tv)
+            "update_conditioned_target_observer_pairwise_tv": (
+                _distribution_summary(self.update_observer_pairwise_tv)
             ),
             "absolute_player_marginal_mean_gap": float(
                 (marginal_means.max() - marginal_means.min()).item()
@@ -231,11 +278,11 @@ def audit_training_targets(
         "validation_without_augmentation",
     ):
         fraction = result[split_name]["overall"][
-            "public_evidence_subject_fraction"
+            "latest_action_snapshot_fraction"
         ]
         if fraction < 0.05:
             raise RuntimeError(
-                f"{split_name} public-evidence coverage is abnormally low: "
+                f"{split_name} latest-action coverage is abnormally low: "
                 f"{fraction:.6f}"
             )
     return result

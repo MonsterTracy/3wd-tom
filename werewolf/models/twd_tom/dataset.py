@@ -18,8 +18,9 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
+    latest_completed_public_action,
+    latest_completed_public_action_mask,
     normalize_public_events,
-    observer_public_action_counts,
     parse_public_phase,
     public_event_digest,
     public_speech_actions,
@@ -599,6 +600,26 @@ class TWDToMDataset(Dataset):
             raise ValueError("epoch must be a non-negative integer")
         self._epoch = epoch
 
+    def second_order_supervised_indices(self) -> tuple[int, ...]:
+        """Return deterministic indices with a valid latest-action target."""
+
+        if self.tom_order != 2:
+            raise ValueError(
+                "second_order_supervised_indices requires tom_order=2"
+            )
+        eligible = []
+        for index, sample in enumerate(self.samples):
+            actor_ids, _action_type = latest_completed_public_action(
+                sample["public_events"]
+            )
+            if any(
+                sample["_pair_targets"][PLAYER_NAMES[player_id - 1]]
+                is not None
+                for player_id in actor_ids
+            ):
+                eligible.append(index)
+        return tuple(eligible)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
         if self.enable_cyclic_rotation:
@@ -646,12 +667,19 @@ class TWDToMDataset(Dataset):
             "metadata": metadata,
         }
         if self.tom_order == 2:
-            public_action_counts = torch.tensor(
-                observer_public_action_counts(sample["public_events"]),
-                dtype=torch.int64,
+            actor_ids, action_type = latest_completed_public_action(
+                sample["public_events"]
             )
-            item["observer_public_action_count"] = public_action_counts
-            item["public_evidence_mask"] = public_action_counts > 0
+            item["latest_completed_public_action_mask"] = torch.tensor(
+                latest_completed_public_action_mask(sample["public_events"]),
+                dtype=torch.bool,
+            )
+            item["metadata"]["latest_completed_public_action_actor_ids"] = (
+                list(actor_ids)
+            )
+            item["metadata"]["latest_completed_public_action_type"] = (
+                action_type
+            )
         else:
             known_wolves = torch.zeros((NUM_PLAYERS, NUM_PLAYERS), dtype=torch.float32)
             known_non_wolves = torch.zeros_like(known_wolves)
@@ -718,16 +746,14 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         )
     else:
         if any(
-            "public_evidence_mask" not in item
-            or "observer_public_action_count" not in item
+            "latest_completed_public_action_mask" not in item
             for item in batch
         ):
-            raise ValueError("second-order samples require public evidence fields")
-        result["public_evidence_mask"] = torch.stack(
-            [item["public_evidence_mask"] for item in batch]
-        )
-        result["observer_public_action_count"] = torch.stack(
-            [item["observer_public_action_count"] for item in batch]
+            raise ValueError(
+                "second-order samples require latest public action fields"
+            )
+        result["latest_completed_public_action_mask"] = torch.stack(
+            [item["latest_completed_public_action_mask"] for item in batch]
         )
     return result
 

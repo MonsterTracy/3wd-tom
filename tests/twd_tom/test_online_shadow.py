@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 import torch
@@ -21,12 +22,16 @@ from script.twd_tom.train import (
 )
 from tests.twd_tom.public_event_fixtures import make_public_events
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.dataset import TWDToMDataset
 from werewolf.models.twd_tom.schema import (
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
     SECOND_ORDER_TARGET_ENCODING,
 )
 from werewolf.models.twd_tom.shadow import SecondOrderToMShadow
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _write_checkpoint(tmp_path, tom_order):
@@ -114,8 +119,11 @@ def test_strict_load_and_public_only_probability_matrix(
     assert "suspicion_matrix" not in record
     assert record["event_idx"] == public_events[-1]["event_idx"]
     assert record["public_event_count"] == len(public_events)
-    assert record["observer_evidence_mask"] == [False] * 7
-    assert record["observer_public_action_count"] == [0] * 7
+    assert record["observer_update_mask"] == [False] * 7
+    assert record["latest_completed_public_action_actor_ids"] == []
+    assert record["latest_completed_public_action_type"] is None
+    assert "observer_evidence_mask" not in record
+    assert "observer_public_action_count" not in record
 
     saved = json.loads((tmp_path / "shadow.jsonl").read_text(encoding="utf-8"))
     assert saved == record
@@ -131,7 +139,7 @@ def test_strict_load_and_public_only_probability_matrix(
         assert forbidden not in serialized
 
 
-def test_shadow_records_prior_public_speech_and_action_evidence(
+def test_shadow_records_only_latest_completed_public_action_block(
     tmp_path,
     second_checkpoint,
 ):
@@ -146,7 +154,7 @@ def test_shadow_records_prior_public_speech_and_action_evidence(
             speaker_id=2,
             public_events=public_events,
         )
-    assert record["observer_evidence_mask"] == [
+    assert record["observer_update_mask"] == [
         False,
         True,
         True,
@@ -155,9 +163,36 @@ def test_shadow_records_prior_public_speech_and_action_evidence(
         False,
         False,
     ]
-    assert record["observer_public_action_count"] == [0, 1, 1, 0, 0, 0, 0]
+    assert record["latest_completed_public_action_actor_ids"] == [2, 3]
+    assert record["latest_completed_public_action_type"] == "public_speech"
     assert len(record["pair_probability_matrix"]) == 7
     assert len(record["wolf_marginal_matrix"]) == 7
+
+
+def test_shadow_update_mask_matches_dataset(tmp_path, second_checkpoint):
+    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            sample = json.loads(line)
+            dataset = TWDToMDataset([sample], tom_order=2)
+            item = dataset[0]
+            if (
+                item["latest_completed_public_action_mask"].any()
+                and item["attention_mask"].shape[0] <= 32
+            ):
+                break
+        else:
+            raise AssertionError("no short latest-action sample found")
+    with _new_shadow(tmp_path, second_checkpoint) as shadow:
+        record = shadow.record(
+            step_idx=sample["step_idx"],
+            phase=sample["phase"],
+            speaker_id=sample["speaker_id"],
+            public_events=sample["public_events"],
+        )
+    assert record["observer_update_mask"] == item[
+        "latest_completed_public_action_mask"
+    ].tolist()
 
 
 def test_old_seven_class_and_first_order_checkpoints_are_rejected(
@@ -353,8 +388,9 @@ def test_minimal_game_fixture_writes_one_real_shadow_record(
     assert len(records[0]["pair_probability_matrix"][0]) == 21
     assert len(records[0]["wolf_marginal_matrix"]) == 7
     assert len(records[0]["wolf_marginal_matrix"][0]) == 7
-    assert records[0]["observer_evidence_mask"] == [False] * 7
-    assert records[0]["observer_public_action_count"] == [0] * 7
+    assert records[0]["observer_update_mask"] == [False] * 7
+    assert records[0]["latest_completed_public_action_actor_ids"] == []
+    assert records[0]["latest_completed_public_action_type"] is None
     assert "suspicion_matrix" not in records[0]
 
 

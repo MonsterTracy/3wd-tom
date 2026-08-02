@@ -136,13 +136,15 @@ classes using that observer's `known_werewolves` and
 and audit data only: they do not appear in a second-order batch's model inputs,
 do not enter `forward`, and do not mask logits. A second-order target row is
 included in loss and formal metrics only when it is valid under the existing
-`subject_mask` and that observer has already produced public evidence in the
-current pre-speech prefix. Public evidence means the observer's own completed
-public speech, each structured speech action attributed to that observer, or
-an already published vote by that observer. Turn starts, phase changes, exile
-and death announcements, and the pending current speech do not count. Silent
-target rows remain in the Dataset; only their effective supervision mask is
-false. First-order masking is unchanged.
+`subject_mask` and that observer is an actor in the latest completed public
+action block. The Dataset scans backward from the final current-speaker
+`turn_start`. A `public_speech` block contains its speaker and all nested
+speech-action subjects; action objects are not actors. A `vote_result` block
+contains its voters; vote targets are not actors. Earlier action blocks do not
+accumulate. Turn starts, phase changes, exile and death announcements, and the
+pending current speech do not count. Snapshots whose effective mask is empty
+are excluded by deterministic Dataset indices in train, validation, and eval.
+Target rows remain unchanged. First-order masking is unchanged.
 
 ## Game-level dataset split
 
@@ -224,7 +226,8 @@ second-order checkpoints declare `observer_readout` as
 `public_event_query_attention_v1` and `train_player_augmentation` as
 `cyclic_rotation_v1`. They additionally declare `observer_event_conditioning`
 as `cyclic_relative_player_relations_v1` and
-`second_order_subject_supervision` as `prior_public_action_mask_v1`;
+`second_order_subject_supervision` as
+`latest_completed_public_action_mask_v1`;
 checkpoints missing or mismatching that architecture and supervision contract
 are rejected rather than converted. The first-order checkpoint contract is
 unchanged.
@@ -260,7 +263,8 @@ whose rows sum to two. Both are logged without logits, roles, private
 knowledge, or labels. No legacy `suspicion_matrix` alias is written. The result
 is not added to observations, prompts, actions, votes, environment state, or
 the original game log. Each record also contains
-`observer_evidence_mask [7]` and `observer_public_action_count [7]`, calculated
-only from that same completed public prefix. Predictions remain present for
-all seven observers; an evidence-false row is an unsupported prior estimate,
-not a row backed by that observer's public behavior.
+`observer_update_mask [7]`, `latest_completed_public_action_actor_ids`, and
+`latest_completed_public_action_type`, calculated from the same latest action
+block used by formal supervision. Predictions remain present for all seven
+observers; an update-false row has no new observable actor evidence at this
+snapshot.

@@ -19,7 +19,8 @@ from werewolf.models.twd_tom.dataset import (
     deterministic_cyclic_shift,
 )
 from werewolf.models.twd_tom.public_events import (
-    observer_public_action_counts,
+    latest_completed_public_action,
+    latest_completed_public_action_mask,
     structured_event_tokens,
 )
 from werewolf.models.twd_tom.schema import (
@@ -41,6 +42,26 @@ def raw_sample(tom_order):
     name = "raw_tom.jsonl" if tom_order == 1 else "raw_tom2.jsonl"
     with (REPO_ROOT / "data" / "qwen25" / name).open(encoding="utf-8") as file:
         return json.loads(next(file))
+
+
+def second_order_sample(*, with_latest_action):
+    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            sample = json.loads(line)
+            actor_ids, _action_type = latest_completed_public_action(
+                sample["public_events"]
+            )
+            has_valid_actor = any(
+                sample["belief_status"][PLAYER_NAMES[player_id - 1]] == "ok"
+                for player_id in actor_ids
+            )
+            if (
+                (with_latest_action and has_valid_actor)
+                or (not with_latest_action and not actor_ids)
+            ):
+                return sample
+    raise AssertionError("missing requested second-order sample fixture")
 
 
 def test_second_order_formal_split_files_are_unchanged():
@@ -98,12 +119,11 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
     assert item["pair_targets"].shape == (7, 21)
-    assert item["public_evidence_mask"].shape == (7,)
-    assert item["observer_public_action_count"].shape == (7,)
+    assert item["latest_completed_public_action_mask"].shape == (7,)
     assert "suspicion_targets" not in item
 
 
-def test_public_evidence_counts_only_prior_player_generated_public_actions():
+def test_latest_completed_action_mask_is_zero_before_first_speech():
     events = [
         {
             "event_idx": 0,
@@ -113,17 +133,139 @@ def test_public_evidence_counts_only_prior_player_generated_public_actions():
         {
             "event_idx": 1,
             "event_type": "turn_start",
-            "speaker": "player1",
+            "speaker": "player4",
+        },
+    ]
+    assert latest_completed_public_action(events) == ((), None)
+    assert latest_completed_public_action_mask(events) == (False,) * 7
+
+
+def test_system_events_do_not_create_latest_action_actors():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "death_announcement",
+            "dead_players": ["player2"],
+        },
+        {
+            "event_idx": 1,
+            "event_type": "exile_result",
+            "exiled_players": ["player3"],
+        },
+        {
+            "event_idx": 2,
+            "event_type": "phase_change",
+            "phase": "2_day_speech",
+        },
+        {
+            "event_idx": 3,
+            "event_type": "turn_start",
+            "speaker": "player4",
+        },
+    ]
+    assert latest_completed_public_action(events) == ((), None)
+    assert latest_completed_public_action_mask(events) == (False,) * 7
+
+
+def test_latest_speech_actor_replaces_earlier_actor_without_accumulating():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "turn_start",
+            "speaker": "player4",
         },
         {
             "event_idx": 2,
             "event_type": "public_speech",
-            "speaker": "player1",
-            "raw_text": "public text",
-            "sp_actions": [["player1", "support", "player2"]],
+            "speaker": "player4",
+            "raw_text": "completed player4 speech",
+            "sp_actions": [["player4", "support", "player2"]],
         },
         {
             "event_idx": 3,
+            "event_type": "turn_start",
+            "speaker": "player5",
+        },
+    ]
+    assert latest_completed_public_action(events) == ((4,), "public_speech")
+    assert latest_completed_public_action_mask(events) == (
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+        False,
+    )
+    events.extend(
+        [
+            {
+                "event_idx": 4,
+                "event_type": "public_speech",
+                "speaker": "player5",
+                "raw_text": "completed player5 speech",
+                "sp_actions": [],
+            },
+            {
+                "event_idx": 5,
+                "event_type": "turn_start",
+                "speaker": "player6",
+            },
+        ]
+    )
+    assert latest_completed_public_action(events) == ((5,), "public_speech")
+    assert latest_completed_public_action_mask(events) == (
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+        False,
+    )
+
+
+def test_latest_speech_uses_speaker_and_action_subject_not_object():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "public_speech",
+            "speaker": "player4",
+            "raw_text": "completed speech",
+            "sp_actions": [["player3", "support", "player2"]],
+        },
+        {
+            "event_idx": 2,
+            "event_type": "turn_start",
+            "speaker": "player5",
+        },
+    ]
+    assert latest_completed_public_action(events) == (
+        (3, 4),
+        "public_speech",
+    )
+    assert latest_completed_public_action_mask(events)[1] is False
+
+
+def test_latest_vote_block_uses_voters_not_targets_and_skips_system_events():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_vote",
+        },
+        {
+            "event_idx": 1,
             "event_type": "vote_result",
             "votes": [
                 {"voter": "player1", "target": "player2"},
@@ -131,22 +273,44 @@ def test_public_evidence_counts_only_prior_player_generated_public_actions():
             ],
         },
         {
-            "event_idx": 4,
+            "event_idx": 2,
             "event_type": "exile_result",
             "exiled_players": ["player2"],
         },
         {
-            "event_idx": 5,
+            "event_idx": 3,
             "event_type": "death_announcement",
             "dead_players": ["player4"],
         },
         {
-            "event_idx": 6,
+            "event_idx": 4,
+            "event_type": "phase_change",
+            "phase": "2_day_speech",
+        },
+        {
+            "event_idx": 5,
             "event_type": "turn_start",
-            "speaker": "player2",
+            "speaker": "player5",
         },
     ]
-    assert observer_public_action_counts(events) == (3, 0, 1, 0, 0, 0, 0)
+    assert latest_completed_public_action(events) == ((1, 3), "vote_result")
+    assert latest_completed_public_action_mask(events) == (
+        True,
+        False,
+        True,
+        False,
+        False,
+        False,
+        False,
+    )
+
+
+def test_second_order_indices_filter_zero_effective_mask_deterministically():
+    without_action = second_order_sample(with_latest_action=False)
+    with_action = second_order_sample(with_latest_action=True)
+    dataset = TWDToMDataset([without_action, with_action], tom_order=2)
+    assert dataset.second_order_supervised_indices() == (1,)
+    assert dataset.second_order_supervised_indices() == (1,)
 
 
 def test_first_order_pair_projection_semantics_are_unchanged():
@@ -225,8 +389,7 @@ def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
     second = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
     second_batch = collate_twd_tom_samples([second])
     assert second_batch["pair_targets"].shape == (1, 7, 21)
-    assert second_batch["public_evidence_mask"].shape == (1, 7)
-    assert second_batch["observer_public_action_count"].shape == (1, 7)
+    assert second_batch["latest_completed_public_action_mask"].shape == (1, 7)
     assert "suspicion_targets" not in second_batch
     assert "known_werewolves" not in second_batch
     assert "known_non_werewolves" not in second_batch

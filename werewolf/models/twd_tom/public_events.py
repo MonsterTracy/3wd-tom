@@ -238,19 +238,38 @@ def public_speech_actions(events: Any) -> list[list[str]]:
     ]
 
 
-def observer_public_action_counts(events: Any) -> tuple[int, ...]:
-    """Count prior public speeches, speech actions, and votes per player."""
+def latest_completed_public_action(
+    events: Any,
+) -> tuple[tuple[int, ...], str | None]:
+    """Return actors and type for the latest completed public action block."""
 
-    counts = [0] * len(PLAYER_NAMES)
-    for event in normalize_public_events(events):
-        if event["event_type"] == "public_speech":
-            counts[PLAYER_TO_ID[event["speaker"]] - 1] += 1
-            for subject, _action, _object in event["sp_actions"]:
-                counts[PLAYER_TO_ID[subject] - 1] += 1
-        elif event["event_type"] == "vote_result":
-            for vote in event["votes"]:
-                counts[PLAYER_TO_ID[vote["voter"]] - 1] += 1
-    return tuple(counts)
+    for event in reversed(normalize_public_events(events)):
+        event_type = event["event_type"]
+        if event_type == "public_speech":
+            actors = {event["speaker"]}
+            actors.update(action[0] for action in event["sp_actions"])
+            return (
+                tuple(sorted(PLAYER_TO_ID[player] for player in actors)),
+                event_type,
+            )
+        if event_type == "vote_result":
+            actor_ids = tuple(
+                sorted(PLAYER_TO_ID[vote["voter"]] for vote in event["votes"])
+            )
+            if actor_ids:
+                return actor_ids, event_type
+    return (), None
+
+
+def latest_completed_public_action_mask(events: Any) -> tuple[bool, ...]:
+    """Mark only actors in the latest completed public action block."""
+
+    actor_ids, _action_type = latest_completed_public_action(events)
+    actor_id_set = set(actor_ids)
+    return tuple(
+        player_id in actor_id_set
+        for player_id in range(1, len(PLAYER_NAMES) + 1)
+    )
 
 
 def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
@@ -349,7 +368,8 @@ __all__ = [
     "copy_public_events",
     "normalize_public_event",
     "normalize_public_events",
-    "observer_public_action_counts",
+    "latest_completed_public_action",
+    "latest_completed_public_action_mask",
     "parse_public_phase",
     "public_event_digest",
     "public_speech_actions",

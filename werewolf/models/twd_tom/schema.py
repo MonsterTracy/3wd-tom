@@ -73,7 +73,7 @@ SECOND_ORDER_OBSERVER_READOUT = "public_event_query_attention_v1"
 SECOND_ORDER_OBSERVER_EVENT_CONDITIONING = (
     "cyclic_relative_player_relations_v1"
 )
-SECOND_ORDER_SUBJECT_SUPERVISION = "prior_public_action_mask_v1"
+SECOND_ORDER_SUBJECT_SUPERVISION = "latest_completed_public_action_mask_v1"
 
 
 CANONICAL_WOLF_PAIRS: tuple[tuple[str, str], ...] = tuple(

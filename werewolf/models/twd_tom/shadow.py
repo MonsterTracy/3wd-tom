@@ -17,7 +17,8 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
 from werewolf.models.twd_tom.public_events import (
-    observer_public_action_counts,
+    latest_completed_public_action,
+    latest_completed_public_action_mask,
     parse_public_phase,
 )
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
@@ -143,7 +144,7 @@ class SecondOrderToMShadow:
                 pair_probabilities
             )
         latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
-        public_action_counts = observer_public_action_counts(
+        latest_actor_ids, latest_action_type = latest_completed_public_action(
             snapshot.public_events
         )
 
@@ -183,10 +184,13 @@ class SecondOrderToMShadow:
             "pair_ordering": PAIR_ORDERING,
             "player_ordering": list(CANONICAL_PLAYER_ORDERING),
             "public_event_count": len(snapshot.public_events),
-            "observer_evidence_mask": [
-                count > 0 for count in public_action_counts
-            ],
-            "observer_public_action_count": list(public_action_counts),
+            "observer_update_mask": list(
+                latest_completed_public_action_mask(snapshot.public_events)
+            ),
+            "latest_completed_public_action_actor_ids": list(
+                latest_actor_ids
+            ),
+            "latest_completed_public_action_type": latest_action_type,
             "pair_probability_matrix": (
                 pair_probabilities[0].detach().cpu().tolist()
             ),

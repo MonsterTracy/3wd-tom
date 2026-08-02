@@ -158,6 +158,15 @@ def test_mismatched_second_order_evidence_contract_is_rejected(tmp_path, field):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 
+def test_prior_public_action_supervision_checkpoint_is_rejected(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    checkpoint["second_order_subject_supervision"] = (
+        "prior_public_action_mask_v1"
+    )
+    with pytest.raises(ValueError, match="second_order_subject_supervision"):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
 def test_one_validation_sample_can_be_evaluated_against_explicit_training_data(
     tmp_path,
 ):

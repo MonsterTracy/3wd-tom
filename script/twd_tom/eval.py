@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from script.twd_tom.train import (
     RAW_DATASET_PATHS,
@@ -204,8 +204,16 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         tom_order=tom_order,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=model.config.max_seq_len),
     )
+    loader_dataset = dataset
+    if tom_order == 2:
+        supervised_indices = dataset.second_order_supervised_indices()
+        if not supervised_indices:
+            raise ValueError(
+                "evaluation dataset contains no latest-action targets"
+            )
+        loader_dataset = Subset(dataset, supervised_indices)
     loader = DataLoader(
-        dataset,
+        loader_dataset,
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=config.num_workers,

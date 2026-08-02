@@ -12,7 +12,7 @@ from typing import Any, Mapping
 import torch
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, SubsetRandomSampler
+from torch.utils.data import DataLoader, Subset
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
@@ -192,29 +192,19 @@ def build_data_loader(
     if len(dataset) == 0:
         raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
     generator = torch.Generator().manual_seed(config.seed)
-    sampler = None
-    loader_shuffle = shuffle
-    if config.tom_order == 2 and shuffle:
-        eligible_indices = [
-            index
-            for index in range(len(dataset))
-            if (
-                dataset[index]["subject_mask"]
-                & dataset[index]["public_evidence_mask"]
-            ).any()
-        ]
+    loader_dataset = dataset
+    if config.tom_order == 2:
+        eligible_indices = dataset.second_order_supervised_indices()
         if not eligible_indices:
-            raise ValueError("training dataset has no public-evidence targets")
-        sampler = SubsetRandomSampler(
+            raise ValueError("dataset has no latest-action observer targets")
+        loader_dataset = Subset(
+            dataset,
             eligible_indices,
-            generator=generator,
         )
-        loader_shuffle = False
     loader = DataLoader(
-        dataset,
+        loader_dataset,
         batch_size=config.batch_size,
-        shuffle=loader_shuffle,
-        sampler=sampler,
+        shuffle=shuffle,
         num_workers=config.num_workers,
         collate_fn=collate_twd_tom_samples,
         generator=generator if shuffle else None,
@@ -255,8 +245,8 @@ def count_supervised_subjects(data_loader: DataLoader) -> int:
     total = 0
     for batch in data_loader:
         mask = batch["subject_mask"]
-        if "public_evidence_mask" in batch:
-            mask = mask & batch["public_evidence_mask"]
+        if "latest_completed_public_action_mask" in batch:
+            mask = mask & batch["latest_completed_public_action_mask"]
         total += int(mask.sum().item())
     return total
 
@@ -282,7 +272,7 @@ def _move_batch_to_device(
     for field in ("known_werewolves", "known_non_werewolves"):
         if field in batch:
             moved[field] = batch[field].to(device)
-    for field in ("public_evidence_mask", "observer_public_action_count"):
+    for field in ("latest_completed_public_action_mask",):
         if field in batch:
             moved[field] = batch[field].to(device)
     return moved
@@ -313,13 +303,20 @@ def _forward_batch(
 class MetricAccumulator:
     """Aggregate row-weighted training metrics."""
 
-    def __init__(self, *, tom_order: int) -> None:
+    def __init__(self, *, tom_order: int, source_snapshot_count: int) -> None:
         self.include_collapse_diagnostics = _tom_order(tom_order) == 2
+        if (
+            isinstance(source_snapshot_count, bool)
+            or not isinstance(source_snapshot_count, int)
+            or source_snapshot_count <= 0
+        ):
+            raise ValueError("source_snapshot_count must be a positive integer")
+        self.source_snapshot_count = source_snapshot_count
+        self.processed_snapshot_count = 0
         self.valid_subject_count = 0
         self.loss_sum = 0.0
         self.metric_sums: dict[str, float] = {}
         self.metric_weights: dict[str, int] = {}
-        self.original_subject_count = 0
 
     def update(
         self,
@@ -328,7 +325,6 @@ class MetricAccumulator:
         logits: torch.Tensor,
         targets: torch.Tensor,
         subject_mask: torch.Tensor,
-        original_subject_mask: torch.Tensor | None = None,
     ) -> None:
         metrics = compute_subjective_pair_metrics(
             logits,
@@ -344,14 +340,7 @@ class MetricAccumulator:
                 )
             )
         valid_count = int(metrics["valid_subject_count"])
-        if self.include_collapse_diagnostics:
-            if original_subject_mask is None:
-                raise ValueError(
-                    "second-order metrics require the original subject mask"
-                )
-            self.original_subject_count += int(
-                original_subject_mask.sum().item()
-            )
+        self.processed_snapshot_count += int(subject_mask.shape[0])
         pairwise_snapshot_count = int(
             (subject_mask.to(dtype=torch.int64).sum(dim=-1) >= 2).sum().item()
         )
@@ -390,11 +379,11 @@ class MetricAccumulator:
                 "mean_predicted_observer_pairwise_tv",
             ):
                 result.setdefault(name, 0.0)
-            result["public_evidence_valid_subject_count"] = (
+            result["latest_action_valid_subject_count"] = (
                 self.valid_subject_count
             )
-            result["public_evidence_subject_fraction"] = (
-                self.valid_subject_count / self.original_subject_count
+            result["latest_action_snapshot_fraction"] = (
+                self.processed_snapshot_count / self.source_snapshot_count
             )
         return result
 
@@ -406,12 +395,16 @@ def _effective_subject_mask(
     subject_mask = batch["subject_mask"].to(dtype=torch.bool)
     if model.tom_order == 1:
         return subject_mask
-    evidence_mask = batch.get("public_evidence_mask")
-    if evidence_mask is None:
-        raise ValueError("second-order batch requires public_evidence_mask")
-    if evidence_mask.shape != subject_mask.shape:
-        raise ValueError("public_evidence_mask must match subject_mask")
-    return subject_mask & evidence_mask.to(dtype=torch.bool)
+    update_mask = batch.get("latest_completed_public_action_mask")
+    if update_mask is None:
+        raise ValueError(
+            "second-order batch requires latest_completed_public_action_mask"
+        )
+    if update_mask.shape != subject_mask.shape:
+        raise ValueError(
+            "latest_completed_public_action_mask must match subject_mask"
+        )
+    return subject_mask & update_mask.to(dtype=torch.bool)
 
 
 def _targets_for_loss(
@@ -435,6 +428,13 @@ def _pair_distribution(
     return output["observer_pair_logits"], batch["pair_targets"]
 
 
+def _source_snapshot_count(data_loader: DataLoader) -> int:
+    dataset = data_loader.dataset
+    if isinstance(dataset, Subset):
+        return len(dataset.dataset)
+    return len(dataset)
+
+
 def train_one_epoch(
     model: ToMBeliefBackbone,
     data_loader: DataLoader,
@@ -444,7 +444,10 @@ def train_one_epoch(
     gradient_clip_norm: float,
 ) -> dict[str, int | float]:
     model.train()
-    accumulator = MetricAccumulator(tom_order=model.tom_order)
+    accumulator = MetricAccumulator(
+        tom_order=model.tom_order,
+        source_snapshot_count=_source_snapshot_count(data_loader),
+    )
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         optimizer.zero_grad(set_to_none=True)
@@ -470,7 +473,6 @@ def train_one_epoch(
             logits=logits,
             targets=effective_targets,
             subject_mask=effective_subject_mask,
-            original_subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
 
@@ -483,7 +485,10 @@ def evaluate_model(
     device: torch.device,
 ) -> dict[str, int | float]:
     model.eval()
-    accumulator = MetricAccumulator(tom_order=model.tom_order)
+    accumulator = MetricAccumulator(
+        tom_order=model.tom_order,
+        source_snapshot_count=_source_snapshot_count(data_loader),
+    )
     for raw_batch in data_loader:
         batch = _move_batch_to_device(raw_batch, device)
         output = _forward_batch(model, batch)
@@ -504,7 +509,6 @@ def evaluate_model(
             logits=logits,
             targets=effective_targets,
             subject_mask=effective_subject_mask,
-            original_subject_mask=batch["subject_mask"],
         )
     return accumulator.finalize()
 

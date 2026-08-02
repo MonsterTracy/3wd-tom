@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from torch.utils.data import RandomSampler, SequentialSampler, SubsetRandomSampler
+from torch.utils.data import RandomSampler, SequentialSampler, Subset
 from transformers import Qwen2Model
 
 import script.twd_tom.train as train_module
@@ -42,7 +42,7 @@ from werewolf.models.twd_tom.schema import (
     SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
-from werewolf.models.twd_tom.public_events import observer_public_action_counts
+from werewolf.models.twd_tom.public_events import latest_completed_public_action
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -65,20 +65,39 @@ def _source_sample(tom_order: int, split: str) -> dict:
             sample = json.loads(line)
             if tom_order == 1:
                 return sample
-            action_counts = observer_public_action_counts(
+            actor_ids, _action_type = latest_completed_public_action(
                 sample["public_events"]
             )
             if any(
-                action_counts[index] > 0
-                and sample["belief_status"][player] == "ok"
-                for index, player in enumerate(PLAYER_NAMES)
+                sample["belief_status"][PLAYER_NAMES[player_id - 1]] == "ok"
+                for player_id in actor_ids
             ):
                 return sample
-    raise AssertionError(f"no public-evidence sample found in {path}")
+    raise AssertionError(f"no latest-action sample found in {path}")
+
+
+def _source_sample_without_latest_action(split: str) -> dict:
+    path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            sample = json.loads(line)
+            actor_ids, _action_type = latest_completed_public_action(
+                sample["public_events"]
+            )
+            if not actor_ids:
+                return sample
+    raise AssertionError(f"no pre-action sample found in {path}")
 
 
 def _write_sample(path: Path, sample: dict) -> None:
     path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
+
+
+def _write_samples(path: Path, samples: list[dict]) -> None:
+    path.write_text(
+        "".join(json.dumps(sample) + "\n" for sample in samples),
+        encoding="utf-8",
+    )
 
 
 def _training_config(
@@ -203,7 +222,9 @@ def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
     assert train_dataset.enable_cyclic_rotation is True
     assert validation_dataset.enable_cyclic_rotation is False
     assert train_dataset.augmentation_seed == config.seed
-    assert isinstance(train_loader.sampler, SubsetRandomSampler)
+    assert isinstance(train_loader.dataset, Subset)
+    assert isinstance(validation_loader.dataset, Subset)
+    assert isinstance(train_loader.sampler, RandomSampler)
     assert isinstance(validation_loader.sampler, SequentialSampler)
     validation_before = validation_dataset[0]
     validation_dataset.set_epoch(5)
@@ -213,6 +234,35 @@ def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
         validation_after["pair_targets"],
     )
     assert validation_before["metadata"] == validation_after["metadata"]
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_second_order_loader_filters_zero_latest_action_indices(
+    tmp_path,
+    shuffle,
+):
+    config = _training_config(tmp_path, 2)
+    path = tmp_path / f"filter-{shuffle}.jsonl"
+    _write_samples(
+        path,
+        [
+            _source_sample_without_latest_action("train"),
+            _source_sample(2, "train"),
+        ],
+    )
+    loader, dataset = build_data_loader(
+        config,
+        dataset_path=path,
+        shuffle=shuffle,
+    )
+    assert len(dataset) == 2
+    assert isinstance(loader.dataset, Subset)
+    assert tuple(loader.dataset.indices) == (1,)
+    batch = next(iter(loader))
+    assert (
+        batch["subject_mask"]
+        & batch["latest_completed_public_action_mask"]
+    ).any()
 
 
 @pytest.mark.parametrize("empty_split", ["train", "validation"])
@@ -420,11 +470,11 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
             best["train_metrics"],
             best["validation_metrics"],
         ):
-            assert metrics["public_evidence_valid_subject_count"] >= 1
+            assert metrics["latest_action_valid_subject_count"] >= 1
             assert metrics["valid_subject_count"] == metrics[
-                "public_evidence_valid_subject_count"
+                "latest_action_valid_subject_count"
             ]
-            assert 0 < metrics["public_evidence_subject_fraction"] <= 1
+            assert 0 < metrics["latest_action_snapshot_fraction"] <= 1
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
@@ -462,7 +512,7 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     assert "masked_pair_cross_entropy" not in source
 
 
-def test_effective_subject_mask_is_second_order_evidence_intersection_only():
+def test_effective_subject_mask_is_second_order_latest_action_intersection_only():
     first_order = ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=8),
         tom_order=1,
@@ -472,19 +522,19 @@ def test_effective_subject_mask_is_second_order_evidence_intersection_only():
         tom_order=2,
     )
     subject_mask = torch.tensor([[True, True, False, True, False, False, False]])
-    evidence_mask = torch.tensor([[True, False, True, False, False, False, False]])
+    update_mask = torch.tensor([[True, False, True, False, False, False, False]])
     batch = {
         "subject_mask": subject_mask,
-        "public_evidence_mask": evidence_mask,
+        "latest_completed_public_action_mask": update_mask,
     }
     assert torch.equal(_effective_subject_mask(first_order, batch), subject_mask)
     assert torch.equal(
         _effective_subject_mask(second_order, batch),
-        subject_mask & evidence_mask,
+        subject_mask & update_mask,
     )
 
 
-def test_second_order_loss_aggregates_only_public_evidence_rows():
+def test_second_order_loss_aggregates_only_latest_action_rows():
     logits = torch.zeros((1, 7, 21))
     targets = torch.zeros_like(logits)
     targets[0, 0, 0] = 1
@@ -494,7 +544,7 @@ def test_second_order_loss_aggregates_only_public_evidence_rows():
     original_mask = torch.tensor(
         [[True, True, False, False, False, False, False]]
     )
-    evidence_mask = torch.tensor(
+    update_mask = torch.tensor(
         [[True, False, False, False, False, False, False]]
     )
     second_order = ToMBeliefBackbone(
@@ -505,7 +555,7 @@ def test_second_order_loss_aggregates_only_public_evidence_rows():
         second_order,
         {
             "subject_mask": original_mask,
-            "public_evidence_mask": evidence_mask,
+            "latest_completed_public_action_mask": update_mask,
         },
     )
     loss_targets = _targets_for_loss(second_order, targets, effective)
