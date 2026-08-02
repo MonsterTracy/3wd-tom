@@ -99,6 +99,16 @@ def test_new_second_order_checkpoint_has_strict_suspicion_contract(tmp_path):
     assert "pair_class_count" not in checkpoint["model_config"]
 
 
+def test_order_specific_result_model_config_excludes_second_order_pair_count(
+    tmp_path,
+):
+    first = make_checkpoint(tmp_path / "first", tom_order=1)
+    second = make_checkpoint(tmp_path / "second", tom_order=2)
+    assert first["model_config"]["pair_class_count"] == 21
+    assert second["output_class_count"] == 7
+    assert "pair_class_count" not in second["model_config"]
+
+
 def test_old_second_order_pair_checkpoint_is_rejected(tmp_path):
     checkpoint = make_checkpoint(tmp_path, tom_order=1)
     checkpoint["tom_order"] = 2

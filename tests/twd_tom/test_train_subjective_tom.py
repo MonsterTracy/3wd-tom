@@ -44,6 +44,16 @@ def _write_sample(path: Path, sample: dict) -> None:
     path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
 
 
+def _contains_key(value, key):
+    if isinstance(value, dict):
+        return key in value or any(
+            _contains_key(nested, key) for nested in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(_contains_key(nested, key) for nested in value)
+    return False
+
+
 def _training_config(
     tmp_path: Path,
     tom_order: int,
@@ -241,6 +251,9 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     saved_summary = json.loads(
         (config.run_output_dir / "summary.json").read_text(encoding="utf-8")
     )
+    history = json.loads(
+        (config.run_output_dir / "history.json").read_text(encoding="utf-8")
+    )
     assert saved_summary["best_epoch"] == 1
     assert saved_summary["best_validation_mean_loss"] == summary[
         "best_validation_mean_loss"
@@ -262,31 +275,49 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     restored_last = build_model_from_checkpoint(last, device=torch.device("cpu"))
     assert isinstance(restored_last.transformer, Qwen2Model)
 
+    evaluation_path = config.run_output_dir / "val_metrics.json"
     evaluation = evaluate_checkpoint(
         EvaluationConfig(
             checkpoint_path=str(config.run_output_dir / "best.pt"),
             dataset_path=str(config.resolved_validation_dataset_path),
+            output_path=str(evaluation_path),
             batch_size=1,
             device="cpu",
         )
     )
+    saved_evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
     assert evaluation["status"] == "ok"
     assert evaluation["tom_order"] == tom_order
     assert evaluation["evaluation_sample_count"] == 1
     if tom_order == 1:
         assert best["pair_class_count"] == 21
         assert "output_class_count" not in best
+        assert best["model_config"]["pair_class_count"] == 21
+        assert saved_summary["pair_class_count"] == 21
+        assert saved_summary["model_config"]["pair_class_count"] == 21
+        assert history[0]["pair_class_count"] == 21
+        assert saved_evaluation["pair_class_count"] == 21
+        assert saved_evaluation["model_config"]["pair_class_count"] == 21
         assert "mean_pair_cross_entropy" in evaluation["metrics"]
     else:
-        assert best["target_encoding"] == SUSPICION_TARGET_ENCODING
-        assert best["output_class_count"] == 7
+        result_payloads = (best, saved_summary, history[0], saved_evaluation)
+        assert all(
+            payload["target_encoding"] == SUSPICION_TARGET_ENCODING
+            for payload in result_payloads
+        )
+        assert all(
+            payload["output_class_count"] == 7
+            for payload in result_payloads
+        )
         assert tuple(best["canonical_player_ordering"]) == tuple(
             f"player{index}" for index in range(1, 8)
         )
-        assert "pair_class_count" not in best
+        assert all(
+            not _contains_key(payload, "pair_class_count")
+            for payload in result_payloads
+        )
         assert "pair_ordering" not in best
         assert "projection_version" not in best
-        assert "pair_class_count" not in best["model_config"]
         assert set(evaluation["metrics"]) >= {
             "mean_suspicion_cross_entropy",
             "mean_suspicion_kl_divergence",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,7 @@ from script.twd_tom.train import (
     checkpoint_task_contract,
     count_supervised_subjects,
     evaluate_model,
+    result_model_config,
     resolve_device,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
@@ -234,7 +235,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "training_dataset_path": None if training_path is None else str(training_path),
         "training_game_ids": list(training_game_ids),
         "overlapping_game_ids": list(overlap),
-        "model_config": asdict(model.config),
+        "model_config": result_model_config(model),
         "metrics": metrics,
     }
     if config.output_path is not None:

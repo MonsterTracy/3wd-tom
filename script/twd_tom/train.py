@@ -420,8 +420,8 @@ def checkpoint_task_contract(tom_order: int) -> dict[str, Any]:
     }
 
 
-def checkpoint_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
-    """Serialize model construction fields without a false second-order pair contract."""
+def result_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
+    """Serialize model fields without a false second-order pair contract."""
 
     if model.tom_order == 1:
         return asdict(model.config)
@@ -458,7 +458,7 @@ def checkpoint_payload(
             config.resolved_validation_dataset_path.resolve()
         ),
         "training_config": asdict(config),
-        "model_config": checkpoint_model_config(model),
+        "model_config": result_model_config(model),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "train_metrics": dict(train_metrics),
@@ -492,6 +492,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     best_checkpoint_path = output_dir / "best.pt"
     last_checkpoint_path = output_dir / "last.pt"
     history = []
+    task_contract = checkpoint_task_contract(config.tom_order)
     best_epoch = 0
     best_validation_mean_loss = float("inf")
     for epoch in range(1, config.epochs + 1):
@@ -515,6 +516,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         history.append(
             {
                 "epoch": epoch,
+                **task_contract,
                 "train": train_metrics,
                 "validation": validation_metrics,
                 "is_best": is_best,
@@ -560,6 +562,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "status": "ok",
         "tom_order": config.tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
+        **task_contract,
         "train_dataset": str(config.resolved_dataset_path.resolve()),
         "validation_dataset": str(
             config.resolved_validation_dataset_path.resolve()
@@ -571,7 +574,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "best_validation_mean_loss": best_validation_mean_loss,
         "device": str(device),
         "backbone": BACKBONE_NAME,
-        "model_config": asdict(model.config),
+        "model_config": result_model_config(model),
         "best_checkpoint": str(best_checkpoint_path.resolve()),
         "last_checkpoint": str(last_checkpoint_path.resolve()),
         "history_path": str(history_path.resolve()),
