@@ -25,6 +25,7 @@ from werewolf.models.twd_tom.dataset import (
     TOM_INPUT_SCOPES,
     TWDToMDataset,
     collate_twd_tom_samples,
+    second_order_effective_subject_mask,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
 from werewolf.models.twd_tom.metrics import (
@@ -246,7 +247,10 @@ def count_supervised_subjects(data_loader: DataLoader) -> int:
     for batch in data_loader:
         mask = batch["subject_mask"]
         if "latest_completed_public_action_mask" in batch:
-            mask = mask & batch["latest_completed_public_action_mask"]
+            mask = second_order_effective_subject_mask(
+                mask,
+                batch["latest_completed_public_action_mask"],
+            )
         total += int(mask.sum().item())
     return total
 
@@ -400,11 +404,7 @@ def _effective_subject_mask(
         raise ValueError(
             "second-order batch requires latest_completed_public_action_mask"
         )
-    if update_mask.shape != subject_mask.shape:
-        raise ValueError(
-            "latest_completed_public_action_mask must match subject_mask"
-        )
-    return subject_mask & update_mask.to(dtype=torch.bool)
+    return second_order_effective_subject_mask(subject_mask, update_mask)
 
 
 def _targets_for_loss(

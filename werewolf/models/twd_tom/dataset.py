@@ -519,6 +519,21 @@ def load_twd_tom_jsonl(path: str | Path) -> list[dict[str, Any]]:
     return samples
 
 
+def second_order_effective_subject_mask(
+    subject_mask: torch.Tensor,
+    latest_completed_action_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Return observers valid under the formal second-order supervision mask."""
+
+    if subject_mask.shape != latest_completed_action_mask.shape:
+        raise ValueError(
+            "latest_completed_public_action_mask must match subject_mask"
+        )
+    return subject_mask.to(dtype=torch.bool) & latest_completed_action_mask.to(
+        dtype=torch.bool
+    )
+
+
 class TWDToMDataset(Dataset):
     """Dataset for one explicit ToM order."""
 
@@ -608,15 +623,13 @@ class TWDToMDataset(Dataset):
                 "second_order_supervised_indices requires tom_order=2"
             )
         eligible = []
-        for index, sample in enumerate(self.samples):
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
+        for index in range(len(self)):
+            item = self[index]
+            effective_mask = second_order_effective_subject_mask(
+                item["subject_mask"],
+                item["latest_completed_public_action_mask"],
             )
-            if any(
-                sample["_pair_targets"][PLAYER_NAMES[player_id - 1]]
-                is not None
-                for player_id in actor_ids
-            ):
+            if effective_mask.any().item():
                 eligible.append(index)
         return tuple(eligible)
 
@@ -768,4 +781,5 @@ __all__ = [
     "cyclically_rotate_second_order_sample",
     "deterministic_cyclic_shift",
     "load_twd_tom_jsonl",
+    "second_order_effective_subject_mask",
 ]

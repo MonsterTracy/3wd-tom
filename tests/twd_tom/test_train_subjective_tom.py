@@ -214,6 +214,28 @@ def test_train_and_validation_loader_shuffle_contract(tmp_path):
     assert isinstance(validation_loader.sampler, SequentialSampler)
 
 
+def test_first_order_loader_does_not_call_second_order_prefilter(
+    tmp_path,
+    monkeypatch,
+):
+    config = _training_config(tmp_path, 1)
+
+    def fail_if_called(_dataset):
+        raise AssertionError("first-order loader called second-order prefilter")
+
+    monkeypatch.setattr(
+        train_module.TWDToMDataset,
+        "second_order_supervised_indices",
+        fail_if_called,
+    )
+    loader, _dataset = build_data_loader(
+        config,
+        dataset_path=config.resolved_dataset_path,
+        shuffle=True,
+    )
+    assert next(iter(loader))["subject_mask"].any()
+
+
 def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
     config = _training_config(tmp_path, 2)
     train_loader, train_dataset, validation_loader, validation_dataset = (
@@ -263,6 +285,38 @@ def test_second_order_loader_filters_zero_latest_action_indices(
         batch["subject_mask"]
         & batch["latest_completed_public_action_mask"]
     ).any()
+
+
+@pytest.mark.parametrize(
+    ("split", "shuffle"),
+    [("train", True), ("val", False)],
+)
+def test_formal_second_order_loader_reads_first_batch(
+    tmp_path,
+    split,
+    shuffle,
+):
+    formal_path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
+    config = TrainingConfig(
+        tom_order=2,
+        output_dir=str(tmp_path / "unused-output"),
+        dataset_path=str(formal_path),
+        validation_dataset_path=str(formal_path),
+        batch_size=32,
+        device="cpu",
+    )
+    loader, dataset = build_data_loader(
+        config,
+        dataset_path=formal_path,
+        shuffle=shuffle,
+    )
+    batch = next(iter(loader))
+    assert len(dataset) > 0
+    assert batch["subject_mask"].shape[1:] == (7,)
+    assert (
+        batch["subject_mask"]
+        & batch["latest_completed_public_action_mask"]
+    ).any(dim=1).all()
 
 
 @pytest.mark.parametrize("empty_split", ["train", "validation"])

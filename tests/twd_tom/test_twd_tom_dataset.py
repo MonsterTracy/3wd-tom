@@ -17,6 +17,7 @@ from werewolf.models.twd_tom.dataset import (
     collate_twd_tom_samples,
     cyclically_rotate_second_order_sample,
     deterministic_cyclic_shift,
+    second_order_effective_subject_mask,
 )
 from werewolf.models.twd_tom.public_events import (
     latest_completed_public_action,
@@ -62,6 +63,22 @@ def second_order_sample(*, with_latest_action):
             ):
                 return sample
     raise AssertionError("missing requested second-order sample fixture")
+
+
+def second_order_sample_with_sparse_latest_actor_target():
+    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            sample = json.loads(line)
+            actor_ids, _action_type = latest_completed_public_action(
+                sample["public_events"]
+            )
+            if any(
+                PLAYER_NAMES[player_id - 1] not in sample["belief_status"]
+                for player_id in actor_ids
+            ):
+                return sample
+    raise AssertionError("missing sample with a sparse latest-actor target")
 
 
 def test_second_order_formal_split_files_are_unchanged():
@@ -311,6 +328,52 @@ def test_second_order_indices_filter_zero_effective_mask_deterministically():
     dataset = TWDToMDataset([without_action, with_action], tom_order=2)
     assert dataset.second_order_supervised_indices() == (1,)
     assert dataset.second_order_supervised_indices() == (1,)
+
+
+def test_second_order_indices_accept_sparse_normalized_pair_targets():
+    dataset = TWDToMDataset(
+        [second_order_sample_with_sparse_latest_actor_target()],
+        tom_order=2,
+    )
+    item = dataset[0]
+    expected = second_order_effective_subject_mask(
+        item["subject_mask"],
+        item["latest_completed_public_action_mask"],
+    ).any()
+    assert dataset.second_order_supervised_indices() == ((0,) if expected else ())
+
+
+def test_second_order_indices_filter_latest_actor_without_subject_target():
+    dataset = TWDToMDataset(
+        [second_order_sample(with_latest_action=True)],
+        tom_order=2,
+    )
+    actor_ids, _action_type = latest_completed_public_action(
+        dataset.samples[0]["public_events"]
+    )
+    for player_id in actor_ids:
+        dataset.samples[0]["_pair_targets"].pop(
+            PLAYER_NAMES[player_id - 1],
+            None,
+        )
+    item = dataset[0]
+    assert item["latest_completed_public_action_mask"].any()
+    assert not second_order_effective_subject_mask(
+        item["subject_mask"],
+        item["latest_completed_public_action_mask"],
+    ).any()
+    assert dataset.second_order_supervised_indices() == ()
+
+
+def test_second_order_indices_do_not_depend_on_target_probability_values():
+    dataset = TWDToMDataset(
+        [second_order_sample(with_latest_action=True)],
+        tom_order=2,
+    )
+    for subject, target in dataset.samples[0]["_pair_targets"].items():
+        if target is not None:
+            dataset.samples[0]["_pair_targets"][subject] = torch.zeros_like(target)
+    assert dataset.second_order_supervised_indices() == (0,)
 
 
 def test_first_order_pair_projection_semantics_are_unchanged():
