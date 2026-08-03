@@ -31,17 +31,27 @@ from werewolf.models.twd_tom.schema import (
 )
 from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
 from tests.twd_tom.public_event_fixtures import make_training_sample
+from werewolf.models.twd_tom.belief_backbone import (
+    GPT2_BLOCK_BACKBONE_NAME,
+    GPT2BlockStack,
+    QWEN2_BACKBONE_NAME,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def make_checkpoint(tmp_path, tom_order=1):
+def make_checkpoint(
+    tmp_path,
+    tom_order=1,
+    backbone=QWEN2_BACKBONE_NAME,
+):
     config = TrainingConfig(
         tom_order=tom_order,
         output_dir=str(tmp_path),
         dataset_path=str(tmp_path / "train.jsonl"),
         validation_dataset_path=str(tmp_path / "validation.jsonl"),
+        backbone=backbone,
         batch_size=1,
         max_seq_len=64,
     )
@@ -86,9 +96,28 @@ def make_checkpoint(tmp_path, tom_order=1):
 def test_qwen2_checkpoint_restores_strictly(tmp_path, tom_order):
     checkpoint = make_checkpoint(tmp_path, tom_order=tom_order)
     restored = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+    assert restored.backbone_name == QWEN2_BACKBONE_NAME
     assert isinstance(restored.transformer, Qwen2Model)
     assert restored.config.max_seq_len == 64
     assert restored.tom_order == tom_order
+    for name, expected in checkpoint["model_state_dict"].items():
+        torch.testing.assert_close(restored.state_dict()[name], expected)
+
+
+@pytest.mark.parametrize("tom_order", [1, 2])
+def test_gpt2_block_checkpoint_restores_strictly(tmp_path, tom_order):
+    checkpoint = make_checkpoint(
+        tmp_path,
+        tom_order=tom_order,
+        backbone=GPT2_BLOCK_BACKBONE_NAME,
+    )
+    restored = build_model_from_checkpoint(
+        checkpoint,
+        device=torch.device("cpu"),
+    )
+    assert restored.backbone_name == GPT2_BLOCK_BACKBONE_NAME
+    assert isinstance(restored.transformer, GPT2BlockStack)
+    assert len(restored.transformer.blocks) == 4
     for name, expected in checkpoint["model_state_dict"].items():
         torch.testing.assert_close(restored.state_dict()[name], expected)
 
@@ -120,6 +149,13 @@ def test_old_architecture_fields_are_rejected(tmp_path):
 def test_incompatible_state_dict_is_rejected(tmp_path):
     checkpoint = make_checkpoint(tmp_path)
     checkpoint["model_state_dict"].pop("output_projection.bias")
+    with pytest.raises(ValueError, match="state_dict"):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+def test_checkpoint_backbone_cannot_be_relabelled(tmp_path):
+    checkpoint = make_checkpoint(tmp_path)
+    checkpoint["backbone"] = GPT2_BLOCK_BACKBONE_NAME
     with pytest.raises(ValueError, match="state_dict"):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 

@@ -1,4 +1,4 @@
-"""Qwen2 backbone for subjective Werewolf belief prediction.
+"""Selectable causal backbones for subjective Werewolf belief prediction.
 
 The model consumes one structured public-event token sequence. It reuses the
 existing player/action/object embeddings and adds only event-type, public
@@ -11,9 +11,10 @@ phase, and scalar day fields:
 Speech-action positions still carry ``[subject, action, object]``. Event
 boundaries and public system facts may leave those fields at padding zero.
 
-The causal backbone is a randomly initialized Hugging Face ``Qwen2Model`` that
-receives the structured action embeddings through ``inputs_embeds``. No
-pretrained weights or tokenizer are used.
+The causal backbone is selected explicitly between a randomly initialized
+Hugging Face ``Qwen2Model`` and a direct stack of Hugging Face ``GPT2Block``
+modules. Both consume the same structured action embeddings. No pretrained
+weights or tokenizer are used.
 
 First-order readout combines the final valid hidden state with one observer
 embedding per player and may additionally provide the current observer's two
@@ -30,10 +31,13 @@ labels, observer IDs, alive masks, or private event fields.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
-from transformers import Qwen2Config, Qwen2Model
+from transformers import GPT2Config, Qwen2Config, Qwen2Model
+from transformers.models.gpt2.modeling_gpt2 import GPT2Block
+from transformers.pytorch_utils import Conv1D
 
 from werewolf.models.twd_tom.schema import (
     ACTION_TO_ID,
@@ -49,7 +53,12 @@ from werewolf.models.twd_tom.belief_labels import (
     pair_probabilities_to_belief_marginals,
 )
 
-BACKBONE_NAME = "qwen2_model"
+QWEN2_BACKBONE_NAME = "qwen2_model"
+GPT2_BLOCK_BACKBONE_NAME = "gpt2_block"
+SUPPORTED_BACKBONE_NAMES = (
+    QWEN2_BACKBONE_NAME,
+    GPT2_BLOCK_BACKBONE_NAME,
+)
 HIDDEN_SIZE = 256
 INTERMEDIATE_SIZE = 768
 NUM_HIDDEN_LAYERS = 4
@@ -57,7 +66,117 @@ NUM_ATTENTION_HEADS = 8
 NUM_KEY_VALUE_HEADS = 4
 ATTENTION_DROPOUT = 0.1
 RMS_NORM_EPS = 1e-6
+GPT2_LAYER_NORM_EPS = 1e-5
+GPT2_DROPOUT = 0.1
 NONE_RELATIVE_PLAYER_INDEX = NUM_PLAYERS
+
+
+class GPT2BlockStack(nn.Module):
+    """Direct GPT-2 block stack for structured event embeddings."""
+
+    def __init__(self, *, max_seq_len: int):
+        super().__init__()
+        config = GPT2Config(
+            vocab_size=1,
+            n_positions=max_seq_len,
+            n_embd=HIDDEN_SIZE,
+            n_layer=NUM_HIDDEN_LAYERS,
+            n_head=NUM_ATTENTION_HEADS,
+            n_inner=INTERMEDIATE_SIZE,
+            activation_function="gelu_new",
+            resid_pdrop=GPT2_DROPOUT,
+            embd_pdrop=GPT2_DROPOUT,
+            attn_pdrop=GPT2_DROPOUT,
+            layer_norm_epsilon=GPT2_LAYER_NORM_EPS,
+            use_cache=False,
+            bos_token_id=0,
+            eos_token_id=0,
+            pad_token_id=0,
+        )
+        config._attn_implementation = "eager"
+        self.position_embedding = nn.Embedding(max_seq_len, HIDDEN_SIZE)
+        self.embedding_dropout = nn.Dropout(config.embd_pdrop)
+        self.blocks = nn.ModuleList(
+            GPT2Block(config, layer_idx=index)
+            for index in range(NUM_HIDDEN_LAYERS)
+        )
+        self.final_layer_norm = nn.LayerNorm(
+            HIDDEN_SIZE,
+            eps=config.layer_norm_epsilon,
+        )
+        self._reset_parameters(config.initializer_range)
+
+    def _reset_parameters(self, initializer_range: float) -> None:
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, Conv1D)):
+                nn.init.normal_(
+                    module.weight,
+                    mean=0.0,
+                    std=initializer_range,
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(
+                    module.weight,
+                    mean=0.0,
+                    std=initializer_range,
+                )
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+        residual_std = initializer_range / math.sqrt(
+            2 * NUM_HIDDEN_LAYERS
+        )
+        for name, parameter in self.named_parameters():
+            if name.endswith("c_proj.weight"):
+                nn.init.normal_(
+                    parameter,
+                    mean=0.0,
+                    std=residual_std,
+                )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, sequence_length, _ = hidden_states.shape
+        position_ids = torch.arange(
+            sequence_length,
+            device=hidden_states.device,
+        )
+        hidden_states = self.embedding_dropout(
+            hidden_states + self.position_embedding(position_ids).unsqueeze(0)
+        )
+
+        causal = torch.ones(
+            (sequence_length, sequence_length),
+            dtype=torch.bool,
+            device=hidden_states.device,
+        ).tril()
+        allowed = (
+            causal.view(1, 1, sequence_length, sequence_length)
+            & attention_mask.view(batch_size, 1, 1, sequence_length)
+        )
+        attention_bias = torch.zeros(
+            (batch_size, 1, sequence_length, sequence_length),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        attention_bias.masked_fill_(
+            ~allowed,
+            torch.finfo(hidden_states.dtype).min,
+        )
+
+        for block in self.blocks:
+            hidden_states = block(
+                hidden_states,
+                attention_mask=attention_bias,
+                use_cache=False,
+            )
+        return self.final_layer_norm(hidden_states)
 
 
 def relative_player_indices(player_ids: torch.Tensor) -> torch.Tensor:
@@ -131,6 +250,7 @@ class ToMBeliefBackbone(nn.Module):
         config: ToMBeliefBackboneConfig | None = None,
         *,
         tom_order: int = 1,
+        backbone_name: str = QWEN2_BACKBONE_NAME,
     ):
         super().__init__()
 
@@ -141,6 +261,12 @@ class ToMBeliefBackbone(nn.Module):
         ):
             raise ValueError("tom_order must be 1 or 2")
         self.tom_order = tom_order
+        if backbone_name not in SUPPORTED_BACKBONE_NAMES:
+            raise ValueError(
+                "backbone_name must be one of "
+                f"{SUPPORTED_BACKBONE_NAMES}"
+            )
+        self.backbone_name = backbone_name
 
         self.config = (
             ToMBeliefBackboneConfig()
@@ -189,24 +315,29 @@ class ToMBeliefBackbone(nn.Module):
             torch.zeros(HIDDEN_SIZE)
         )
 
-        self.transformer = Qwen2Model(
-            Qwen2Config(
-                vocab_size=1,
-                hidden_size=HIDDEN_SIZE,
-                intermediate_size=INTERMEDIATE_SIZE,
-                num_hidden_layers=NUM_HIDDEN_LAYERS,
-                num_attention_heads=NUM_ATTENTION_HEADS,
-                num_key_value_heads=NUM_KEY_VALUE_HEADS,
-                hidden_act="silu",
-                max_position_embeddings=self.config.max_seq_len,
-                attention_dropout=ATTENTION_DROPOUT,
-                rms_norm_eps=RMS_NORM_EPS,
-                use_cache=False,
-                bos_token_id=0,
-                eos_token_id=0,
-                pad_token_id=0,
+        if self.backbone_name == QWEN2_BACKBONE_NAME:
+            self.transformer = Qwen2Model(
+                Qwen2Config(
+                    vocab_size=1,
+                    hidden_size=HIDDEN_SIZE,
+                    intermediate_size=INTERMEDIATE_SIZE,
+                    num_hidden_layers=NUM_HIDDEN_LAYERS,
+                    num_attention_heads=NUM_ATTENTION_HEADS,
+                    num_key_value_heads=NUM_KEY_VALUE_HEADS,
+                    hidden_act="silu",
+                    max_position_embeddings=self.config.max_seq_len,
+                    attention_dropout=ATTENTION_DROPOUT,
+                    rms_norm_eps=RMS_NORM_EPS,
+                    use_cache=False,
+                    bos_token_id=0,
+                    eos_token_id=0,
+                    pad_token_id=0,
+                )
             )
-        )
+        else:
+            self.transformer = GPT2BlockStack(
+                max_seq_len=self.config.max_seq_len
+            )
 
         self.observer_embedding = nn.Embedding(
             self.config.num_players,
@@ -388,12 +519,18 @@ class ToMBeliefBackbone(nn.Module):
             hidden_states = hidden_states.clone()
             hidden_states[empty_rows, 0] = self.empty_history_embedding
 
-        hidden_states = self.transformer(
-            inputs_embeds=hidden_states,
-            attention_mask=safe_attention_mask.long(),
-            use_cache=False,
-            return_dict=True,
-        ).last_hidden_state
+        if self.backbone_name == QWEN2_BACKBONE_NAME:
+            hidden_states = self.transformer(
+                inputs_embeds=hidden_states,
+                attention_mask=safe_attention_mask.long(),
+                use_cache=False,
+                return_dict=True,
+            ).last_hidden_state
+        else:
+            hidden_states = self.transformer(
+                hidden_states,
+                attention_mask=safe_attention_mask,
+            )
 
         # Zero right-padding positions in returned hidden states.
         hidden_states = (
@@ -784,9 +921,12 @@ class ToMBeliefBackbone(nn.Module):
 
 
 __all__ = [
-    "BACKBONE_NAME",
+    "GPT2_BLOCK_BACKBONE_NAME",
+    "GPT2BlockStack",
     "HIDDEN_SIZE",
     "NONE_RELATIVE_PLAYER_INDEX",
+    "QWEN2_BACKBONE_NAME",
+    "SUPPORTED_BACKBONE_NAMES",
     "ToMBeliefBackboneConfig",
     "ToMBeliefBackbone",
     "relative_player_indices",

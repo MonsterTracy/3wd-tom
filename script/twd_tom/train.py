@@ -1,4 +1,4 @@
-"""Train the Qwen2 ToM backbone with explicit training and validation data."""
+"""Train a selected ToM backbone with explicit training and validation data."""
 
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ from torch.utils.data import DataLoader, Subset
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
-    BACKBONE_NAME,
+    QWEN2_BACKBONE_NAME,
+    SUPPORTED_BACKBONE_NAMES,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
@@ -91,11 +92,16 @@ class TrainingConfig:
     num_workers: int = 0
     gradient_clip_norm: float = 1.0
     max_seq_len: int = 256
+    backbone: str = QWEN2_BACKBONE_NAME
 
     def __post_init__(self) -> None:
         _tom_order(self.tom_order)
         if not isinstance(self.output_dir, str) or not self.output_dir.strip():
             raise ValueError("output_dir must be non-empty text")
+        if self.backbone not in SUPPORTED_BACKBONE_NAMES:
+            raise ValueError(
+                f"backbone must be one of {SUPPORTED_BACKBONE_NAMES}"
+            )
         for field_name in ("dataset_path", "validation_dataset_path"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
@@ -353,11 +359,12 @@ def resolve_device(requested_device: str) -> torch.device:
 
 
 def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
-    """Build the single fixed Qwen2 backbone."""
+    """Build the explicitly selected causal backbone."""
 
     return ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=config.max_seq_len),
         tom_order=config.tom_order,
+        backbone_name=config.backbone,
     )
 
 
@@ -837,7 +844,7 @@ def checkpoint_payload(
         "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
         "public_phase_to_id": dict(PHASE_TO_ID),
         **checkpoint_task_contract(config.tom_order),
-        "backbone": BACKBONE_NAME,
+        "backbone": model.backbone_name,
         "epoch": epoch,
         "train_dataset_path": run_provenance["train_dataset_path"],
         "validation_dataset_path": run_provenance[
@@ -983,7 +990,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "best_epoch": best_epoch,
         "best_validation_mean_loss": best_validation_mean_loss,
         "device": str(device),
-        "backbone": BACKBONE_NAME,
+        "backbone": model.backbone_name,
         "model_config": result_model_config(model),
         "final_train_metrics": final_record["train"],
         "final_validation_metrics": final_record["validation"],
@@ -1006,7 +1013,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train the fixed Qwen2 ToM backbone with explicit train/validation data."
+        description="Train an explicitly selected ToM backbone with train/validation data."
     )
     parser.add_argument(
         "--tom-order", required=True, type=int, choices=(1, 2),
@@ -1023,6 +1030,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validation-dataset", required=True,
         help="Repository-local validation JSONL file with disjoint game IDs.",
+    )
+    parser.add_argument(
+        "--backbone",
+        choices=SUPPORTED_BACKBONE_NAMES,
+        default=QWEN2_BACKBONE_NAME,
+        help="Causal backbone: qwen2_model or direct gpt2_block stack.",
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -1068,6 +1081,7 @@ def main() -> int:
             output_dir=args.output_dir,
             dataset_path=args.dataset,
             validation_dataset_path=args.validation_dataset,
+            backbone=args.backbone,
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,

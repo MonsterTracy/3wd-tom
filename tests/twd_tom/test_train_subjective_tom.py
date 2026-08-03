@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch.utils.data import RandomSampler, SequentialSampler, Subset
 from transformers import Qwen2Model
+from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 
 import script.twd_tom.train as train_module
 from script.twd_tom.eval import (
@@ -37,6 +38,9 @@ from script.twd_tom.train import (
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
 from werewolf.models.twd_tom.belief_backbone import (
+    GPT2_BLOCK_BACKBONE_NAME,
+    GPT2BlockStack,
+    QWEN2_BACKBONE_NAME,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
@@ -122,6 +126,7 @@ def _training_config(
     train_sample: dict | None = None,
     validation_sample: dict | None = None,
     epochs: int = 1,
+    backbone: str = QWEN2_BACKBONE_NAME,
 ) -> TrainingConfig:
     train_path = tmp_path / f"tom{tom_order}_train.jsonl"
     validation_path = tmp_path / f"tom{tom_order}_validation.jsonl"
@@ -135,6 +140,7 @@ def _training_config(
         output_dir=str(tmp_path / "outputs"),
         dataset_path=str(train_path),
         validation_dataset_path=str(validation_path),
+        backbone=backbone,
         epochs=epochs,
         batch_size=1,
         device="cpu",
@@ -163,6 +169,7 @@ def test_cli_requires_explicit_train_and_validation_datasets():
     )
     assert args.dataset == "train.jsonl"
     assert args.validation_dataset == "val.jsonl"
+    assert args.backbone == QWEN2_BACKBONE_NAME
     assert not hasattr(args, "test_dataset")
     for old_name in ("d_model", "n_head", "n_layer", "dropout", "dim_feedforward"):
         assert not hasattr(args, old_name)
@@ -180,12 +187,56 @@ def test_cli_requires_explicit_train_and_validation_datasets():
             ]
         )
 
+    gpt2_args = parser.parse_args(
+        [
+            *required,
+            "--dataset",
+            "train.jsonl",
+            "--validation-dataset",
+            "val.jsonl",
+            "--backbone",
+            GPT2_BLOCK_BACKBONE_NAME,
+        ]
+    )
+    assert gpt2_args.backbone == GPT2_BLOCK_BACKBONE_NAME
+
 
 def test_model_builder_uses_fixed_qwen2_configuration(tmp_path):
     model = build_model(_training_config(tmp_path, 1))
+    assert model.backbone_name == QWEN2_BACKBONE_NAME
     assert isinstance(model.transformer, Qwen2Model)
     assert model.transformer.config.hidden_size == 256
     assert model.transformer.config.num_hidden_layers == 4
+
+
+def test_model_builder_uses_direct_gpt2_block_stack(tmp_path):
+    model = build_model(
+        _training_config(
+            tmp_path,
+            1,
+            backbone=GPT2_BLOCK_BACKBONE_NAME,
+        )
+    )
+    assert model.backbone_name == GPT2_BLOCK_BACKBONE_NAME
+    assert isinstance(model.transformer, GPT2BlockStack)
+    assert len(model.transformer.blocks) == 4
+    assert all(
+        isinstance(block, GPT2Block)
+        for block in model.transformer.blocks
+    )
+
+
+def test_gpt2_block_stack_is_causal():
+    torch.manual_seed(7)
+    stack = GPT2BlockStack(max_seq_len=8).eval()
+    hidden = torch.randn(1, 4, 256)
+    changed_future = hidden.clone()
+    changed_future[:, 3] += 10.0
+    mask = torch.ones((1, 4), dtype=torch.bool)
+    with torch.no_grad():
+        original = stack(hidden, attention_mask=mask)
+        changed = stack(changed_future, attention_mask=mask)
+    torch.testing.assert_close(original[:, :3], changed[:, :3])
 
 
 def test_train_and_validation_order_mismatch_is_rejected(tmp_path):
@@ -420,13 +471,26 @@ def test_each_epoch_validates_and_equal_loss_keeps_earlier_best(tmp_path, monkey
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
-def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
-    config = _training_config(tmp_path, tom_order)
+@pytest.mark.parametrize(
+    "backbone",
+    [QWEN2_BACKBONE_NAME, GPT2_BLOCK_BACKBONE_NAME],
+)
+def test_one_batch_train_validation_smoke_and_best_eval(
+    tmp_path,
+    tom_order,
+    backbone,
+):
+    config = _training_config(
+        tmp_path,
+        tom_order,
+        backbone=backbone,
+    )
     summary = run_training(config)
     output_files = {path.name for path in config.run_output_dir.iterdir()}
     assert output_files == {"best.pt", "last.pt", "history.json", "summary.json"}
     assert summary["best_epoch"] == 1
     assert summary["epochs_completed"] == 1
+    assert summary["backbone"] == backbone
     assert summary["selection_metric_name"] == "validation_mean_loss"
     saved_summary = json.loads(
         (config.run_output_dir / "summary.json").read_text(encoding="utf-8")
@@ -444,6 +508,8 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     best = torch.load(config.run_output_dir / "best.pt", map_location="cpu", weights_only=True)
     last = torch.load(config.run_output_dir / "last.pt", map_location="cpu", weights_only=True)
     assert best["epoch"] == last["epoch"] == 1
+    assert best["backbone"] == last["backbone"] == backbone
+    assert best["training_config"]["backbone"] == backbone
     assert best["train_dataset_path"] == "tests/fixtures/synthetic_train.jsonl"
     assert best["validation_dataset_path"] == "tests/fixtures/synthetic_val.jsonl"
     assert best["run_provenance"]["git_worktree_clean"] is True
@@ -461,7 +527,11 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     for name, expected in best["model_state_dict"].items():
         torch.testing.assert_close(last["model_state_dict"][name], expected)
     restored_last = build_model_from_checkpoint(last, device=torch.device("cpu"))
-    assert isinstance(restored_last.transformer, Qwen2Model)
+    assert restored_last.backbone_name == backbone
+    if backbone == QWEN2_BACKBONE_NAME:
+        assert isinstance(restored_last.transformer, Qwen2Model)
+    else:
+        assert isinstance(restored_last.transformer, GPT2BlockStack)
 
     evaluation_path = config.run_output_dir / "val_metrics.json"
     evaluation = evaluate_checkpoint(
@@ -477,6 +547,7 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     saved_evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
     assert evaluation["status"] == "ok"
     assert evaluation["tom_order"] == tom_order
+    assert evaluation["backbone"] == backbone
     assert evaluation["evaluation_sample_count"] == 1
     if tom_order == 1:
         assert best["pair_class_count"] == 21
@@ -558,11 +629,20 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
+@pytest.mark.parametrize(
+    "backbone",
+    [QWEN2_BACKBONE_NAME, GPT2_BLOCK_BACKBONE_NAME],
+)
 def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     tmp_path,
     tom_order,
+    backbone,
 ):
-    config = _training_config(tmp_path, tom_order)
+    config = _training_config(
+        tmp_path,
+        tom_order,
+        backbone=backbone,
+    )
     loader, _ = build_data_loader(
         config,
         dataset_path=config.resolved_dataset_path,

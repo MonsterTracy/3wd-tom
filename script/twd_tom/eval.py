@@ -1,4 +1,4 @@
-"""Evaluate an order-specific Qwen2 ToM checkpoint on current raw data."""
+"""Evaluate an order-specific ToM checkpoint on current raw data."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from script.twd_tom.train import (
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
-    BACKBONE_NAME,
+    SUPPORTED_BACKBONE_NAMES,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
@@ -92,9 +92,15 @@ def build_model_from_checkpoint(
     *,
     device: torch.device,
 ) -> ToMBeliefBackbone:
-    """Strictly reconstruct the single supported Qwen2 model."""
+    """Strictly reconstruct the explicitly recorded backbone."""
 
     tom_order = _checkpoint_tom_order(checkpoint)
+    backbone_name = checkpoint.get("backbone")
+    if backbone_name not in SUPPORTED_BACKBONE_NAMES:
+        raise ValueError(
+            "checkpoint backbone mismatch: expected one of "
+            f"{SUPPORTED_BACKBONE_NAMES!r}, got {backbone_name!r}"
+        )
     expected = {
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "model_input_scope": TOM_INPUT_SCOPES[tom_order],
@@ -102,7 +108,6 @@ def build_model_from_checkpoint(
         "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
         "public_phase_to_id": dict(PHASE_TO_ID),
         **checkpoint_task_contract(tom_order),
-        "backbone": BACKBONE_NAME,
     }
     for field_name, expected_value in expected.items():
         if checkpoint.get(field_name) != expected_value:
@@ -120,7 +125,11 @@ def build_model_from_checkpoint(
     state_dict = checkpoint.get("model_state_dict")
     if not isinstance(state_dict, Mapping):
         raise TypeError("checkpoint has no valid model_state_dict")
-    model = ToMBeliefBackbone(model_config, tom_order=tom_order)
+    model = ToMBeliefBackbone(
+        model_config,
+        tom_order=tom_order,
+        backbone_name=backbone_name,
+    )
     try:
         model.load_state_dict(state_dict, strict=True)
     except RuntimeError as exc:
@@ -249,7 +258,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "tom_order": tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[tom_order],
         **checkpoint_task_contract(tom_order),
-        "backbone": BACKBONE_NAME,
+        "backbone": model.backbone_name,
         "device": str(device),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_epoch": epoch,
@@ -271,7 +280,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate a Qwen2 ToM checkpoint.")
+    parser = argparse.ArgumentParser(description="Evaluate a ToM checkpoint.")
     parser.add_argument(
         "--checkpoint", required=True,
         help="Order-specific best.pt or last.pt checkpoint.",
