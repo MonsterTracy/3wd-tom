@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import random
@@ -81,6 +82,9 @@ class TrainingConfig:
     epochs: int = 10
     batch_size: int = 32
     learning_rate: float = 3e-4
+    lr_scheduler: str = "constant"
+    warmup_ratio: float = 0.05
+    min_learning_rate: float = 0.0
     weight_decay: float = 1e-2
     seed: int = 42
     device: str = "auto"
@@ -105,6 +109,29 @@ class TrainingConfig:
             or self.learning_rate <= 0
         ):
             raise ValueError("learning_rate must be positive")
+        if (
+            not isinstance(self.lr_scheduler, str)
+            or self.lr_scheduler not in {"constant", "warmup_cosine"}
+        ):
+            raise ValueError(
+                "lr_scheduler must be 'constant' or 'warmup_cosine'"
+            )
+        if (
+            isinstance(self.warmup_ratio, bool)
+            or not isinstance(self.warmup_ratio, (int, float))
+            or not 0.0 <= self.warmup_ratio < 1.0
+        ):
+            raise ValueError("warmup_ratio must be in [0, 1)")
+        if (
+            isinstance(self.min_learning_rate, bool)
+            or not isinstance(self.min_learning_rate, (int, float))
+            or self.min_learning_rate < 0.0
+        ):
+            raise ValueError("min_learning_rate cannot be negative")
+        if self.min_learning_rate > self.learning_rate:
+            raise ValueError(
+                "min_learning_rate cannot exceed learning_rate"
+            )
         if (
             isinstance(self.weight_decay, bool)
             or not isinstance(self.weight_decay, (int, float))
@@ -594,6 +621,81 @@ def _source_snapshot_count(data_loader: DataLoader) -> int:
     return len(dataset)
 
 
+def build_learning_rate_scheduler(
+    optimizer: AdamW,
+    *,
+    config: TrainingConfig,
+    steps_per_epoch: int,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Build an optimizer-step learning-rate scheduler."""
+
+    _positive_integer(
+        steps_per_epoch,
+        field_name="steps_per_epoch",
+    )
+    total_steps = config.epochs * steps_per_epoch
+
+    if config.lr_scheduler == "constant":
+        return None, {
+            "name": "constant",
+            "step_unit": "optimizer_step",
+            "steps_per_epoch": steps_per_epoch,
+            "total_steps": total_steps,
+            "warmup_steps": 0,
+            "decay_steps": 0,
+            "peak_learning_rate": float(config.learning_rate),
+            "min_learning_rate": float(config.learning_rate),
+        }
+
+    requested_warmup_steps = int(
+        round(total_steps * config.warmup_ratio)
+    )
+    warmup_steps = min(
+        requested_warmup_steps,
+        max(total_steps - 1, 0),
+    )
+    decay_steps = total_steps - warmup_steps
+
+    minimum_factor = (
+        float(config.min_learning_rate)
+        / float(config.learning_rate)
+    )
+
+    def lr_multiplier(step_index: int) -> float:
+        if warmup_steps > 0 and step_index < warmup_steps:
+            return float(step_index + 1) / float(warmup_steps)
+
+        progress = (
+            float(step_index - warmup_steps)
+            / float(decay_steps)
+        )
+        progress = min(max(progress, 0.0), 1.0)
+
+        cosine_factor = 0.5 * (
+            1.0 + math.cos(math.pi * progress)
+        )
+        return minimum_factor + (
+            1.0 - minimum_factor
+        ) * cosine_factor
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=lr_multiplier,
+    )
+
+    return scheduler, {
+        "name": "warmup_cosine",
+        "step_unit": "optimizer_step",
+        "steps_per_epoch": steps_per_epoch,
+        "total_steps": total_steps,
+        "warmup_steps": warmup_steps,
+        "decay_steps": decay_steps,
+        "warmup_ratio": float(config.warmup_ratio),
+        "peak_learning_rate": float(config.learning_rate),
+        "min_learning_rate": float(config.min_learning_rate),
+    }
+
+
 def train_one_epoch(
     model: ToMBeliefBackbone,
     data_loader: DataLoader,
@@ -601,8 +703,12 @@ def train_one_epoch(
     *,
     device: torch.device,
     gradient_clip_norm: float,
+    lr_scheduler: Any | None = None,
 ) -> dict[str, int | float]:
     model.train()
+    learning_rate_start = float(
+        optimizer.param_groups[0]["lr"]
+    )
     accumulator = MetricAccumulator(
         tom_order=model.tom_order,
         source_snapshot_count=_source_snapshot_count(data_loader),
@@ -627,13 +733,20 @@ def train_one_epoch(
         if gradient_clip_norm > 0:
             clip_grad_norm_(model.parameters(), gradient_clip_norm)
         optimizer.step()
+        if lr_scheduler is not None:
+            lr_scheduler.step()
         accumulator.update(
             loss=loss,
             logits=logits,
             targets=effective_targets,
             subject_mask=effective_subject_mask,
         )
-    return accumulator.finalize()
+    metrics = accumulator.finalize()
+    metrics["learning_rate_start"] = learning_rate_start
+    metrics["learning_rate_end"] = float(
+        optimizer.param_groups[0]["lr"]
+    )
+    return metrics
 
 
 @torch.no_grad()
@@ -713,6 +826,7 @@ def checkpoint_payload(
     best_epoch: int,
     best_validation_mean_loss: float,
     run_provenance: Mapping[str, Any],
+    learning_rate_schedule: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selection_metric_value = float(validation_metrics["mean_loss"])
     return {
@@ -741,6 +855,9 @@ def checkpoint_payload(
         "model_config": result_model_config(model),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "learning_rate_schedule": dict(
+            learning_rate_schedule or {"name": "constant"}
+        ),
         "train_metrics": dict(train_metrics),
         "validation_metrics": dict(validation_metrics),
         "selection_metric_name": "validation_mean_loss",
@@ -770,6 +887,13 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
+    lr_scheduler, learning_rate_schedule = (
+        build_learning_rate_scheduler(
+            optimizer,
+            config=config,
+            steps_per_epoch=len(train_loader),
+        )
+    )
     best_checkpoint_path = output_dir / "best.pt"
     last_checkpoint_path = output_dir / "last.pt"
     history = []
@@ -784,6 +908,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             optimizer,
             device=device,
             gradient_clip_norm=config.gradient_clip_norm,
+            lr_scheduler=lr_scheduler,
         )
         validation_metrics = evaluate_model(
             model,
@@ -804,6 +929,9 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 "is_best": is_best,
                 "best_epoch": best_epoch,
                 "best_validation_mean_loss": best_validation_mean_loss,
+                "learning_rate_schedule": dict(
+                    learning_rate_schedule
+                ),
                 "run_provenance": dict(run_provenance),
             }
         )
@@ -819,6 +947,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                     best_epoch=best_epoch,
                     best_validation_mean_loss=best_validation_mean_loss,
                     run_provenance=run_provenance,
+                    learning_rate_schedule=learning_rate_schedule,
                 ),
                 best_checkpoint_path,
             )
@@ -835,6 +964,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             best_epoch=best_epoch,
             best_validation_mean_loss=best_validation_mean_loss,
             run_provenance=run_provenance,
+            learning_rate_schedule=learning_rate_schedule,
         ),
         last_checkpoint_path,
     )
@@ -858,6 +988,9 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "final_train_metrics": final_record["train"],
         "final_validation_metrics": final_record["validation"],
         "selection_metric_name": "validation_mean_loss",
+        "learning_rate_schedule": dict(
+            learning_rate_schedule
+        ),
         "run_provenance": dict(run_provenance),
     }
     run_dir = (
@@ -894,6 +1027,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--lr-scheduler",
+        choices=("constant", "warmup_cosine"),
+        default="constant",
+        help="Learning-rate schedule updated after optimizer steps.",
+    )
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.05,
+        help="Fraction of optimizer steps used for linear warmup.",
+    )
+    parser.add_argument(
+        "--min-learning-rate",
+        type=float,
+        default=0.0,
+        help="Final learning rate used by warmup_cosine.",
+    )
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -920,6 +1071,9 @@ def main() -> int:
             epochs=args.epochs,
             batch_size=args.batch_size,
             learning_rate=args.learning_rate,
+            lr_scheduler=args.lr_scheduler,
+            warmup_ratio=args.warmup_ratio,
+            min_learning_rate=args.min_learning_rate,
             weight_decay=args.weight_decay,
             seed=args.seed,
             device=args.device,
