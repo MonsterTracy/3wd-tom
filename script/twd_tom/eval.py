@@ -13,12 +13,13 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from script.twd_tom.train import (
-    RAW_DATASET_PATHS,
+    REPO_ROOT,
     checkpoint_task_contract,
     count_supervised_subjects,
     evaluate_model,
     result_model_config,
     resolve_device,
+    sha256_file,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
@@ -49,7 +50,6 @@ class EvaluationConfig:
     batch_size: int = 32
     device: str = "auto"
     num_workers: int = 0
-    allow_game_id_overlap: bool = False
 
     def __post_init__(self) -> None:
         for field_name in ("checkpoint_path", "dataset_path"):
@@ -68,18 +68,13 @@ class EvaluationConfig:
             raise ValueError("device must be non-empty text")
         if isinstance(self.num_workers, bool) or not isinstance(self.num_workers, int) or self.num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer")
-        if not isinstance(self.allow_game_id_overlap, bool):
-            raise TypeError("allow_game_id_overlap must be boolean")
 
 
 def load_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
     path = Path(checkpoint_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {path}")
-    try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict):
         raise TypeError("checkpoint must contain a dictionary")
     return checkpoint
@@ -150,21 +145,44 @@ def resolve_training_dataset_path(
     *,
     override_path: str | None,
 ) -> Path:
+    provenance = checkpoint.get("run_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError(
+            "checkpoint run_provenance must record the training dataset identity"
+        )
+    recorded_path = provenance.get("train_dataset_path")
+    expected_sha256 = provenance.get("train_dataset_sha256")
+    if (
+        not isinstance(recorded_path, str)
+        or not recorded_path.strip()
+        or Path(recorded_path).is_absolute()
+        or ".." in Path(recorded_path).parts
+    ):
+        raise ValueError(
+            "checkpoint run_provenance.train_dataset_path must be a safe "
+            "repository-relative path"
+        )
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise ValueError(
+            "checkpoint run_provenance.train_dataset_sha256 must be a "
+            "lowercase SHA-256 digest"
+        )
     if override_path is not None:
         path = Path(override_path).resolve()
     else:
-        training_config = checkpoint.get("training_config")
-        if not isinstance(training_config, Mapping):
-            raise ValueError("checkpoint has no training_config")
-        configured = training_config.get("dataset_path")
-        if configured is None:
-            path = RAW_DATASET_PATHS[_checkpoint_tom_order(checkpoint)].resolve()
-        elif isinstance(configured, str) and configured.strip():
-            path = Path(configured).resolve()
-        else:
-            raise ValueError("checkpoint training_config has invalid dataset_path")
+        path = (REPO_ROOT / recorded_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"training dataset not found: {path}")
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "training dataset SHA-256 mismatch: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
     return path
 
 
@@ -187,17 +205,16 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     model = build_model_from_checkpoint(checkpoint, device=device)
     samples = load_twd_tom_jsonl(dataset_path)
     evaluation_game_ids = collect_game_ids(samples)
-    training_path = None
-    training_game_ids: tuple[str, ...] = ()
-    overlap: tuple[str, ...] = ()
-    if not config.allow_game_id_overlap:
-        training_path = resolve_training_dataset_path(
-            checkpoint, override_path=config.training_dataset_path
+    training_path = resolve_training_dataset_path(
+        checkpoint, override_path=config.training_dataset_path
+    )
+    training_game_ids = collect_game_ids(load_twd_tom_jsonl(training_path))
+    overlap = tuple(sorted(set(evaluation_game_ids) & set(training_game_ids)))
+    if overlap:
+        raise ValueError(
+            "evaluation game IDs must be disjoint from training data; "
+            f"overlap_count={len(overlap)}, examples={list(overlap[:5])}"
         )
-        training_game_ids = collect_game_ids(load_twd_tom_jsonl(training_path))
-        overlap = tuple(sorted(set(evaluation_game_ids) & set(training_game_ids)))
-        if overlap:
-            raise ValueError(f"evaluation game_id values overlap training data: {list(overlap)}")
 
     dataset = TWDToMDataset(
         samples,
@@ -240,7 +257,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "evaluation_sample_count": len(dataset),
         "evaluation_game_ids": list(evaluation_game_ids),
         "evaluation_supervised_subject_count": supervised,
-        "training_dataset_path": None if training_path is None else str(training_path),
+        "training_dataset_path": str(training_path),
         "training_game_ids": list(training_game_ids),
         "overlapping_game_ids": list(overlap),
         "model_config": result_model_config(model),
@@ -255,14 +272,25 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate a Qwen2 ToM checkpoint.")
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--dataset", required=True)
+    parser.add_argument(
+        "--checkpoint", required=True,
+        help="Order-specific best.pt or last.pt checkpoint.",
+    )
+    parser.add_argument(
+        "--dataset", required=True,
+        help="Validation or test JSONL file to evaluate.",
+    )
     parser.add_argument("--output", default=None)
-    parser.add_argument("--training-dataset", default=None)
+    parser.add_argument(
+        "--training-dataset", default=None,
+        help="Optional location of the exact hashed training JSONL.",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--device", default="auto",
+        help="Torch device or auto (CUDA, then MPS, then CPU).",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--allow-game-id-overlap", action="store_true")
     return parser
 
 
@@ -277,7 +305,6 @@ def main() -> int:
             batch_size=args.batch_size,
             device=args.device,
             num_workers=args.num_workers,
-            allow_game_id_overlap=args.allow_game_id_overlap,
         )
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))

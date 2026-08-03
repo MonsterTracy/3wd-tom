@@ -12,9 +12,6 @@ import torch
 
 from script.twd_tom.eval import build_model_from_checkpoint, load_checkpoint
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
-from werewolf.models.twd_tom.belief_labels import (
-    pair_probabilities_to_belief_marginals,
-)
 from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
 from werewolf.models.twd_tom.public_events import (
     latest_completed_public_action,
@@ -126,29 +123,36 @@ class SecondOrderToMShadow:
         started_ns = time.perf_counter_ns()
         with torch.no_grad():
             output = self.model(**features)
-            logits = output.get("observer_pair_logits")
-            if not isinstance(logits, torch.Tensor):
+            pair_probabilities = output.get("pair_probabilities")
+            wolf_marginals = output.get("wolf_marginals")
+            if not isinstance(pair_probabilities, torch.Tensor):
                 raise TypeError(
-                    "second-order shadow model returned no pair logits"
+                    "second-order shadow model returned no pair probabilities"
                 )
-            if tuple(logits.shape) != (
+            if tuple(pair_probabilities.shape) != (
                 1,
                 NUM_PLAYERS,
                 NUM_WOLF_PAIR_CLASSES,
             ):
                 raise ValueError(
-                    "second-order shadow logits must have shape [1, 7, 21]"
+                    "second-order shadow pair probabilities must have shape [1, 7, 21]"
                 )
-            pair_probabilities = torch.softmax(logits, dim=-1)
-            wolf_marginals = pair_probabilities_to_belief_marginals(
-                pair_probabilities
-            )
+            if not isinstance(wolf_marginals, torch.Tensor):
+                raise TypeError(
+                    "second-order shadow model returned no wolf marginals"
+                )
         latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
         latest_actor_ids, latest_action_type = latest_completed_public_action(
             snapshot.public_events
         )
 
         pair_row_sums = pair_probabilities.sum(dim=-1)
+        if not torch.isfinite(pair_probabilities).all():
+            raise ValueError("second-order shadow pair probabilities must be finite")
+        if torch.any(pair_probabilities < 0):
+            raise ValueError(
+                "second-order shadow pair probabilities must be non-negative"
+            )
         if not torch.allclose(
             pair_row_sums,
             torch.ones_like(pair_row_sums),

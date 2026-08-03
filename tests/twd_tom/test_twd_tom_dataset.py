@@ -1,7 +1,6 @@
 """Tests for strict current raw first-/second-order data adaptation."""
 
 import hashlib
-import json
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -29,6 +28,10 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_TO_ID,
     canonical_wolf_pairs,
 )
+from tests.twd_tom.public_event_fixtures import (
+    make_full_history_training_sample,
+    make_training_sample,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,68 +43,48 @@ TOM2_SPLIT_SHA256 = {
 
 
 def raw_sample(tom_order):
-    name = "raw_tom.jsonl" if tom_order == 1 else "raw_tom2.jsonl"
-    with (REPO_ROOT / "data" / "qwen25" / name).open(encoding="utf-8") as file:
-        return json.loads(next(file))
+    return make_training_sample(tom_order)
 
 
 def second_order_sample(*, with_latest_action):
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
-    with path.open(encoding="utf-8") as file:
-        for line in file:
-            sample = json.loads(line)
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
-            )
-            has_valid_actor = any(
-                sample["belief_status"][PLAYER_NAMES[player_id - 1]] == "ok"
-                for player_id in actor_ids
-            )
-            if (
-                (with_latest_action and has_valid_actor)
-                or (not with_latest_action and not actor_ids)
-            ):
-                return sample
-    raise AssertionError("missing requested second-order sample fixture")
+    return make_training_sample(2, with_latest_action=with_latest_action)
 
 
 def second_order_sample_with_sparse_latest_actor_target():
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
-    with path.open(encoding="utf-8") as file:
-        for line in file:
-            sample = json.loads(line)
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
-            )
-            if any(
-                PLAYER_NAMES[player_id - 1] not in sample["belief_status"]
-                for player_id in actor_ids
-            ):
-                return sample
-    raise AssertionError("missing sample with a sparse latest-actor target")
+    return make_training_sample(2, observers=(1, 3, 5))
 
 
-def test_second_order_formal_split_files_are_unchanged():
+def test_second_order_formal_split_files_are_unchanged(
+    require_real_twd_tom_data,
+):
+    paths = [
+        REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
+        for split in TOM2_SPLIT_SHA256
+    ]
+    require_real_twd_tom_data(*paths)
     for split, expected in TOM2_SPLIT_SHA256.items():
         path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
         assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
 
 
+def test_real_data_smoke_gate_is_explicit(
+    tmp_path,
+    monkeypatch,
+    require_real_twd_tom_data,
+):
+    path = tmp_path / "fixture.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.delenv("RUN_TWD_TOM_REAL_DATA_TESTS", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        require_real_twd_tom_data(path)
+    monkeypatch.setenv("RUN_TWD_TOM_REAL_DATA_TESTS", "1")
+    require_real_twd_tom_data(path)
+    with pytest.raises(pytest.skip.Exception):
+        require_real_twd_tom_data(tmp_path / "missing.jsonl")
+
+
 def full_history_second_order_sample():
-    required = {
-        "public_speech",
-        "vote_result",
-        "exile_result",
-        "death_announcement",
-    }
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
-    with path.open(encoding="utf-8") as file:
-        return next(
-            sample
-            for sample in (json.loads(line) for line in file)
-            if required
-            <= {event["event_type"] for event in sample["public_events"]}
-        )
+    return make_full_history_training_sample()
 
 
 def rotated_player(player, shift):
@@ -376,6 +359,37 @@ def test_second_order_indices_do_not_depend_on_target_probability_values():
     assert dataset.second_order_supervised_indices() == (0,)
 
 
+@pytest.mark.parametrize(
+    ("subject_mask", "update_mask", "error", "match"),
+    [
+        ([True] * 7, torch.ones(7, dtype=torch.bool), TypeError, "torch.Tensor"),
+        (torch.ones(7, dtype=torch.bool), [True] * 7, TypeError, "torch.Tensor"),
+        (torch.ones(7), torch.ones(7, dtype=torch.bool), TypeError, "dtype"),
+        (torch.ones(7, dtype=torch.bool), torch.ones(7), TypeError, "dtype"),
+        (
+            torch.ones(7, dtype=torch.bool),
+            torch.ones(1, 7, dtype=torch.bool),
+            ValueError,
+            "shapes must match",
+        ),
+        (
+            torch.ones(6, dtype=torch.bool),
+            torch.ones(6, dtype=torch.bool),
+            ValueError,
+            "last dimension must be 7",
+        ),
+    ],
+)
+def test_effective_subject_mask_rejects_non_boolean_or_wrong_shape(
+    subject_mask,
+    update_mask,
+    error,
+    match,
+):
+    with pytest.raises(error, match=match):
+        second_order_effective_subject_mask(subject_mask, update_mask)
+
+
 def test_first_order_pair_projection_semantics_are_unchanged():
     sample = raw_sample(1)
     item = TWDToMDataset([sample], tom_order=1)[0]
@@ -493,16 +507,7 @@ def test_extra_observer_private_mapping_is_rejected_not_ignored():
 
 
 def test_raw_text_never_changes_model_features():
-    path = REPO_ROOT / "data" / "qwen25" / "raw_tom2.jsonl"
-    with path.open(encoding="utf-8") as file:
-        first = next(
-            sample
-            for sample in (json.loads(line) for line in file)
-            if any(
-                event["event_type"] == "public_speech"
-                for event in sample["public_events"]
-            )
-        )
+    first = make_training_sample(2, with_latest_action=True)
     second = deepcopy(first)
     speech = next(e for e in second["public_events"] if e["event_type"] == "public_speech")
     speech["raw_text"] = "changed text that must not enter model features"

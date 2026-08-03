@@ -47,6 +47,9 @@ mlruns/
 tensorboard/
 lightning_logs/
 wandb/
+data/
+datasets/
+
 
 # Model checkpoints and large artifacts
 checkpoints/

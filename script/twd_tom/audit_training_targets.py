@@ -16,7 +16,10 @@ import torch
 from werewolf.models.twd_tom.belief_labels import (
     pair_probabilities_to_belief_marginals,
 )
-from werewolf.models.twd_tom.dataset import TWDToMDataset
+from werewolf.models.twd_tom.dataset import (
+    TWDToMDataset,
+    second_order_effective_subject_mask,
+)
 from werewolf.models.twd_tom.public_events import parse_public_phase
 from werewolf.models.twd_tom.schema import PLAYER_NAMES
 
@@ -55,11 +58,12 @@ class _TargetAuditAccumulator:
 
     def update(self, item: Mapping[str, Any]) -> None:
         targets = item["pair_targets"].to(dtype=torch.float64)
-        mask = item["subject_mask"].to(dtype=torch.bool)
-        update_mask = item["latest_completed_public_action_mask"].to(
-            dtype=torch.bool
+        mask = item["subject_mask"]
+        update_mask = item["latest_completed_public_action_mask"]
+        effective_mask = second_order_effective_subject_mask(
+            mask,
+            update_mask,
         )
-        effective_mask = mask & update_mask
         valid_targets = targets[mask]
         update_targets = targets[effective_mask]
         actor_ids = item["metadata"][

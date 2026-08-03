@@ -20,7 +20,10 @@ from script.twd_tom.train import (
     build_model,
     checkpoint_payload,
 )
-from tests.twd_tom.public_event_fixtures import make_public_events
+from tests.twd_tom.public_event_fixtures import (
+    make_public_events,
+    make_training_sample,
+)
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.dataset import TWDToMDataset
 from werewolf.models.twd_tom.schema import (
@@ -54,6 +57,23 @@ def _write_checkpoint(tmp_path, tom_order):
         validation_metrics={"mean_loss": 0.5, "valid_subject_count": 1},
         best_epoch=1,
         best_validation_mean_loss=0.5,
+        run_provenance={
+            "git_commit_sha": "1" * 40,
+            "git_worktree_clean": True,
+            "train_dataset_path": "data/synthetic/train.jsonl",
+            "train_dataset_sha256": "0" * 64,
+            "validation_dataset_path": "data/synthetic/val.jsonl",
+            "validation_dataset_sha256": "0" * 64,
+            "output_dir": "outputs/synthetic",
+            "python_version": "test",
+            "torch_version": str(torch.__version__),
+            "transformers_version": "test",
+            "platform": "test",
+            "requested_device": "cpu",
+            "resolved_device": "cpu",
+            "deterministic_algorithms_enabled": True,
+            "seed": 42,
+        },
     )
     path = tmp_path / f"tom{tom_order}.pt"
     torch.save(checkpoint, path)
@@ -170,19 +190,9 @@ def test_shadow_records_only_latest_completed_public_action_block(
 
 
 def test_shadow_update_mask_matches_dataset(tmp_path, second_checkpoint):
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / "train.jsonl"
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            sample = json.loads(line)
-            dataset = TWDToMDataset([sample], tom_order=2)
-            item = dataset[0]
-            if (
-                item["latest_completed_public_action_mask"].any()
-                and item["attention_mask"].shape[0] <= 32
-            ):
-                break
-        else:
-            raise AssertionError("no short latest-action sample found")
+    sample = make_training_sample(2, with_latest_action=True)
+    dataset = TWDToMDataset([sample], tom_order=2)
+    item = dataset[0]
     with _new_shadow(tmp_path, second_checkpoint) as shadow:
         record = shadow.record(
             step_idx=sample["step_idx"],
@@ -254,10 +264,11 @@ def test_existing_output_and_duplicate_snapshot_fail(
 def test_non_finite_model_output_is_rejected(tmp_path, second_checkpoint):
     shadow = _new_shadow(tmp_path, second_checkpoint)
     shadow.model.forward = lambda **_kwargs: {
-        "observer_pair_logits": torch.full(
+        "pair_probabilities": torch.full(
             (1, 7, NUM_WOLF_PAIR_CLASSES),
             float("nan"),
-        )
+        ),
+        "wolf_marginals": torch.zeros((1, 7, 7)),
     }
     try:
         with pytest.raises(ValueError, match="finite"):
@@ -269,6 +280,39 @@ def test_non_finite_model_output_is_rejected(tmp_path, second_checkpoint):
             )
     finally:
         shadow.close()
+
+
+def test_shadow_consumes_backbone_derived_outputs_without_recomputation(
+    tmp_path,
+    second_checkpoint,
+):
+    shadow = _new_shadow(tmp_path, second_checkpoint)
+    probabilities = torch.zeros((1, 7, NUM_WOLF_PAIR_CLASSES))
+    probabilities[..., 0] = 1.0
+    marginals = torch.zeros((1, 7, 7))
+    marginals[..., 5:] = 1.0
+    shadow.model.forward = lambda **_kwargs: {
+        "observer_pair_logits": torch.full_like(probabilities, float("nan")),
+        "pair_probabilities": probabilities,
+        "wolf_marginals": marginals,
+    }
+    try:
+        record = shadow.record(
+            step_idx=0,
+            phase="1_day_speech",
+            speaker_id=1,
+            public_events=make_public_events([], speaker_id=1),
+        )
+    finally:
+        shadow.close()
+    assert torch.equal(
+        torch.tensor(record["pair_probability_matrix"]),
+        probabilities[0],
+    )
+    assert torch.equal(
+        torch.tensor(record["wolf_marginal_matrix"]),
+        marginals[0],
+    )
 
 
 class OneSpeechEnvironment:

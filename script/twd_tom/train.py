@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import platform
 import random
+import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
+import transformers
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
@@ -51,10 +56,6 @@ from werewolf.models.twd_tom.schema import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RAW_DATASET_PATHS = {
-    1: REPO_ROOT / "data" / "qwen25" / "raw_tom.jsonl",
-    2: REPO_ROOT / "data" / "qwen25" / "raw_tom2.jsonl",
-}
 
 
 def _positive_integer(value: Any, *, field_name: str) -> int:
@@ -145,6 +146,164 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True)
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+
+
+def sha256_file(path: str | Path) -> str:
+    """Return the SHA-256 digest of one required file."""
+
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"required file not found: {file_path}")
+    digest = hashlib.sha256()
+    with file_path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _repository_relative_path(
+    path: str | Path,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> str:
+    """Return a logical repository-relative path without resolving symlinks."""
+
+    root = Path(os.path.abspath(repo_root))
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ValueError(
+            f"path must be inside the Git worktree: {candidate}"
+        ) from exc
+
+
+def build_run_provenance(
+    config: TrainingConfig,
+    *,
+    resolved_device: torch.device,
+    repo_root: Path = REPO_ROOT,
+) -> dict[str, Any]:
+    """Build the minimal immutable provenance for one clean-worktree run."""
+
+    root = Path(repo_root)
+    try:
+        top_level = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty_lines = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--short",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            f"formal training requires a readable Git worktree: {root}"
+        ) from exc
+    if Path(os.path.abspath(top_level)) != Path(os.path.abspath(root)):
+        raise RuntimeError(
+            f"formal training must run from the repository root: {root}"
+        )
+    if not commit:
+        raise RuntimeError("formal training requires a committed Git HEAD")
+    if dirty_lines:
+        dirty = "\n".join(dirty_lines)
+        raise RuntimeError(
+            "formal training requires a clean Git worktree; dirty files:\n"
+            f"{dirty}"
+        )
+
+    train_path = config.resolved_dataset_path
+    validation_path = config.resolved_validation_dataset_path
+    return {
+        "git_commit_sha": commit,
+        "git_worktree_clean": True,
+        "train_dataset_path": _repository_relative_path(
+            train_path, repo_root=root
+        ),
+        "train_dataset_sha256": sha256_file(train_path),
+        "validation_dataset_path": _repository_relative_path(
+            validation_path, repo_root=root
+        ),
+        "validation_dataset_sha256": sha256_file(validation_path),
+        "output_dir": _repository_relative_path(
+            config.output_dir, repo_root=root
+        ),
+        "python_version": platform.python_version(),
+        "torch_version": str(torch.__version__),
+        "transformers_version": transformers.__version__,
+        "platform": platform.platform(),
+        "requested_device": config.device,
+        "resolved_device": str(resolved_device),
+        "deterministic_algorithms_enabled": (
+            torch.are_deterministic_algorithms_enabled()
+        ),
+        "seed": config.seed,
+    }
+
+
+def _prepare_run_output_dir(path: Path) -> None:
+    if path.exists():
+        if not path.is_dir():
+            raise NotADirectoryError(f"training output path is not a directory: {path}")
+        if any(path.iterdir()):
+            raise FileExistsError(
+                f"training output directory must be empty: {path}"
+            )
+        return
+    path.mkdir(parents=True)
+
+
+def _atomic_torch_save(value: Any, path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("wb") as file:
+            torch.save(value, file)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_json_write(value: Any, path: Path) -> None:
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(value, file, ensure_ascii=False, indent=2, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def resolve_device(requested_device: str) -> torch.device:
@@ -396,9 +555,9 @@ def _effective_subject_mask(
     model: ToMBeliefBackbone,
     batch: Mapping[str, torch.Tensor],
 ) -> torch.Tensor:
-    subject_mask = batch["subject_mask"].to(dtype=torch.bool)
+    subject_mask = batch["subject_mask"]
     if model.tom_order == 1:
-        return subject_mask
+        return subject_mask.to(dtype=torch.bool)
     update_mask = batch.get("latest_completed_public_action_mask")
     if update_mask is None:
         raise ValueError(
@@ -553,6 +712,7 @@ def checkpoint_payload(
     validation_metrics: Mapping[str, int | float],
     best_epoch: int,
     best_validation_mean_loss: float,
+    run_provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     selection_metric_value = float(validation_metrics["mean_loss"])
     return {
@@ -565,11 +725,19 @@ def checkpoint_payload(
         **checkpoint_task_contract(config.tom_order),
         "backbone": BACKBONE_NAME,
         "epoch": epoch,
-        "train_dataset_path": str(config.resolved_dataset_path.resolve()),
-        "validation_dataset_path": str(
-            config.resolved_validation_dataset_path.resolve()
-        ),
-        "training_config": asdict(config),
+        "train_dataset_path": run_provenance["train_dataset_path"],
+        "validation_dataset_path": run_provenance[
+            "validation_dataset_path"
+        ],
+        "training_config": {
+            **asdict(config),
+            "output_dir": run_provenance["output_dir"],
+            "dataset_path": run_provenance["train_dataset_path"],
+            "validation_dataset_path": run_provenance[
+                "validation_dataset_path"
+            ],
+        },
+        "run_provenance": dict(run_provenance),
         "model_config": result_model_config(model),
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -587,6 +755,9 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
 
     set_random_seed(config.seed)
     device = resolve_device(config.device)
+    run_provenance = build_run_provenance(config, resolved_device=device)
+    output_dir = config.run_output_dir
+    _prepare_run_output_dir(output_dir)
     (
         train_loader,
         train_dataset,
@@ -599,8 +770,6 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    output_dir = config.run_output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     best_checkpoint_path = output_dir / "best.pt"
     last_checkpoint_path = output_dir / "last.pt"
     history = []
@@ -635,10 +804,11 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 "is_best": is_best,
                 "best_epoch": best_epoch,
                 "best_validation_mean_loss": best_validation_mean_loss,
+                "run_provenance": dict(run_provenance),
             }
         )
         if is_best:
-            torch.save(
+            _atomic_torch_save(
                 checkpoint_payload(
                     model=model,
                     optimizer=optimizer,
@@ -648,12 +818,13 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                     validation_metrics=validation_metrics,
                     best_epoch=best_epoch,
                     best_validation_mean_loss=best_validation_mean_loss,
+                    run_provenance=run_provenance,
                 ),
                 best_checkpoint_path,
             )
 
     final_record = history[-1]
-    torch.save(
+    _atomic_torch_save(
         checkpoint_payload(
             model=model,
             optimizer=optimizer,
@@ -663,23 +834,19 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             validation_metrics=final_record["validation"],
             best_epoch=best_epoch,
             best_validation_mean_loss=best_validation_mean_loss,
+            run_provenance=run_provenance,
         ),
         last_checkpoint_path,
     )
     history_path = output_dir / "history.json"
-    history_path.write_text(
-        json.dumps(history, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _atomic_json_write(history, history_path)
     summary = {
         "status": "ok",
         "tom_order": config.tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
         **task_contract,
-        "train_dataset": str(config.resolved_dataset_path.resolve()),
-        "validation_dataset": str(
-            config.resolved_validation_dataset_path.resolve()
-        ),
+        "train_dataset": run_provenance["train_dataset_path"],
+        "validation_dataset": run_provenance["validation_dataset_path"],
         "train_sample_count": len(train_dataset),
         "validation_sample_count": len(validation_dataset),
         "epochs_completed": config.epochs,
@@ -688,17 +855,19 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "device": str(device),
         "backbone": BACKBONE_NAME,
         "model_config": result_model_config(model),
-        "best_checkpoint": str(best_checkpoint_path.resolve()),
-        "last_checkpoint": str(last_checkpoint_path.resolve()),
-        "history_path": str(history_path.resolve()),
         "final_train_metrics": final_record["train"],
         "final_validation_metrics": final_record["validation"],
         "selection_metric_name": "validation_mean_loss",
+        "run_provenance": dict(run_provenance),
     }
-    (output_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    run_dir = (
+        Path(run_provenance["output_dir"])
+        / f"tom_order_{config.tom_order}"
     )
+    summary["best_checkpoint"] = (run_dir / "best.pt").as_posix()
+    summary["last_checkpoint"] = (run_dir / "last.pt").as_posix()
+    summary["history_path"] = (run_dir / "history.json").as_posix()
+    _atomic_json_write(summary, output_dir / "summary.json")
     return summary
 
 
@@ -706,16 +875,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Train the fixed Qwen2 ToM backbone with explicit train/validation data."
     )
-    parser.add_argument("--tom-order", required=True, type=int, choices=(1, 2))
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--dataset", required=True)
-    parser.add_argument("--validation-dataset", required=True)
+    parser.add_argument(
+        "--tom-order", required=True, type=int, choices=(1, 2),
+        help="ToM order to train (1 or 2).",
+    )
+    parser.add_argument(
+        "--output-dir", required=True,
+        help="Repository-local root for a new, empty training run directory.",
+    )
+    parser.add_argument(
+        "--dataset", required=True,
+        help="Repository-local training JSONL file.",
+    )
+    parser.add_argument(
+        "--validation-dataset", required=True,
+        help="Repository-local validation JSONL file with disjoint game IDs.",
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Python, Torch, loader, and rotation random seed (default: 42).",
+    )
+    parser.add_argument(
+        "--device", default="auto",
+        help="Torch device or auto (CUDA, then MPS, then CPU).",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--max-seq-len", type=int, default=256)

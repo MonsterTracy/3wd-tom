@@ -1,4 +1,5 @@
 from copy import deepcopy
+import os
 
 import pytest
 
@@ -14,6 +15,7 @@ from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
 )
 from tests.twd_tom.public_event_fixtures import make_public_events
+from tests.twd_tom.public_event_fixtures import make_training_sample
 
 
 @pytest.fixture
@@ -78,3 +80,22 @@ def projected_sample_factory(suspicion_sample_factory):
         return project_suspicion_sample(suspicion_sample_factory(**kwargs))
 
     return make
+
+
+@pytest.fixture
+def training_sample_factory():
+    return make_training_sample
+
+
+@pytest.fixture
+def require_real_twd_tom_data():
+    def require(*paths):
+        if os.environ.get("RUN_TWD_TOM_REAL_DATA_TESTS") != "1":
+            pytest.skip(
+                "set RUN_TWD_TOM_REAL_DATA_TESTS=1 to run formal-data smoke tests"
+            )
+        missing = [str(path) for path in paths if not path.is_file()]
+        if missing:
+            pytest.skip(f"formal ToM data is unavailable: {missing}")
+
+    return require

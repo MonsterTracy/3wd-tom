@@ -1,38 +1,33 @@
 """Tests for the read-only second-order target seat audit."""
 
 import json
-from pathlib import Path
 
 import pytest
 
 from script.twd_tom.audit_training_targets import audit_training_targets
-from werewolf.models.twd_tom.public_events import latest_completed_public_action
 from werewolf.models.twd_tom.schema import PLAYER_NAMES
-
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from tests.twd_tom.public_event_fixtures import (
+    make_public_events,
+    make_training_sample,
+)
 
 
 def _samples(split):
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
-    without_action = None
-    with_action = None
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            sample = json.loads(line)
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
-            )
-            if not actor_ids and without_action is None:
-                without_action = sample
-            if any(
-                sample["belief_status"][PLAYER_NAMES[player_id - 1]] == "ok"
-                for player_id in actor_ids
-            ):
-                with_action = sample
-            if without_action is not None and with_action is not None:
-                return [without_action, with_action]
-    raise AssertionError(f"missing latest-action audit fixture in {path}")
+    without_action = make_training_sample(
+        2,
+        game_id=f"synthetic_{split}_without_action",
+        with_latest_action=False,
+    )
+    events = make_public_events(
+        [["player2", "support", "player4"]],
+        speaker_id=2,
+    )
+    with_action = make_training_sample(
+        2,
+        game_id=f"synthetic_{split}_with_action",
+        public_events=events,
+    )
+    return [without_action, with_action]
 
 
 def test_seven_epoch_rotation_audit_is_seat_symmetric_and_read_only(tmp_path):

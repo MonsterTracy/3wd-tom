@@ -530,9 +530,8 @@ class ToMBeliefBackbone(nn.Module):
             "pooled_hidden_state": pooled_hidden_state,
             "observer_hidden_states": observer_hidden_states,
             "observer_pair_logits": logits,
-            "pair_logits": logits,
             "pair_probabilities": probabilities,
-            "belief_matrix": pair_probabilities_to_belief_marginals(
+            "wolf_marginals": pair_probabilities_to_belief_marginals(
                 probabilities
             ),
         }

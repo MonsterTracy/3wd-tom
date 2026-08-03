@@ -525,13 +525,38 @@ def second_order_effective_subject_mask(
 ) -> torch.Tensor:
     """Return observers valid under the formal second-order supervision mask."""
 
+    if not isinstance(subject_mask, torch.Tensor):
+        raise TypeError(
+            "subject_mask must be a torch.Tensor; "
+            f"got {type(subject_mask).__name__}"
+        )
+    if not isinstance(latest_completed_action_mask, torch.Tensor):
+        raise TypeError(
+            "latest_completed_public_action_mask must be a torch.Tensor; "
+            f"got {type(latest_completed_action_mask).__name__}"
+        )
+    if subject_mask.dtype is not torch.bool:
+        raise TypeError(
+            f"subject_mask dtype must be torch.bool; got {subject_mask.dtype}"
+        )
+    if latest_completed_action_mask.dtype is not torch.bool:
+        raise TypeError(
+            "latest_completed_public_action_mask dtype must be torch.bool; "
+            f"got {latest_completed_action_mask.dtype}"
+        )
     if subject_mask.shape != latest_completed_action_mask.shape:
         raise ValueError(
-            "latest_completed_public_action_mask must match subject_mask"
+            "effective mask shapes must match; "
+            f"subject_mask={tuple(subject_mask.shape)}, "
+            "latest_completed_public_action_mask="
+            f"{tuple(latest_completed_action_mask.shape)}"
         )
-    return subject_mask.to(dtype=torch.bool) & latest_completed_action_mask.to(
-        dtype=torch.bool
-    )
+    if subject_mask.ndim == 0 or subject_mask.shape[-1] != NUM_PLAYERS:
+        raise ValueError(
+            "effective mask last dimension must be 7; "
+            f"got shape {tuple(subject_mask.shape)}"
+        )
+    return subject_mask & latest_completed_action_mask
 
 
 class TWDToMDataset(Dataset):

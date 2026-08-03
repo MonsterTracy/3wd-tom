@@ -146,7 +146,7 @@ pending current speech do not count. Snapshots whose effective mask is empty
 are excluded by deterministic Dataset indices in train, validation, and eval.
 Target rows remain unchanged. First-order masking is unchanged.
 
-## Game-level dataset split
+## Audit-only projected dataset split
 
 The splitter accepts one projected JSONL and partitions complete `game_id`
 groups into `train.jsonl`, `validation.jsonl`, and `test.jsonl`. The caller
@@ -157,6 +157,103 @@ their input-relative order is preserved. Fixed twelve-game and 8/2/2 rules
 are not built into the splitter; formal experiment counts must be supplied
 explicitly. These projected splits remain available for audit; the
 order-specific Qwen2 trainer does not consume them.
+
+`script/twd_tom/split_formal_dataset.py` implements this audit split. It is
+not the formal training-data splitter or a training entry point.
+
+## Formal training operations
+
+Formal first- and second-order data reuse one in-memory, seed-42 game split.
+Generate the six order-specific files without overwriting existing outputs:
+
+```bash
+python -m script.twd_tom.split_training_data \
+  --tom1 data/qwen25/raw_tom.jsonl \
+  --tom2 data/qwen25/raw_tom2.jsonl \
+  --output-dir data/qwen25 \
+  --seed 42
+```
+
+The only formal split files are:
+
+- `data/qwen25/tom1/train.jsonl`
+- `data/qwen25/tom1/val.jsonl`
+- `data/qwen25/tom1/test.jsonl`
+- `data/qwen25/tom2/train.jsonl`
+- `data/qwen25/tom2/val.jsonl`
+- `data/qwen25/tom2/test.jsonl`
+
+Train the two orders independently. The selected output root must be inside
+the repository's logical path; its `tom_order_1/` or `tom_order_2/` run
+directory must be absent or empty:
+
+```bash
+python -m script.twd_tom.train \
+  --dataset data/qwen25/tom1/train.jsonl \
+  --validation-dataset data/qwen25/tom1/val.jsonl \
+  --tom-order 1 \
+  --output-dir outputs/tom/formal_tom1 \
+  --device auto \
+  --seed 42
+
+python -m script.twd_tom.train \
+  --dataset data/qwen25/tom2/train.jsonl \
+  --validation-dataset data/qwen25/tom2/val.jsonl \
+  --tom-order 2 \
+  --output-dir outputs/tom/formal_tom2 \
+  --device auto \
+  --seed 42
+```
+
+Training refuses a dirty Git worktree. `best.pt`, `last.pt`, `summary.json`,
+and `history.json` record one `run_provenance` containing the commit SHA,
+clean-worktree assertion, repository-relative train/validation paths and
+their SHA-256 digests, Python/PyTorch/Transformers/platform versions,
+requested and resolved devices, deterministic-algorithm status, and seed.
+Python, Torch, CUDA, the DataLoader generator, and cyclic rotation are seeded;
+supported Torch backends use deterministic algorithms and deterministic
+cuDNN settings. These controls aim to reproduce a run with the same commit,
+data, and environment. They do not promise bit-identical results across CPU,
+CUDA, and MPS hardware.
+
+Evaluate validation data against the exact hashed training data recorded by
+the checkpoint:
+
+```bash
+python -m script.twd_tom.eval \
+  --checkpoint outputs/tom/formal_tom1/tom_order_1/best.pt \
+  --dataset data/qwen25/tom1/val.jsonl \
+  --training-dataset data/qwen25/tom1/train.jsonl \
+  --output outputs/tom/formal_tom1/tom_order_1/val_metrics.json \
+  --device auto
+
+python -m script.twd_tom.eval \
+  --checkpoint outputs/tom/formal_tom2/tom_order_2/best.pt \
+  --dataset data/qwen25/tom2/val.jsonl \
+  --training-dataset data/qwen25/tom2/train.jsonl \
+  --output outputs/tom/formal_tom2/tom_order_2/val_metrics.json \
+  --device auto
+```
+
+After the model definition, hyperparameters, and checkpoint are frozen, run
+the corresponding test evaluation once by replacing `val.jsonl` with
+`test.jsonl` and `val_metrics.json` with `test_metrics.json`. Eval always
+checks that training and evaluation `game_id` sets are disjoint; there is no
+disable switch or legacy dataset-path fallback.
+
+Ordinary tests are self-contained and do not require formal data:
+
+```bash
+python -m pytest -q
+```
+
+Formal-data smoke tests are explicit and read-only:
+
+```bash
+RUN_TWD_TOM_REAL_DATA_TESTS=1 python -m pytest -q tests/twd_tom
+```
+
+Do not commit `data/`, `datasets/`, `outputs/`, or model checkpoints.
 
 ## Explicit stage pipeline
 

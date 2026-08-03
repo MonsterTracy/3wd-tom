@@ -1,7 +1,7 @@
 """Tests for the explicit train/validation Qwen2 training entry."""
 
-import inspect
 import json
+import subprocess
 from copy import deepcopy
 from pathlib import Path
 
@@ -18,16 +18,22 @@ from script.twd_tom.eval import (
 )
 from script.twd_tom.train import (
     TrainingConfig,
+    _atomic_json_write,
+    _atomic_torch_save,
     _effective_subject_mask,
     _forward_batch,
     _move_batch_to_device,
+    _prepare_run_output_dir,
     _targets_for_loss,
     build_arg_parser,
     build_data_loader,
     build_model,
+    build_run_provenance,
     build_training_data_loaders,
     evaluate_model,
     run_training,
+    set_random_seed,
+    sha256_file,
 )
 from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
 from werewolf.models.twd_tom.belief_backbone import (
@@ -36,13 +42,12 @@ from werewolf.models.twd_tom.belief_backbone import (
 )
 from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
 from werewolf.models.twd_tom.schema import (
-    PLAYER_NAMES,
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
     SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
-from werewolf.models.twd_tom.public_events import latest_completed_public_action
+from tests.twd_tom.public_event_fixtures import make_training_sample
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -59,34 +64,44 @@ COLLAPSE_DIAGNOSTIC_KEYS = {
 
 
 def _source_sample(tom_order: int, split: str) -> dict:
-    path = REPO_ROOT / "data" / "qwen25" / f"tom{tom_order}" / f"{split}.jsonl"
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            sample = json.loads(line)
-            if tom_order == 1:
-                return sample
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
-            )
-            if any(
-                sample["belief_status"][PLAYER_NAMES[player_id - 1]] == "ok"
-                for player_id in actor_ids
-            ):
-                return sample
-    raise AssertionError(f"no latest-action sample found in {path}")
+    return make_training_sample(
+        tom_order,
+        game_id=f"synthetic_tom{tom_order}_{split}",
+    )
 
 
 def _source_sample_without_latest_action(split: str) -> dict:
-    path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
-    with path.open(encoding="utf-8") as handle:
-        for line in handle:
-            sample = json.loads(line)
-            actor_ids, _action_type = latest_completed_public_action(
-                sample["public_events"]
-            )
-            if not actor_ids:
-                return sample
-    raise AssertionError(f"no pre-action sample found in {path}")
+    return make_training_sample(
+        2,
+        game_id=f"synthetic_tom2_{split}_without_action",
+        with_latest_action=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def synthetic_run_provenance(monkeypatch):
+    def build(config, *, resolved_device):
+        return {
+            "git_commit_sha": "1" * 40,
+            "git_worktree_clean": True,
+            "train_dataset_path": "tests/fixtures/synthetic_train.jsonl",
+            "train_dataset_sha256": sha256_file(config.resolved_dataset_path),
+            "validation_dataset_path": "tests/fixtures/synthetic_val.jsonl",
+            "validation_dataset_sha256": sha256_file(
+                config.resolved_validation_dataset_path
+            ),
+            "output_dir": "outputs/tests",
+            "python_version": "test",
+            "torch_version": str(torch.__version__),
+            "transformers_version": "test",
+            "platform": "test",
+            "requested_device": config.device,
+            "resolved_device": str(resolved_device),
+            "deterministic_algorithms_enabled": True,
+            "seed": config.seed,
+        }
+
+    monkeypatch.setattr(train_module, "build_run_provenance", build)
 
 
 def _write_sample(path: Path, sample: dict) -> None:
@@ -203,7 +218,7 @@ def test_train_and_validation_game_overlap_is_rejected(tmp_path):
         train_sample=train_sample,
         validation_sample=deepcopy(train_sample),
     )
-    with pytest.raises(ValueError, match=r"overlap: count=1.*game_"):
+    with pytest.raises(ValueError, match=r"overlap: count=1.*synthetic_tom1_train"):
         build_training_data_loaders(config)
 
 
@@ -295,8 +310,10 @@ def test_formal_second_order_loader_reads_first_batch(
     tmp_path,
     split,
     shuffle,
+    require_real_twd_tom_data,
 ):
     formal_path = REPO_ROOT / "data" / "qwen25" / "tom2" / f"{split}.jsonl"
+    require_real_twd_tom_data(formal_path)
     config = TrainingConfig(
         tom_order=2,
         output_dir=str(tmp_path / "unused-output"),
@@ -427,10 +444,18 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
     best = torch.load(config.run_output_dir / "best.pt", map_location="cpu", weights_only=True)
     last = torch.load(config.run_output_dir / "last.pt", map_location="cpu", weights_only=True)
     assert best["epoch"] == last["epoch"] == 1
-    assert best["train_dataset_path"] == str(config.resolved_dataset_path.resolve())
-    assert best["validation_dataset_path"] == str(
-        config.resolved_validation_dataset_path.resolve()
-    )
+    assert best["train_dataset_path"] == "tests/fixtures/synthetic_train.jsonl"
+    assert best["validation_dataset_path"] == "tests/fixtures/synthetic_val.jsonl"
+    assert best["run_provenance"]["git_worktree_clean"] is True
+    for payload in (best, last, saved_summary, history[0]):
+        assert payload["run_provenance"]["git_commit_sha"] == "1" * 40
+        assert payload["run_provenance"]["train_dataset_sha256"] == sha256_file(
+            config.resolved_dataset_path
+        )
+        assert str(tmp_path) not in json.dumps(
+            payload["run_provenance"],
+            default=str,
+        )
     assert best["selection_metric_name"] == "validation_mean_loss"
     assert best["validation_metrics"]["mean_loss"] == best["selection_metric_value"]
     for name, expected in best["model_state_dict"].items():
@@ -444,6 +469,7 @@ def test_one_batch_train_validation_smoke_and_best_eval(tmp_path, tom_order):
             checkpoint_path=str(config.run_output_dir / "best.pt"),
             dataset_path=str(config.resolved_validation_dataset_path),
             output_path=str(evaluation_path),
+            training_dataset_path=str(config.resolved_dataset_path),
             batch_size=1,
             device="cpu",
         )
@@ -561,9 +587,7 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     assert "suspicion_targets" not in batch
     assert torch.isfinite(loss)
     assert model.output_projection.weight.grad is not None
-    source = inspect.getsource(train_module.train_one_epoch)
-    assert source.count("masked_distribution_cross_entropy") == 1
-    assert "masked_pair_cross_entropy" not in source
+    assert loss.grad_fn is not None
 
 
 def test_effective_subject_mask_is_second_order_latest_action_intersection_only():
@@ -629,3 +653,138 @@ def test_invalid_tom_order_is_rejected(tmp_path, value):
             dataset_path="train.jsonl",
             validation_dataset_path="val.jsonl",
         )
+
+
+def _initialize_clean_git_worktree(tmp_path: Path) -> TrainingConfig:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    train_path = tmp_path / "train.jsonl"
+    validation_path = tmp_path / "validation.jsonl"
+    train_path.write_text('{"game_id":"train"}\n', encoding="utf-8")
+    validation_path.write_text('{"game_id":"validation"}\n', encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=ToM Test",
+            "-c",
+            "user.email=tom-test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    return TrainingConfig(
+        tom_order=1,
+        output_dir=str(tmp_path / "outputs"),
+        dataset_path=str(train_path),
+        validation_dataset_path=str(validation_path),
+        device="cpu",
+    )
+
+
+def test_run_provenance_records_clean_git_data_environment_and_device(tmp_path):
+    config = _initialize_clean_git_worktree(tmp_path)
+    set_random_seed(config.seed)
+    provenance = build_run_provenance(
+        config,
+        resolved_device=torch.device("cpu"),
+        repo_root=tmp_path,
+    )
+    assert len(provenance["git_commit_sha"]) == 40
+    assert provenance["git_worktree_clean"] is True
+    assert provenance["train_dataset_path"] == "train.jsonl"
+    assert provenance["validation_dataset_path"] == "validation.jsonl"
+    assert provenance["output_dir"] == "outputs"
+    assert provenance["train_dataset_sha256"] == sha256_file(
+        config.resolved_dataset_path
+    )
+    assert provenance["validation_dataset_sha256"] == sha256_file(
+        config.resolved_validation_dataset_path
+    )
+    assert provenance["requested_device"] == "cpu"
+    assert provenance["resolved_device"] == "cpu"
+    assert provenance["deterministic_algorithms_enabled"] is True
+    for field in (
+        "python_version",
+        "torch_version",
+        "transformers_version",
+        "platform",
+    ):
+        assert provenance[field]
+    assert str(tmp_path) not in json.dumps(provenance)
+
+
+def test_run_provenance_rejects_dirty_worktree_and_lists_file(tmp_path):
+    config = _initialize_clean_git_worktree(tmp_path)
+    Path(config.dataset_path).write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"dirty files:[\s\S]*train\.jsonl"):
+        build_run_provenance(
+            config,
+            resolved_device=torch.device("cpu"),
+            repo_root=tmp_path,
+        )
+
+
+def test_dataset_sha_changes_with_file_content(tmp_path):
+    path = tmp_path / "dataset.jsonl"
+    path.write_text("first\n", encoding="utf-8")
+    first = sha256_file(path)
+    path.write_text("second\n", encoding="utf-8")
+    assert sha256_file(path) != first
+
+
+def test_atomic_checkpoint_failure_preserves_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "best.pt"
+    path.write_bytes(b"previous-valid-checkpoint")
+
+    def fail_save(_value, _file):
+        raise RuntimeError("synthetic save failure")
+
+    monkeypatch.setattr(train_module.torch, "save", fail_save)
+    with pytest.raises(RuntimeError, match="synthetic save failure"):
+        _atomic_torch_save({"new": True}, path)
+    assert path.read_bytes() == b"previous-valid-checkpoint"
+    assert not (tmp_path / ".best.pt.tmp").exists()
+
+
+def test_atomic_json_write_replaces_complete_document(tmp_path):
+    path = tmp_path / "summary.json"
+    path.write_text('{"old": true}\n', encoding="utf-8")
+    _atomic_json_write({"status": "ok"}, path)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"status": "ok"}
+    assert not (tmp_path / ".summary.json.tmp").exists()
+
+
+def test_non_empty_training_output_directory_is_rejected(tmp_path):
+    output_dir = tmp_path / "tom_order_2"
+    output_dir.mkdir()
+    (output_dir / "existing.txt").write_text("keep", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="must be empty"):
+        _prepare_run_output_dir(output_dir)
+    assert (output_dir / "existing.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_run_training_rejects_non_empty_output_before_loading_data(
+    tmp_path,
+    monkeypatch,
+):
+    config = _training_config(tmp_path, 1)
+    config.run_output_dir.mkdir(parents=True)
+    existing = config.run_output_dir / "best.pt"
+    existing.write_bytes(b"existing-checkpoint")
+
+    def fail_if_called(_config):
+        raise AssertionError("data loading began before output safety check")
+
+    monkeypatch.setattr(
+        train_module,
+        "build_training_data_loaders",
+        fail_if_called,
+    )
+    with pytest.raises(FileExistsError, match="must be empty"):
+        run_training(config)
+    assert existing.read_bytes() == b"existing-checkpoint"

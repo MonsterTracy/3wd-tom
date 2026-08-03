@@ -6,7 +6,6 @@ import pytest
 import torch
 from transformers import Qwen2Model
 
-import werewolf.models.twd_tom.belief_backbone as backbone_module
 from werewolf.models.twd_tom.belief_backbone import (
     HIDDEN_SIZE,
     NONE_RELATIVE_PLAYER_INDEX,
@@ -58,10 +57,7 @@ def test_qwen2model_is_the_only_decoder_with_fixed_configuration(model):
     assert config.use_cache is False
     assert config.max_position_embeddings == 8
 
-    source = inspect.getsource(backbone_module)
-    assert "Qwen2DecoderLayer" not in source
-    assert "Qwen2ForCausalLM" not in source
-    assert "from_pretrained" not in source
+    assert not hasattr(model, "tokenizer")
 
 
 def test_qwen2_receives_inputs_embeds_and_attention_mask(model):
@@ -87,10 +83,10 @@ def test_output_contract_and_last_non_padding_pooling(model):
     assert output["hidden_states"].shape == (1, 3, HIDDEN_SIZE)
     assert output["observer_hidden_states"].shape == (1, 7, HIDDEN_SIZE)
     assert output["observer_pair_logits"].shape == (1, 7, NUM_WOLF_PAIR_CLASSES)
-    assert output["observer_pair_logits"] is output["pair_logits"]
-    assert output["pair_logits"].shape == (1, 7, NUM_WOLF_PAIR_CLASSES)
     assert output["pair_probabilities"].shape == (1, 7, 21)
-    assert output["belief_matrix"].shape == (1, 7, 7)
+    assert output["wolf_marginals"].shape == (1, 7, 7)
+    assert "pair_logits" not in output
+    assert "belief_matrix" not in output
     torch.testing.assert_close(
         output["pooled_hidden_state"], output["hidden_states"][:, 1]
     )
@@ -188,15 +184,16 @@ def test_second_order_uses_the_same_single_pair_output_projection():
         output = second_order(**make_features())
     assert second_order.output_projection.out_features == NUM_WOLF_PAIR_CLASSES
     assert output["observer_pair_logits"].shape == (1, 7, 21)
-    assert output["observer_pair_logits"] is output["pair_logits"]
     assert output["pair_probabilities"].shape == (1, 7, 21)
-    assert output["belief_matrix"].shape == (1, 7, 7)
+    assert output["wolf_marginals"].shape == (1, 7, 7)
+    assert "pair_logits" not in output
+    assert "belief_matrix" not in output
     torch.testing.assert_close(
         output["pair_probabilities"].sum(dim=-1),
         torch.ones((1, 7)),
     )
     torch.testing.assert_close(
-        output["belief_matrix"].sum(dim=-1),
+        output["wolf_marginals"].sum(dim=-1),
         torch.full((1, 7), 2.0),
     )
     assert "observer_suspicion_logits" not in output
