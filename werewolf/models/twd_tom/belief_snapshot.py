@@ -30,7 +30,7 @@ def _snapshot_agent_state(agent) -> dict[str, Any]:
 
 
 class PlayingAgentBeliefSnapshotCollector:
-    """Collect one direct pair-belief self-report from each alive player."""
+    """Call each alive playing agent once through a detached context."""
 
     def __init__(self, reporter, agents) -> None:
         if reporter is None or not hasattr(reporter, "report"):
@@ -52,11 +52,11 @@ class PlayingAgentBeliefSnapshotCollector:
 
         reports: dict[str, dict[str, Any]] = {}
         for player_id in public_snapshot.observer_ids:
-            belief_owner = normalize_player(player_id)
+            observer = normalize_player(player_id)
             agent = self.agents[player_id - 1]
             backend_id = getattr(agent, "backend_id", None)
             if not isinstance(backend_id, str) or not backend_id.strip():
-                raise ValueError(f"{belief_owner} has no backend_alias")
+                raise ValueError(f"{observer} has no agent_backend_id")
 
             observation = env.get_observation_for(player_id)
             known_werewolves, known_non_werewolves = (
@@ -66,9 +66,9 @@ class PlayingAgentBeliefSnapshotCollector:
             result = self.reporter.report(
                 agent=agent,
                 observation=observation,
-                belief_owner_id=belief_owner,
+                observer_id=observer,
                 public_snapshot=public_snapshot,
-                backend_alias=backend_id,
+                agent_backend_id=backend_id,
                 known_werewolves=known_werewolves,
                 known_non_werewolves=known_non_werewolves,
             )
@@ -80,19 +80,19 @@ class PlayingAgentBeliefSnapshotCollector:
             )
             if record_agent_state is not None:
                 record_agent_state(
-                    observer_id=belief_owner,
+                    observer_id=observer,
                     state_before=state_before,
                     state_after=state_after,
                 )
             if state_after != state_before:
                 raise RuntimeError(
-                    f"readonly belief report mutated {belief_owner} agent state"
+                    f"readonly belief report mutated {observer} agent state"
                 )
             if not isinstance(result, dict):
                 raise TypeError("reporter result must be a dictionary")
-            if result.get("player_id") != belief_owner:
-                raise ValueError("reporter returned an unexpected belief_owner")
-            reports[belief_owner] = result
+            if result.get("observer") != observer:
+                raise ValueError("reporter returned an unexpected observer")
+            reports[observer] = result
 
         return reports
 

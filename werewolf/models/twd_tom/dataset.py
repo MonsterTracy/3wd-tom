@@ -39,7 +39,7 @@ from werewolf.models.twd_tom.schema import (
     normalize_player,
     validate_player_suspicion,
 )
-from werewolf.speech.pair_belief_self_reporter import (
+from werewolf.speech.private_belief_perceiver import (
     STATUS_OK,
     STATUS_PARSE_ERROR,
     STATUS_REPORTER_ERROR,

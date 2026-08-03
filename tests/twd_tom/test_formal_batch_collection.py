@@ -7,10 +7,7 @@ import pytest
 from script.twd_tom import formal_batch_collection as formal
 from script.twd_tom import real_backend_dry_run as harness
 from script.twd_tom import monitored_collection as monitored
-from werewolf.models.twd_tom.samples import (
-    ACTOR_PAIR_BELIEF_ANNOTATION_VERSION,
-    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
-)
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 
 
 def _monitored_config(tmp_path, **overrides):
@@ -34,18 +31,6 @@ def _monitored_config(tmp_path, **overrides):
     }
     values.update(overrides)
     return monitored.MonitoredCollectionConfig(**values)
-
-
-def _patch_clean_gate(monkeypatch, tmp_path, commit):
-    state = {
-        "repository_root": str(tmp_path.resolve()),
-        "git_commit_sha": commit,
-        "git_worktree_clean": True,
-    }
-    monkeypatch.setattr(formal, "require_clean_collection_worktree", lambda: state)
-    monkeypatch.setattr(
-        monitored, "require_clean_collection_worktree", lambda: state
-    )
 
 
 def test_formal_batch_requires_safe_batch_id_and_matching_output(tmp_path):
@@ -104,12 +89,11 @@ def test_formal_cli_and_config_cannot_enable_backend_retry(tmp_path):
 
 
 def test_fake_formal_batch_reuses_monitor_and_writes_final_acceptance_metadata(
-    tmp_path, monkeypatch, actor_pair_sample_factory
+    tmp_path, monkeypatch, suspicion_sample_factory
 ):
     monkeypatch.chdir(tmp_path)
     runtime_head = "d" * 40
     started = []
-    _patch_clean_gate(monkeypatch, tmp_path, runtime_head)
     monkeypatch.setattr(harness, "_runtime_source_commit", lambda: runtime_head)
 
     def fake_game(**kwargs):
@@ -127,9 +111,12 @@ def test_fake_formal_batch_reuses_monitor_and_writes_final_acceptance_metadata(
                 "total_tokens": 10,
             }
         )
-        sample = actor_pair_sample_factory(
-            game_id=kwargs["game_id"], alive=(1,)
+        sample = suspicion_sample_factory(
+            game_id=kwargs["game_id"], observers=(1,)
         )
+        sample["belief_status"]["player1"] = "ok"
+        sample["suspected_werewolves"]["player1"] = []
+        sample["belief_errors"]["player1"] = None
 
         class Collector:
             def write(self, _sample):
@@ -193,11 +180,8 @@ def test_fake_formal_batch_reuses_monitor_and_writes_final_acceptance_metadata(
         (output / "formal_batch_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["batch_id"] == "batch_0001"
-    assert manifest["schema_version"] == ACTOR_PAIR_BELIEF_SCHEMA_VERSION
-    assert manifest["annotation_version"] == ACTOR_PAIR_BELIEF_ANNOTATION_VERSION
+    assert manifest["schema_version"] == SAMPLE_SCHEMA_VERSION
     assert manifest["source_commit"] == runtime_head
-    assert manifest["git_commit_sha"] == runtime_head
-    assert manifest["git_worktree_clean"] is True
     assert manifest["seeds"] == list(range(2001, 2011))
     assert manifest["completed_game_count"] == 10
     assert manifest["stop_reason"] is None
@@ -210,13 +194,12 @@ def test_formal_quality_stop_finalizes_partial_batch_without_starting_next_game(
 ):
     monkeypatch.chdir(tmp_path)
     started = []
-    _patch_clean_gate(monkeypatch, tmp_path, "e" * 40)
     monkeypatch.setattr(harness, "_runtime_source_commit", lambda: "e" * 40)
 
     def fake_game(**kwargs):
         started.append(kwargs["game_id"])
         raise monitored.CollectionQualityStop(
-            "belief_owner_consecutive_same_error_rule_gt_or_eq_3"
+            "observer_consecutive_same_error_rule_gt_or_eq_3"
         )
 
     monkeypatch.setattr(harness, "run_real_backend_game", fake_game)
@@ -234,7 +217,7 @@ def test_formal_quality_stop_finalizes_partial_batch_without_starting_next_game(
     assert summary["completed_game_count"] == 0
     assert summary["partial_game_count"] == 1
     assert summary["stop_reason"] == (
-        "belief_owner_consecutive_same_error_rule_gt_or_eq_3"
+        "observer_consecutive_same_error_rule_gt_or_eq_3"
     )
     manifest = json.loads(
         (
@@ -314,7 +297,7 @@ def test_quality_monitor_classifies_by_status_not_legacy_error_text():
             monitor.observe_report(
                 game_id="game_001",
                 phase="1_day_speech",
-                    belief_owner="player1",
+                observer="player1",
                 status=status,
                 error=error,
             )
@@ -323,7 +306,7 @@ def test_quality_monitor_classifies_by_status_not_legacy_error_text():
 
         assert monitor.error_rule_counts == {status: 3}
         assert monitor.stop_reason == (
-                "belief_owner_consecutive_same_error_rule_gt_or_eq_3"
+            "observer_consecutive_same_error_rule_gt_or_eq_3"
         )
 
     switch_monitor = monitored.CollectionQualityMonitor()
@@ -338,7 +321,7 @@ def test_quality_monitor_classifies_by_status_not_legacy_error_text():
         switch_monitor.observe_report(
             game_id="game_001",
             phase="1_day_speech",
-                belief_owner="player1",
+            observer="player1",
             status=status,
             error="identical legacy error text",
         )

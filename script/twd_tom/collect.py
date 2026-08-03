@@ -32,19 +32,25 @@ from run_random import (
 from werewolf.backends import (
     load_named_backends,
 )
-from werewolf.models.twd_tom.samples import (
-    ACTOR_PAIR_BELIEF_ANNOTATION_VERSION,
-    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
-)
-from werewolf.models.twd_tom.collector import (
-    build_collection_provenance,
-    require_clean_collection_worktree,
-)
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.public_events import PUBLIC_EVENT_SCHEMA_VERSION
-from werewolf.speech.pair_belief_self_reporter import (
-    PAIR_BELIEF_PARSER_VERSION,
-    PAIR_BELIEF_PROMPT_VERSION,
-    PAIR_BELIEF_REPORT_PROVENANCE,
+from werewolf.models.twd_tom.schema import (
+    GLOBAL_TRUTH_INJECTED,
+    LABEL_CONTEXT_SCOPE,
+    LABEL_PROMPT_VERSION,
+    LABEL_PROVENANCE,
+    LABEL_SOURCE,
+    MODEL_INPUT_SCOPE,
+    NUMERIC_ANNOTATION_PRESENT,
+    OBSERVER_SELECTION,
+    OTHER_PLAYERS_PRIVATE_INFORMATION_VISIBLE,
+    PRIVATE_CONTEXT_SERIALIZED,
+    RAW_LABEL_FIELD,
+    RAW_LABEL_SEMANTICS,
+    RAW_LABEL_TYPE,
+    REPORT_CONTEXT_MODE,
+    REPORT_SIDE_EFFECT_FREE,
+    REPORT_TIMING,
 )
 from werewolf.runtime_config import (
     normalize_runtime_config,
@@ -175,7 +181,6 @@ def _write_audit_manifest(
     role2agent_list: list[str],
     sample_path: Path,
     random_seed: int | None,
-    collection_git_state: dict[str, Any],
 ) -> Path:
     """Write truth data separately for simulation auditing.
 
@@ -191,21 +196,27 @@ def _write_audit_manifest(
         )
 
     manifest = {
-        "schema_version": ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
-        "annotation_version": ACTOR_PAIR_BELIEF_ANNOTATION_VERSION,
+        "schema_version": SAMPLE_SCHEMA_VERSION,
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
-        "prompt_version": PAIR_BELIEF_PROMPT_VERSION,
-        "parser_version": PAIR_BELIEF_PARSER_VERSION,
-        "report_provenance": PAIR_BELIEF_REPORT_PROVENANCE,
-        "raw_label_field": "pair_probabilities",
-        "raw_label_semantics": "direct_self_world_belief_over_canonical_pairs",
-        "reasoning_perspective": "current_speaker",
-        "report_selection": "publicly_alive_players",
-        "current_action_used": False,
-        "future_information_used": False,
-        "expert_completion": False,
-        "git_commit_sha": collection_git_state["git_commit_sha"],
-        "git_worktree_clean": collection_git_state["git_worktree_clean"],
+        "label_prompt_version": LABEL_PROMPT_VERSION,
+        "raw_label_field": RAW_LABEL_FIELD,
+        "raw_label_type": RAW_LABEL_TYPE,
+        "raw_label_semantics": RAW_LABEL_SEMANTICS,
+        "label_provenance": LABEL_PROVENANCE,
+        "label_source": LABEL_SOURCE,
+        "label_context_scope": LABEL_CONTEXT_SCOPE,
+        "model_input_scope": MODEL_INPUT_SCOPE,
+        "report_context_mode": REPORT_CONTEXT_MODE,
+        "report_side_effect_free": REPORT_SIDE_EFFECT_FREE,
+        "global_truth_injected": GLOBAL_TRUTH_INJECTED,
+        "other_players_private_information_visible": (
+            OTHER_PLAYERS_PRIVATE_INFORMATION_VISIBLE
+        ),
+        "private_context_serialized": PRIVATE_CONTEXT_SERIALIZED,
+        "numeric_annotation_present": NUMERIC_ANNOTATION_PRESENT,
+        "online_pair_projection": False,
+        "observer_selection": OBSERVER_SELECTION,
+        "report_timing": REPORT_TIMING,
         "purpose": (
             "simulation_audit_only_not_training_labels"
         ),
@@ -248,8 +259,6 @@ def run_collection(
     config: CollectionRunConfig,
 ) -> dict[str, Any]:
     """Run one real game and collect controlled belief samples."""
-
-    collection_git_state = require_clean_collection_worktree()
 
     runtime_config_path = Path(
         config.runtime_config_path
@@ -355,7 +364,6 @@ def run_collection(
             random_seed=(
                 config.random_seed
             ),
-            collection_git_state=collection_git_state,
         )
     )
 
@@ -366,12 +374,6 @@ def run_collection(
                 sample_path
             ),
             game_id=game_id,
-            collection_provenance=build_collection_provenance(
-                source_config_path=runtime_config_path,
-                resolved_runtime_config=normalized_config,
-                game_seed=config.random_seed,
-                collection_git_state=collection_git_state,
-            ),
         )
     )
 
@@ -409,8 +411,6 @@ def run_collection(
 
     summary = {
         "status": status,
-        "git_commit_sha": collection_git_state["git_commit_sha"],
-        "git_worktree_clean": collection_git_state["git_worktree_clean"],
         "game_id": game_id,
         "game_result": game_result,
         "elapsed_seconds": (

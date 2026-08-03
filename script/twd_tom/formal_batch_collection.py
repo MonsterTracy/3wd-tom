@@ -12,11 +12,7 @@ from script.twd_tom.monitored_collection import (
     MonitoredCollectionConfig,
     run_monitored_collection,
 )
-from werewolf.models.twd_tom.collector import require_clean_collection_worktree
-from werewolf.models.twd_tom.samples import (
-    ACTOR_PAIR_BELIEF_ANNOTATION_VERSION,
-    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
-)
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -37,7 +33,6 @@ class FormalBatchConfig:
 def run_formal_batch(config: FormalBatchConfig):
     """Delegate one formal raw batch to the frozen monitored runner."""
 
-    require_clean_collection_worktree()
     return run_monitored_collection(
         config.monitored,
         artifact_prefix="formal_batch",
@@ -46,8 +41,7 @@ def run_formal_batch(config: FormalBatchConfig):
         mode_metadata={
             "formal_batch_only": True,
             "batch_id": config.batch_id,
-            "schema_version": ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
-            "annotation_version": ACTOR_PAIR_BELIEF_ANNOTATION_VERSION,
+            "schema_version": SAMPLE_SCHEMA_VERSION,
         },
     )
 

@@ -7,9 +7,8 @@ from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
 )
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
-from werewolf.models.twd_tom.schema import canonical_wolf_pairs
-from werewolf.speech.pair_belief_self_reporter import (
-    ReadonlyPairBeliefSelfReporter,
+from werewolf.speech.private_belief_perceiver import (
+    PlayingAgentBeliefReporter,
 )
 
 
@@ -48,24 +47,21 @@ class FakeReporter:
 
     def report(self, **kwargs):
         self.calls.append(deepcopy({
-            "belief_owner_id": kwargs["belief_owner_id"],
+            "observer_id": kwargs["observer_id"],
             "observation": kwargs["observation"],
-            "backend_id": kwargs["backend_alias"],
+            "backend_id": kwargs["agent_backend_id"],
             "snapshot_id": id(kwargs["public_snapshot"]),
         }))
         if self.mutate:
             kwargs["agent"].memory["changed"] = True
         return {
-            "player_id": kwargs["belief_owner_id"],
-            "report_status": "ok",
-            "pair_probabilities": [
-                1.0 / 15 if f"player{kwargs['observation']['observer_id']}" not in pair else 0.0
-                for pair in canonical_wolf_pairs()
-            ],
+            "observer": kwargs["observer_id"],
+            "status": "ok",
+            "suspected_werewolves": [],
             "known_werewolves": kwargs["known_werewolves"],
             "known_non_werewolves": kwargs["known_non_werewolves"],
-            "report_error": None,
-            "backend_alias": kwargs["backend_alias"],
+            "error": None,
+            "agent_backend_id": kwargs["agent_backend_id"],
         }
 
 
@@ -110,7 +106,7 @@ def test_all_observers_use_one_snapshot_and_only_their_private_view():
     assert set(reports) == {"player1", "player3", "player7"}
     assert len({call["snapshot_id"] for call in reporter.calls}) == 1
     for call in reporter.calls:
-        player_id = int(call["belief_owner_id"][6:])
+        player_id = int(call["observer_id"][6:])
         assert call["observation"]["game_log"] == [f"private-{player_id}"]
         assert call["backend_id"] == f"backend_{player_id}"
     assert [vars(agent) for agent in agents] == before
@@ -124,11 +120,7 @@ def test_readonly_state_mutation_is_detected_and_not_written_as_success():
 
 
 def test_reporter_mutates_only_detached_observation_and_context():
-    target = [
-        1.0 / 15 if "player1" not in pair else 0.0
-        for pair in canonical_wolf_pairs()
-    ]
-    response = __import__("json").dumps({"pair_probabilities": target})
+    response = '{"suspected_werewolves":[]}'
 
     class MutatingContextBackend:
         def __init__(self):
@@ -164,17 +156,17 @@ def test_reporter_mutates_only_detached_observation_and_context():
     observation_before = deepcopy(observation)
     snapshot = _snapshot((1,))
 
-    result = ReadonlyPairBeliefSelfReporter().report(
+    result = PlayingAgentBeliefReporter().report(
         agent=agent,
         observation=observation,
-        belief_owner_id="player1",
+        observer_id="player1",
         public_snapshot=snapshot,
-        backend_alias="backend_1",
+        agent_backend_id="backend_1",
         known_werewolves=[],
         known_non_werewolves=["player1"],
     )
 
-    assert result["report_status"] == "ok"
+    assert result["status"] == "ok"
     assert observation == observation_before
     assert agent.notes == ["original memory"]
     assert not hasattr(agent, "detached_probe")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import math
 import statistics
 import threading
@@ -17,22 +16,19 @@ from typing import Any
 import yaml
 
 from script.twd_tom import real_backend_dry_run as harness
-from werewolf.models.twd_tom.collector import require_clean_collection_worktree
 from werewolf.models.twd_tom.samples import (
-    ACTOR_PAIR_BELIEF_SAMPLE_FIELDS,
-    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
+    SAMPLE_FIELDS,
+    SAMPLE_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.public_events import (
     public_event_digest,
+    public_speech_actions,
+    structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import (
-    PLAYER_NAMES,
+    LABEL_PROMPT_VERSION,
     normalize_player,
-)
-from werewolf.speech.pair_belief_self_reporter import (
-    PAIR_BELIEF_PROMPT_VERSION,
-    canonical_json_sha256,
-    validate_pair_probabilities,
+    validate_player_suspicion,
 )
 
 
@@ -48,17 +44,27 @@ _OLD_SCHEMA_FIELDS = {
     "pair_target",
     "pair_targets",
 }
-_FORBIDDEN_FIELDS = {
+_PRIVATE_FIELDS = {
     "actual_roles",
     "true_roles",
     "roles",
+    "role",
+    "private_observation",
+    "observation",
+    "messages",
+    "memory",
     "system_prompt",
+    "raw_response",
     "reasoning",
     "chain_of_thought",
     "god_view",
     "actual_wolves",
-    "api_key",
-    "authorization",
+}
+_OTHER_PLAYER_PRIVATE_FIELDS = {
+    "teammate",
+    "seer_result",
+    "witch_action",
+    "other_players_private_information",
 }
 _VALID_STATUSES = {"ok", "parse_error", "semantic_error", "reporter_error"}
 _SAFETY_CHECKS = (
@@ -165,7 +171,7 @@ class CollectionQualityMonitor:
         self.total_reports = 0
         self.status_counts: Counter[str] = Counter()
         self.error_rule_counts: Counter[str] = Counter()
-        self.by_belief_owner: dict[str, Counter[str]] = defaultdict(Counter)
+        self.by_observer: dict[str, Counter[str]] = defaultdict(Counter)
         self.by_game_phase: dict[str, dict[str, Counter[str]]] = defaultdict(
             lambda: defaultdict(Counter)
         )
@@ -177,7 +183,7 @@ class CollectionQualityMonitor:
         *,
         game_id: str,
         phase: str,
-        belief_owner: str,
+        observer: str,
         status: str,
         error: Any,
     ) -> None:
@@ -185,37 +191,37 @@ class CollectionQualityMonitor:
             raise CollectionSampleSafetyViolation(
                 "old_schema", "sample contains an unsupported belief status"
             )
-        belief_owner = normalize_player(belief_owner)
+        observer = normalize_player(observer)
         self.total_reports += 1
         self.status_counts[status] += 1
-        self.by_belief_owner[belief_owner]["total"] += 1
-        self.by_belief_owner[belief_owner][status] += 1
+        self.by_observer[observer]["total"] += 1
+        self.by_observer[observer][status] += 1
         self.by_game_phase[game_id][phase]["total"] += 1
         self.by_game_phase[game_id][phase][status] += 1
 
         if status == "ok":
-            self._streaks.pop(belief_owner, None)
+            self._streaks.pop(observer, None)
         else:
             rule = _error_rule(status)
             self.error_rule_counts[rule] += 1
-            self.by_belief_owner[belief_owner]["invalid"] += 1
+            self.by_observer[observer]["invalid"] += 1
             previous_rule, previous_count = self._streaks.get(
-                belief_owner, ("", 0)
+                observer, ("", 0)
             )
             streak_count = previous_count + 1 if previous_rule == rule else 1
-            self._streaks[belief_owner] = (rule, streak_count)
+            self._streaks[observer] = (rule, streak_count)
             if streak_count >= 3 and self.stop_reason is None:
                 self.stop_reason = (
-                    "belief_owner_consecutive_same_error_rule_gt_or_eq_3"
+                    "observer_consecutive_same_error_rule_gt_or_eq_3"
                 )
 
-        observer_counts = self.by_belief_owner[belief_owner]
+        observer_counts = self.by_observer[observer]
         if (
             observer_counts["total"] >= 10
             and observer_counts["invalid"] / observer_counts["total"] > 0.20
             and self.stop_reason is None
         ):
-            self.stop_reason = "belief_owner_invalid_rate_gt_20_percent"
+            self.stop_reason = "observer_invalid_rate_gt_20_percent"
 
         if self.total_reports >= 100 and self.stop_reason is None:
             invalid = self.total_reports - self.status_counts["ok"]
@@ -228,15 +234,13 @@ class CollectionQualityMonitor:
         _validate_sample_safety(sample)
         game_id = sample["game_id"]
         phase = sample["phase"]
-        for report in sample["player_reports"]:
-            if report["alive"] is not True:
-                continue
+        for observer in sorted(sample["belief_status"]):
             self.observe_report(
                 game_id=game_id,
                 phase=phase,
-                belief_owner=report["player_id"],
-                status=report["report_status"],
-                error=report["report_error"],
+                observer=observer,
+                status=sample["belief_status"][observer],
+                error=sample["belief_errors"][observer],
             )
 
     def summary(self) -> dict[str, Any]:
@@ -259,9 +263,9 @@ class CollectionQualityMonitor:
                 else self.status_counts["parse_error"] / self.total_reports
             ),
             "error_rule_counts": dict(sorted(self.error_rule_counts.items())),
-            "by_belief_owner": {
-                belief_owner: dict(sorted(counts.items()))
-                for belief_owner, counts in sorted(self.by_belief_owner.items())
+            "by_observer": {
+                observer: dict(sorted(counts.items()))
+                for observer, counts in sorted(self.by_observer.items())
             },
             "by_game_phase": {
                 game_id: {
@@ -291,80 +295,54 @@ def _validate_sample_safety(sample: Mapping[str, Any]) -> None:
         )
     fields = set(sample)
     if (
-        fields != ACTOR_PAIR_BELIEF_SAMPLE_FIELDS
+        fields != SAMPLE_FIELDS
         or fields & _OLD_SCHEMA_FIELDS
-        or sample.get("schema_version") != ACTOR_PAIR_BELIEF_SCHEMA_VERSION
+        or sample.get("schema_version") != SAMPLE_SCHEMA_VERSION
+        or sample.get("label_prompt_version") != LABEL_PROMPT_VERSION
     ):
         raise CollectionSampleSafetyViolation(
             "old_schema", "sample contains an unsupported schema"
         )
     nested_fields = set(_walk_field_names(sample))
-    if nested_fields & _FORBIDDEN_FIELDS:
+    if nested_fields & _PRIVATE_FIELDS:
         raise CollectionSampleSafetyViolation(
-            "private_serialization", "sample contains a forbidden field"
+            "private_serialization", "sample contains a private field"
+        )
+    if nested_fields & _OTHER_PLAYER_PRIVATE_FIELDS:
+        raise CollectionSampleSafetyViolation(
+            "other_player_private_leakage",
+            "sample contains another-player private field",
         )
     if (
         public_event_digest(sample["public_events"])
         != sample["public_event_digest"]
+        or structured_input_digest(sample["public_events"])
+        != sample["structured_input_digest"]
+        or len(public_speech_actions(sample["public_events"]))
+        != sample["public_action_count"]
     ):
         raise CollectionSampleSafetyViolation(
             "digest_mismatch", "sample public history metadata is inconsistent"
         )
-    if sample["reasoning_player_id"] != sample["current_speaker"]:
-        raise CollectionSampleSafetyViolation(
-            "label_integrity", "reasoning player is not current speaker"
-        )
-    if sample["current_action_used"] is not False or sample[
-        "future_information_used"
-    ] is not False:
-        raise CollectionSampleSafetyViolation(
-            "contamination", "sample crosses the pre-speech boundary"
-        )
-    reports = sample["player_reports"]
-    if [report.get("player_id") for report in reports] != list(PLAYER_NAMES):
-        raise CollectionSampleSafetyViolation(
-            "old_schema", "player reports are not in canonical seat order"
-        )
-    reasoning_report = next(
-        report
-        for report in reports
-        if report["player_id"] == sample["reasoning_player_id"]
-    )
-    expected_private_knowledge = {
-        "known_werewolves": reasoning_report["known_werewolves"],
-        "known_non_werewolves": reasoning_report["known_non_werewolves"],
+    expected = {
+        normalize_player(player_id) for player_id in sample["observer_ids"]
     }
-    expected_reasoning_input = {
-        "public_history": sample["public_events"],
-        "reasoning_player_id": sample["reasoning_player_id"],
-        "legal_private_knowledge": expected_private_knowledge,
-    }
-    if (
-        sample["reasoning_player_private_knowledge"]
-        != expected_private_knowledge
-        or sample["reasoning_input_payload"] != expected_reasoning_input
+    for field in (
+        "suspected_werewolves",
+        "known_werewolves",
+        "known_non_werewolves",
+        "belief_status",
+        "belief_errors",
+        "agent_backend_ids",
     ):
-        raise CollectionSampleSafetyViolation(
-            "other_player_private_leakage",
-            "reasoning input does not match the current actor's legal view",
-        )
-    if canonical_json_sha256(expected_reasoning_input) != sample[
-        "reasoning_input_payload_sha256"
-    ]:
-        raise CollectionSampleSafetyViolation(
-            "digest_mismatch", "reasoning input payload digest mismatch"
-        )
-    for report in reports:
-        if report["alive"] is not True:
-            if report["pair_probabilities"] is not None:
-                raise CollectionSampleSafetyViolation(
-                    "label_integrity", "dead player has a target"
-                )
-            continue
-        status = report["report_status"]
-        target = report["pair_probabilities"]
-        error = report["report_error"]
-        backend_id = report["backend_alias"]
+        if set(sample[field]) != expected:
+            raise CollectionSampleSafetyViolation(
+                "old_schema", "sample observer mappings are misaligned"
+            )
+    for observer, status in sample["belief_status"].items():
+        suspicion = sample["suspected_werewolves"][observer]
+        error = sample["belief_errors"][observer]
+        backend_id = sample["agent_backend_ids"][observer]
         if status not in _VALID_STATUSES:
             raise CollectionSampleSafetyViolation(
                 "old_schema", "sample contains an unsupported belief status"
@@ -379,50 +357,24 @@ def _validate_sample_safety(sample: Mapping[str, Any]) -> None:
                     "label_integrity", "ok label contains an error"
                 )
             try:
-                validate_pair_probabilities(
-                    target,
-                    known_werewolves=report["known_werewolves"],
-                    known_non_werewolves=report["known_non_werewolves"],
+                validate_player_suspicion(
+                    suspicion,
+                    sample["known_werewolves"][observer],
+                    sample["known_non_werewolves"][observer],
                 )
             except (TypeError, ValueError) as exc:
                 raise CollectionSampleSafetyViolation(
                     "label_integrity", str(exc)
                 ) from exc
         else:
-            if target is not None:
+            if suspicion is not None:
                 raise CollectionSampleSafetyViolation(
-                    "label_integrity", "invalid report has a pair target"
+                    "label_integrity", "invalid label has a suspicion set"
                 )
             if not isinstance(error, str) or not error:
                 raise CollectionSampleSafetyViolation(
                     "label_integrity", "invalid label requires an error"
                 )
-        payload = report["reporter_input_payload"]
-        if payload is not None and canonical_json_sha256(payload) != report[
-            "reporter_input_payload_sha256"
-        ]:
-            raise CollectionSampleSafetyViolation(
-                "digest_mismatch", "reporter payload digest mismatch"
-            )
-        if payload is not None:
-            messages = payload.get("messages")
-            if not isinstance(messages, list) or not messages:
-                raise CollectionSampleSafetyViolation(
-                    "label_integrity", "reporter payload has no messages"
-                )
-            prompt = messages[-1].get("content")
-            if (
-                not isinstance(prompt, str)
-                or hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-                != report["prompt_sha256"]
-            ):
-                raise CollectionSampleSafetyViolation(
-                    "digest_mismatch", "report prompt digest mismatch"
-                )
-        if report["prompt_version"] != PAIR_BELIEF_PROMPT_VERSION:
-            raise CollectionSampleSafetyViolation(
-                "old_schema", "report uses an unsupported prompt version"
-            )
 
 
 class _MonitoredCollector:
@@ -564,8 +516,7 @@ def run_monitored_collection(
     if artifact_prefix != "formal_batch":
         raise ValueError("unsupported collection artifact prefix")
 
-    collection_git_state = require_clean_collection_worktree()
-    source_commit = collection_git_state["git_commit_sha"]
+    source_commit = harness._runtime_source_commit()
     output_dir = harness.validate_output_dir(
         config.output_dir,
         required_name_token=required_name_token,
@@ -588,8 +539,6 @@ def run_monitored_collection(
         **dict(mode_metadata),
         "formal_training_data": False,
         "source_commit": source_commit,
-        "git_commit_sha": collection_git_state["git_commit_sha"],
-        "git_worktree_clean": collection_git_state["git_worktree_clean"],
         "requested_game_count": 10,
         "seeds": list(config.seeds),
         "configured_budgets": {
@@ -645,7 +594,6 @@ def run_monitored_collection(
                     seed=seed,
                     budget=budget,
                     writer=writer,
-                    source_config_path=runtime_path,
                     collector_wrapper=lambda collector: _MonitoredCollector(
                         collector, monitor
                     ),
@@ -686,8 +634,6 @@ def run_monitored_collection(
     summary = {
         **dict(mode_metadata),
         "status": status,
-        "git_commit_sha": collection_git_state["git_commit_sha"],
-        "git_worktree_clean": collection_git_state["git_worktree_clean"],
         "stop_reason": stop_reason,
         "requested_game_count": 10,
         "started_game_count": started_game_count,
