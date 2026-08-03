@@ -16,7 +16,7 @@ from werewolf.models.twd_tom.samples import (
     SAMPLE_FIELDS,
     SAMPLE_SCHEMA_VERSION as PLAYER_SUSPICION_SCHEMA_VERSION,
     freeze_public_snapshot,
-    make_twd_tom_sample,
+    normalize_historical_suspicion_sample,
 )
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
@@ -140,7 +140,7 @@ def validate_raw_suspicion_sample(sample: Any) -> dict[str, Any]:
         }
         for subject in expected_subjects
     }
-    normalized = make_twd_tom_sample(
+    normalized = normalize_historical_suspicion_sample(
         public_snapshot=snapshot,
         reports=reports,
     )

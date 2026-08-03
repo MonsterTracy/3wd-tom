@@ -36,6 +36,10 @@ from werewolf.models.twd_tom.public_events import (
     public_speech_actions,
     structured_input_digest,
 )
+from werewolf.models.twd_tom.collector import (
+    build_collection_provenance,
+    require_clean_collection_worktree,
+)
 from werewolf.models.twd_tom.schema import normalize_player
 from werewolf.runtime_config import normalize_runtime_config
 
@@ -879,10 +883,12 @@ def run_real_backend_game(
     seed: int,
     budget: DryRunBudget,
     writer: PrivacySafeAuditWriter,
+    source_config_path: str | Path,
     collector_wrapper: Callable[[Any], Any] | None = None,
 ) -> None:
     """Run one game through the shared audited runtime and collector."""
 
+    collection_git_state = require_clean_collection_worktree()
     normalized = normalize_runtime_config(deepcopy(parsed_yaml))
     raw_backends = load_named_backends(
         normalized,
@@ -913,6 +919,12 @@ def run_real_backend_game(
         agent_list=agents,
         output_path=str(samples_path),
         game_id=game_id,
+        collection_provenance=build_collection_provenance(
+            source_config_path=source_config_path,
+            resolved_runtime_config=normalized,
+            game_seed=seed,
+            collection_git_state=collection_git_state,
+        ),
         report_audit=session,
     )
     if collector_wrapper is not None:
@@ -934,7 +946,8 @@ def run_real_backend_game(
 def run_dry_run(config: RealBackendDryRunConfig) -> dict[str, Any]:
     """Execute the explicitly approved two-game harness."""
 
-    source_commit = _runtime_source_commit()
+    collection_git_state = require_clean_collection_worktree()
+    source_commit = collection_git_state["git_commit_sha"]
     output_dir = validate_output_dir(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     samples_path = output_dir / "dry_run_samples.jsonl"
@@ -952,6 +965,8 @@ def run_dry_run(config: RealBackendDryRunConfig) -> dict[str, Any]:
         "dry_run_only": True,
         "formal_training_data": False,
         "source_commit": source_commit,
+        "git_commit_sha": collection_git_state["git_commit_sha"],
+        "git_worktree_clean": collection_git_state["git_worktree_clean"],
         "requested_game_count": 2,
         "seeds": list(config.seeds),
         "configured_budgets": {
@@ -991,6 +1006,7 @@ def run_dry_run(config: RealBackendDryRunConfig) -> dict[str, Any]:
                 seed=seed,
                 budget=budget,
                 writer=writer,
+                source_config_path=runtime_path,
             )
             result = {"game_id": game_id, "seed": seed, "calls": budget.summary()}
             game_summaries.append(result)
@@ -1001,6 +1017,8 @@ def run_dry_run(config: RealBackendDryRunConfig) -> dict[str, Any]:
     summary = {
         "status": "ok",
         "dry_run_only": True,
+        "git_commit_sha": collection_git_state["git_commit_sha"],
+        "git_worktree_clean": collection_git_state["git_worktree_clean"],
         "game_count": len(game_summaries),
         "games": game_summaries,
         "samples_path": str(samples_path),

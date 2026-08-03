@@ -1,69 +1,36 @@
-"""Observer-specific second-order ToM components for seven-player Werewolf.
+"""Actor-perspective ToM data and frozen model components for classic seven."""
 
-The package contains a raw collection path and a separate pair-model path:
+from __future__ import annotations
 
-    complete structured public-event prefixes
-        -> playing-agent player-level suspicion sets
-
-    explicitly projected pair samples
-        -> causal belief backbone
-        -> masked subjective-belief loss and metrics
-
-Truth-derived role labels and the legacy ten-field event representation
-are intentionally excluded.
-"""
-
-from werewolf.models.twd_tom.action_features import (
-    PublicEventFeatureBuilder,
-)
-from werewolf.models.twd_tom.belief_backbone import (
-    ToMBeliefBackbone,
-    ToMBeliefBackboneConfig,
-)
-from werewolf.models.twd_tom.belief_labels import (
-    pair_probabilities_to_belief_marginals,
-    suspicion_set_to_pair_target,
-)
-from werewolf.models.twd_tom.belief_snapshot import (
-    PlayingAgentBeliefSnapshotCollector,
-)
-from werewolf.models.twd_tom.collector import (
-    TWDToMSampleCollector,
-)
-from werewolf.models.twd_tom.dataset import (
-    TWDToMDataset,
-    collate_twd_tom_samples,
-    load_twd_tom_jsonl,
-)
-from werewolf.models.twd_tom.losses import (
-    masked_distribution_cross_entropy,
-    masked_distribution_kl_divergence,
-)
-from werewolf.models.twd_tom.metrics import (
-    compute_subjective_pair_diagnostics,
-    compute_subjective_pair_metrics,
-)
-from werewolf.models.twd_tom.samples import (
-    SAMPLE_SCHEMA_VERSION,
-    make_twd_tom_sample,
-)
+from importlib import import_module
 
 
-__all__ = [
-    "PublicEventFeatureBuilder",
-    "ToMBeliefBackbone",
-    "ToMBeliefBackboneConfig",
-    "suspicion_set_to_pair_target",
-    "pair_probabilities_to_belief_marginals",
-    "PlayingAgentBeliefSnapshotCollector",
-    "TWDToMSampleCollector",
-    "TWDToMDataset",
-    "collate_twd_tom_samples",
-    "load_twd_tom_jsonl",
-    "masked_distribution_cross_entropy",
-    "masked_distribution_kl_divergence",
-    "compute_subjective_pair_diagnostics",
-    "compute_subjective_pair_metrics",
-    "SAMPLE_SCHEMA_VERSION",
-    "make_twd_tom_sample",
-]
+_EXPORTS = {
+    "PublicEventFeatureBuilder": "action_features",
+    "ToMBeliefBackbone": "belief_backbone",
+    "ToMBeliefBackboneConfig": "belief_backbone",
+    "suspicion_set_to_pair_target": "belief_labels",
+    "pair_probabilities_to_belief_marginals": "belief_labels",
+    "PlayingAgentBeliefSnapshotCollector": "belief_snapshot",
+    "TWDToMSampleCollector": "collector",
+    "TWDToMDataset": "dataset",
+    "collate_twd_tom_samples": "dataset",
+    "load_twd_tom_jsonl": "dataset",
+    "masked_distribution_cross_entropy": "losses",
+    "masked_distribution_kl_divergence": "losses",
+    "compute_subjective_pair_diagnostics": "metrics",
+    "compute_subjective_pair_metrics": "metrics",
+    "SAMPLE_SCHEMA_VERSION": "samples",
+    "make_twd_tom_sample": "samples",
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f"{__name__}.{module_name}"), name)
+    globals()[name] = value
+    return value

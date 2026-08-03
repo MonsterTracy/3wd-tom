@@ -31,6 +31,8 @@ from werewolf.models.twd_tom.belief_snapshot import (
 )
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
+    build_collection_provenance,
+    require_clean_collection_worktree,
 )
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
@@ -39,8 +41,8 @@ from werewolf.models.twd_tom.shadow import (
     SecondOrderToMShadow,
 )
 from werewolf.runtime_config import normalize_runtime_config
-from werewolf.speech.private_belief_perceiver import (
-    PlayingAgentBeliefReporter,
+from werewolf.speech.pair_belief_self_reporter import (
+    ReadonlyPairBeliefSelfReporter,
 )
 
 
@@ -643,13 +645,14 @@ def build_twd_tom_sample_collector(
     agent_list,
     output_path,
     game_id,
+    collection_provenance,
     report_audit=None,
 ) -> TWDToMSampleCollector:
     """Build the readonly playing-agent collection stack."""
 
     snapshot_collector = (
         PlayingAgentBeliefSnapshotCollector(
-            PlayingAgentBeliefReporter(
+            ReadonlyPairBeliefSelfReporter(
                 audit_hook=report_audit,
             ),
             agent_list,
@@ -662,6 +665,7 @@ def build_twd_tom_sample_collector(
             snapshot_collector
         ),
         game_id=game_id,
+        collection_provenance=collection_provenance,
     )
 
 
@@ -706,6 +710,17 @@ def _write_role_assignment(
 
 def main_cli(args):
     """CLI implementation."""
+
+    sample_path = getattr(
+        args,
+        "twd_tom_sample_path",
+        None,
+    )
+    collection_git_state = (
+        require_clean_collection_worktree()
+        if sample_path is not None
+        else None
+    )
 
     if args.log_save_path is None:
         run_name = time.strftime(
@@ -823,12 +838,6 @@ def main_cli(args):
     sample_collector = None
     tom2_shadow = None
 
-    sample_path = getattr(
-        args,
-        "twd_tom_sample_path",
-        None,
-    )
-
     game_id = os.path.basename(
         os.path.normpath(
             args.log_save_path
@@ -838,11 +847,18 @@ def main_cli(args):
 
     try:
         if sample_path is not None:
+            collection_provenance = build_collection_provenance(
+                source_config_path=args.config,
+                resolved_runtime_config=normalized,
+                game_seed=getattr(args, "random_seed", None),
+                collection_git_state=collection_git_state,
+            )
             sample_collector = (
                 build_twd_tom_sample_collector(
                     agent_list=agent_list,
                     output_path=sample_path,
                     game_id=game_id,
+                    collection_provenance=collection_provenance,
                 )
             )
         if shadow_options is not None:

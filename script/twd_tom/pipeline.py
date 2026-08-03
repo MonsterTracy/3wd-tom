@@ -15,20 +15,17 @@ import yaml
 from dotenv import load_dotenv
 
 from script.twd_tom import real_backend_dry_run as collection_core
-from script.twd_tom.project_suspicion_to_pairs import project_jsonl
-from script.twd_tom.split_formal_dataset import split_projected_dataset
 from werewolf.backends import is_local_unauthenticated_backend
 from werewolf.runtime_config import normalize_runtime_config
+from werewolf.models.twd_tom.collector import require_clean_collection_worktree
 from werewolf.models.twd_tom.public_events import PUBLIC_EVENT_SCHEMA_VERSION
-from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.schema import (
-    PROJECTED_SCHEMA_VERSION,
-    PROJECTION_VERSION,
+from werewolf.models.twd_tom.samples import (
+    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STAGES = ("validate", "collect", "project", "split")
+STAGES = ("validate", "collect")
 COLLECTION_OVERRIDE_STAGES = ("validate", "collect")
 
 
@@ -89,8 +86,6 @@ def _run_paths(run_id: str) -> dict[str, dict[str, Path]]:
         "data": {
             "run_dir": data_run,
             "raw_path": data_run / "raw.jsonl",
-            "projected_path": data_run / "projected.jsonl",
-            "split_dir": data_run / "split",
         },
         "outputs": {
             "run_dir": outputs_run,
@@ -188,9 +183,7 @@ def _load_pipeline_config(
     pipeline = _mapping(parsed.get("pipeline"), "pipeline")
     expected_versions = {
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
-        "raw_schema_version": SAMPLE_SCHEMA_VERSION,
-        "projected_schema_version": PROJECTED_SCHEMA_VERSION,
-        "projection_version": PROJECTION_VERSION,
+        "raw_schema_version": ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
     }
     for field_name, expected in expected_versions.items():
         actual = _text(pipeline, field_name, "pipeline")
@@ -230,42 +223,11 @@ def _load_pipeline_config(
         max_wall_seconds=collection.get("max_wall_seconds_per_game"),
     )
 
-    project = _mapping(
-        pipeline.get("project", {}),
-        "pipeline.project",
-    )
-    _reject_path_fields(
-        project,
-        prefix="pipeline.project",
-        fields=("input_path", "output_path"),
-    )
-    if project:
-        raise ValueError("pipeline.project must be empty")
-    project_paths = {
-        "input_path": paths["data"]["raw_path"],
-        "output_path": paths["data"]["projected_path"],
-    }
-
-    split = _mapping(pipeline.get("split"), "pipeline.split")
-    _reject_path_fields(
-        split,
-        prefix="pipeline.split",
-        fields=("input_path", "output_dir"),
-    )
-    split_args = {
-        "input_path": paths["data"]["projected_path"],
-        "output_dir": paths["data"]["split_dir"],
-        "seed": _integer(split, "seed", "pipeline.split"),
-        "train_game_count": _integer(
-            split, "train_game_count", "pipeline.split"
-        ),
-        "validation_game_count": _integer(
-            split, "validation_game_count", "pipeline.split"
-        ),
-        "test_game_count": _integer(
-            split, "test_game_count", "pipeline.split"
-        ),
-    }
+    forbidden_stage_config = {"project", "split"} & set(pipeline)
+    if forbidden_stage_config:
+        raise ValueError(
+            "actor-perspective phase-one pipeline cannot configure project or split"
+        )
 
     resolved_runtime = deepcopy(parsed)
     resolved_pipeline = resolved_runtime["pipeline"]
@@ -290,8 +252,6 @@ def _load_pipeline_config(
             "seeds": seeds,
             "budget": budget,
         },
-        "project": project_paths,
-        "split": split_args,
     }
 
 
@@ -301,11 +261,16 @@ def _summary(
     stage: str,
     input_path: Any,
     output_path: Any,
+    collection_git_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "stage": stage,
         "run_id": config["run_id"],
-        "source_commit": collection_core._runtime_source_commit(),
+        "source_commit": (
+            collection_git_state["git_commit_sha"]
+            if collection_git_state is not None
+            else collection_core._runtime_source_commit()
+        ),
         "config_path": str(config["config_path"]),
         "game_count": config["collection"]["game_count"],
         "seeds": list(config["collection"]["seeds"]),
@@ -313,6 +278,12 @@ def _summary(
         "output_path": output_path,
         "status": "ok",
     }
+    if collection_git_state is not None:
+        result.update(
+            git_commit_sha=collection_git_state["git_commit_sha"],
+            git_worktree_clean=collection_git_state["git_worktree_clean"],
+        )
+    return result
 
 
 def _validate(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -327,13 +298,6 @@ def _validate(config: Mapping[str, Any]) -> dict[str, Any]:
             "game_count": config["collection"]["game_count"],
             "seeds": list(config["collection"]["seeds"]),
             "raw_jsonl_path": str(config["collection"]["raw_jsonl_path"]),
-        },
-        "project": {
-            name: str(value) for name, value in config["project"].items()
-        },
-        "split": {
-            name: str(value) if isinstance(value, Path) else value
-            for name, value in config["split"].items()
         },
     }
     return summary
@@ -378,6 +342,7 @@ def _check_collect_api_keys(config: Mapping[str, Any]) -> None:
 
 
 def _run_collect(config: Mapping[str, Any]) -> dict[str, Any]:
+    collection_git_state = require_clean_collection_worktree()
     paths = config["paths"]
     for run_directory in (
         paths["logs"]["run_dir"],
@@ -425,6 +390,7 @@ def _run_collect(config: Mapping[str, Any]) -> dict[str, Any]:
                 seed=seed,
                 budget=budget,
                 writer=writer,
+                source_config_path=config["config_path"],
             )
 
     summary = _summary(
@@ -432,6 +398,7 @@ def _run_collect(config: Mapping[str, Any]) -> dict[str, Any]:
         stage="collect",
         input_path=None,
         output_path=str(collection["raw_jsonl_path"]),
+        collection_git_state=collection_git_state,
     )
     summary["game_count"] = collection["game_count"]
     summary["seeds"] = list(collection["seeds"])
@@ -482,31 +449,6 @@ def run_pipeline_stage(
         return _validate(config)
     if stage == "collect":
         return _run_collect(config)
-    if stage == "project":
-        paths = config["project"]
-        record_count = project_jsonl(paths["input_path"], paths["output_path"])
-        result = _summary(
-            config,
-            stage=stage,
-            input_path=str(paths["input_path"]),
-            output_path=str(paths["output_path"]),
-        )
-        result["record_count"] = record_count
-        return result
-    if stage == "split":
-        arguments = config["split"]
-        manifest = split_projected_dataset(**arguments)
-        result = _summary(
-            config,
-            stage=stage,
-            input_path=str(arguments["input_path"]),
-            output_path=str(arguments["output_dir"]),
-        )
-        result["manifest_path"] = str(
-            arguments["output_dir"] / "split_manifest.json"
-        )
-        result["total_game_count"] = manifest["total_game_count"]
-        return result
     raise AssertionError(f"unhandled pipeline stage: {stage}")
 
 

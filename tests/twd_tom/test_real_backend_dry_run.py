@@ -12,9 +12,19 @@ import script.twd_tom.real_backend_dry_run as dry_run
 from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.models import SpeechPerceiver
-from werewolf.speech.private_belief_perceiver import (
-    PRIVATE_BELIEF_MAX_TOKENS,
-    PlayingAgentBeliefReporter,
+from werewolf.models.twd_tom.schema import canonical_wolf_pairs
+from werewolf.speech.pair_belief_self_reporter import (
+    PAIR_BELIEF_MAX_TOKENS,
+    ReadonlyPairBeliefSelfReporter,
+)
+
+PAIR_RESPONSE = json.dumps(
+    {
+        "pair_probabilities": [
+            1.0 / 15 if "player1" not in pair else 0.0
+            for pair in canonical_wolf_pairs()
+        ]
+    }
 )
 from werewolf.speech.speech_perceiver import (
     SPEECH_PARSER_MAX_TOKENS,
@@ -139,7 +149,7 @@ def _records(path):
 def _perform_report(
     tmp_path,
     *,
-    response='{"suspected_werewolves":[]}',
+    response=PAIR_RESPONSE,
     supports_json_schema=False,
 ):
     session, writer = _new_session(tmp_path)
@@ -150,13 +160,13 @@ def _perform_report(
     audited = _backend(fake, session)
     agent = LLMAgent(backend=audited, model_name="fake-model")
     agent.backend_id = "fake-backend"
-    reporter = PlayingAgentBeliefReporter(audit_hook=session)
+    reporter = ReadonlyPairBeliefSelfReporter(audit_hook=session)
     result = reporter.report(
         agent=agent,
         observation=_observation(),
-        observer_id="player1",
+        belief_owner_id="player1",
         public_snapshot=_snapshot(),
-        agent_backend_id="fake-backend",
+        backend_alias="fake-backend",
         known_werewolves=[],
         known_non_werewolves=["player1"],
     )
@@ -400,7 +410,7 @@ def test_backend_semantic_state_mutation_fails(tmp_path):
 
 def test_report_nonce_and_response_are_absent_from_next_action(tmp_path):
     session, writer, fake, audited, result = _perform_report(tmp_path)
-    assert result["status"] == "ok"
+    assert result["report_status"] == "ok"
     report_request = json.dumps(fake.calls[0]["messages"], ensure_ascii=False)
     assert "TWD_TOM_REPORT_AUDIT_" in report_request
 
@@ -416,14 +426,14 @@ def test_report_nonce_and_response_are_absent_from_next_action(tmp_path):
     writer.close()
     records, serialized = _records(tmp_path / "audit.jsonl")
     belief = next(record for record in records if record["call_category"] == "belief")
-    assert belief["request_max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert belief["request_max_tokens"] == PAIR_BELIEF_MAX_TOKENS
     assert belief["response_format_type"] == "json_object"
     assert belief["report_nonce_absent_from_next_action"] is True
     assert belief["report_response_absent_from_next_action"] is True
     assert belief["next_action_check_not_reached"] is False
     assert belief["state_hash_before"] == belief["state_hash_after"]
     assert "TWD_TOM_REPORT_AUDIT_" not in serialized
-    assert '{"suspected_werewolves":[]}' not in serialized
+    assert PAIR_RESPONSE not in serialized
 
 
 def test_audit_records_strict_belief_and_pipe_parser_contracts(
@@ -433,7 +443,7 @@ def test_audit_records_strict_belief_and_pipe_parser_contracts(
         tmp_path,
         supports_json_schema=True,
     )
-    assert result["status"] == "ok"
+    assert result["report_status"] == "ok"
     parser = SpeechPerceiver(
         backend=audited,
         model_name="fake-model",
@@ -461,9 +471,10 @@ def test_audit_records_strict_belief_and_pipe_parser_contracts(
     parser_record = next(
         record
         for record in records
-        if record["request_max_tokens"] == SPEECH_PARSER_MAX_TOKENS
+        if record["call_category"] == "gameplay"
+        and record["request_max_tokens"] == SPEECH_PARSER_MAX_TOKENS
     )
-    assert belief["request_max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert belief["request_max_tokens"] == PAIR_BELIEF_MAX_TOKENS
     assert belief["response_format_type"] == "json_schema"
     assert parser_record["response_format_type"] is None
     assert fake.calls[1]["response_format"] is None
@@ -478,7 +489,7 @@ def test_forced_report_contamination_fails_before_next_dispatch(
     marker = (
         report_request[report_request.index("TWD_TOM_REPORT_AUDIT_") :].split('"')[0]
         if contamination == "nonce"
-        else '{"suspected_werewolves":[]}'
+        else PAIR_RESPONSE
     )
     with session.gameplay_context(
         acting_player_id=1,
@@ -509,7 +520,7 @@ def test_report_without_next_action_is_marked_not_reached(tmp_path):
     assert records[0]["report_nonce_absent_from_next_action"] is None
     assert records[0]["report_response_absent_from_next_action"] is None
     assert "TWD_TOM_REPORT_AUDIT_" not in serialized
-    assert '{"suspected_werewolves":[]}' not in serialized
+    assert PAIR_RESPONSE not in serialized
 
 
 def test_gameplay_budget_stops_before_extra_dispatch(tmp_path):
@@ -623,7 +634,7 @@ def test_belief_backend_failure_dispatches_once_and_fails_closed(
 ):
     session, writer = _new_session(tmp_path)
     fake = FakeBackend(
-        responses=['{"suspected_werewolves":[]}'],
+        responses=[PAIR_RESPONSE],
         failures=1,
     )
     audited = _backend(fake, session)
@@ -632,26 +643,26 @@ def test_belief_backend_failure_dispatches_once_and_fails_closed(
     agent.notes = ["unchanged gameplay memory"]
     observation = _observation()
     observation_before = deepcopy(observation)
-    result = PlayingAgentBeliefReporter(audit_hook=session).report(
+    result = ReadonlyPairBeliefSelfReporter(audit_hook=session).report(
         agent=agent,
         observation=observation,
-        observer_id="player1",
+        belief_owner_id="player1",
         public_snapshot=_snapshot(),
-        agent_backend_id="fake-backend",
+        backend_alias="fake-backend",
         known_werewolves=[],
         known_non_werewolves=["player1"],
     )
     session.finish_game()
     writer.close()
 
-    assert result["status"] == "reporter_error"
-    assert result["suspected_werewolves"] is None
+    assert result["report_status"] == "reporter_error"
+    assert result["pair_probabilities"] is None
     assert len(fake.calls) == 1
-    assert fake.responses == ['{"suspected_werewolves":[]}']
+    assert fake.responses == [PAIR_RESPONSE]
     assert session.budget.total_calls == 1
     assert agent.notes == ["unchanged gameplay memory"]
     assert observation == observation_before
-    assert result["error"] not in agent.format_observation(observation)
+    assert result["report_error"] not in agent.format_observation(observation)
     records, _serialized = _records(tmp_path / "audit.jsonl")
     assert records[0]["dispatch_status"] == "error"
 
@@ -758,6 +769,15 @@ def test_fake_two_game_harness_writes_manifest_and_separate_files(
     config_path.write_text("fake: true\n", encoding="utf-8")
     calls = {"runtime": 0, "games": 0}
     runtime_head = "a" * 40
+    monkeypatch.setattr(
+        dry_run,
+        "require_clean_collection_worktree",
+        lambda: {
+            "repository_root": str(tmp_path),
+            "git_commit_sha": runtime_head,
+            "git_worktree_clean": True,
+        },
+    )
 
     def fake_git(command, **kwargs):
         assert command == ["git", "rev-parse", "HEAD"]
@@ -770,6 +790,21 @@ def test_fake_two_game_harness_writes_manifest_and_separate_files(
 
     monkeypatch.setattr(dry_run.subprocess, "run", fake_git)
     monkeypatch.setattr(dry_run, "normalize_runtime_config", lambda value: value)
+    monkeypatch.setattr(
+        dry_run,
+        "build_collection_provenance",
+        lambda **_kwargs: {
+            "generator_name": "synthetic",
+            "generator_version": "1",
+            "git_commit_sha": runtime_head,
+            "git_worktree_clean": True,
+            "collection_timestamp_utc": "2026-08-03T00:00:00+00:00",
+            "game_seed": 42,
+            "source_config_path": "configs/synthetic.yaml",
+            "source_config_sha256": "b" * 64,
+            "resolved_runtime_config_sha256": "c" * 64,
+        },
+    )
 
     def fake_backend_loader(*_args, **kwargs):
         assert kwargs["max_retries"] == 0
@@ -828,6 +863,8 @@ def test_fake_two_game_harness_writes_manifest_and_separate_files(
     assert manifest["dry_run_only"] is True
     assert manifest["formal_training_data"] is False
     assert manifest["source_commit"] == runtime_head
+    assert manifest["git_commit_sha"] == runtime_head
+    assert manifest["git_worktree_clean"] is True
     assert manifest["requested_game_count"] == 2
     assert manifest["seeds"] == [42, 43]
     assert manifest["privacy_safe_logging"] is True
@@ -839,36 +876,27 @@ def test_fake_two_game_harness_writes_manifest_and_separate_files(
     assert "hidden" not in serialized
 
 
-@pytest.mark.parametrize(
-    "git_result",
-    [
-        dry_run.subprocess.CalledProcessError(1, ["git", "rev-parse", "HEAD"]),
-        "",
-        "abc1234",
-        "g" * 40,
-    ],
-    ids=["command-failure", "empty", "short-sha", "non-hex"],
-)
 def test_invalid_runtime_commit_fails_before_output_or_backend(
-    tmp_path, monkeypatch, git_result
+    tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
     output = tmp_path / "logs" / "safe_dry_run"
     backend_loads = []
 
-    def fake_git(*_args, **_kwargs):
-        if isinstance(git_result, BaseException):
-            raise git_result
-        return SimpleNamespace(stdout=git_result)
-
-    monkeypatch.setattr(dry_run.subprocess, "run", fake_git)
+    monkeypatch.setattr(
+        dry_run,
+        "require_clean_collection_worktree",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("formal collection requires a clean Git worktree")
+        ),
+    )
     monkeypatch.setattr(
         dry_run,
         "load_named_backends",
         lambda *_args, **_kwargs: backend_loads.append(True),
     )
 
-    with pytest.raises(RuntimeError, match="source commit"):
+    with pytest.raises(RuntimeError, match="clean Git worktree"):
         dry_run.run_dry_run(
             dry_run.RealBackendDryRunConfig(
                 runtime_config_path="missing.yaml",

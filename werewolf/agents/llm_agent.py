@@ -13,9 +13,10 @@ from werewolf.agents.prompt_template_v0 import (
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import JsonFormatter, CustomLoggerAdapter
-from werewolf.speech.private_belief_perceiver import (
-    PRIVATE_BELIEF_MAX_TOKENS,
-    private_belief_response_format,
+from werewolf.speech.pair_belief_self_reporter import (
+    PAIR_BELIEF_MAX_TOKENS,
+    PAIR_BELIEF_PAYLOAD_VERSION,
+    pair_belief_response_format,
 )
 
 
@@ -170,40 +171,62 @@ class LLMAgent(Agent):
             ),
         }]
 
-    def report_suspected_werewolves_readonly(
+    def build_readonly_pair_belief_payload(
         self,
         *,
         observation,
         report_prompt,
     ):
-        """Run a detached self-report without mutating this agent context."""
+        """Build the sole JSON-safe payload used for a pair self-report."""
 
         if not isinstance(report_prompt, str) or not report_prompt.strip():
             raise ValueError("report_prompt must be non-empty text")
         detached_agent = copy(self)
-        detached_observation = deepcopy(observation)
         messages = detached_agent._build_readonly_belief_context(
-            detached_observation
+            deepcopy(observation)
         )
         messages.append({"role": "user", "content": report_prompt})
+        return {
+            "payload_version": PAIR_BELIEF_PAYLOAD_VERSION,
+            "messages": messages,
+            "request": {
+                "temperature": 0.0,
+                "max_tokens": PAIR_BELIEF_MAX_TOKENS,
+                "response_format": pair_belief_response_format(
+                    supports_json_schema=getattr(
+                        detached_agent.backend,
+                        "supports_json_schema",
+                        False,
+                    )
+                ),
+                "extra_body": {"thinking": {"type": "disabled"}},
+            },
+        }
+
+    def report_pair_belief_self_readonly(self, *, reporter_payload):
+        """Send exactly one prebuilt payload through a detached agent."""
+
+        if not isinstance(reporter_payload, dict) or set(reporter_payload) != {
+            "payload_version",
+            "messages",
+            "request",
+        }:
+            raise TypeError("reporter_payload has an invalid field set")
+        if reporter_payload["payload_version"] != PAIR_BELIEF_PAYLOAD_VERSION:
+            raise ValueError("unsupported reporter payload version")
+        request = reporter_payload["request"]
+        if not isinstance(request, dict) or set(request) != {
+            "temperature",
+            "max_tokens",
+            "response_format",
+            "extra_body",
+        }:
+            raise TypeError("reporter payload request has an invalid field set")
+        detached_agent = copy(self)
+        payload = deepcopy(reporter_payload)
         return detached_agent._chat(
-            messages,
-            temperature=0.0,
-            max_tokens=(
-                PRIVATE_BELIEF_MAX_TOKENS
-            ),
-            response_format=(
-                private_belief_response_format(
-                    supports_json_schema=(
-                        getattr(
-                            detached_agent.backend,
-                            "supports_json_schema",
-                            False,
-                        )
-                    ),
-                )
-            ),
-            extra_body={"thinking": {"type": "disabled"}},
+            payload["messages"],
+            **payload["request"],
         )
 
     def format_observation(self, observation):

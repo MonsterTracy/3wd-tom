@@ -12,9 +12,9 @@ from werewolf.agents import agent_registry
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.backends import BackendError, load_named_backends
 from werewolf.runtime_config import normalize_runtime_config
-from werewolf.speech.private_belief_perceiver import (
-    PRIVATE_BELIEF_JSON_SCHEMA,
-    PRIVATE_BELIEF_MAX_TOKENS,
+from werewolf.speech.pair_belief_self_reporter import (
+    PAIR_BELIEF_JSON_SCHEMA,
+    PAIR_BELIEF_MAX_TOKENS,
 )
 
 
@@ -273,7 +273,7 @@ def test_single_qwen_gameplay_and_belief_use_same_route(
         temperature=0.2,
         max_tokens=8,
     )
-    agent.report_suspected_werewolves_readonly(
+    reporter_payload = agent.build_readonly_pair_belief_payload(
         observation={
             "observer_id": 1,
             "identity": "Villager",
@@ -283,12 +283,13 @@ def test_single_qwen_gameplay_and_belief_use_same_route(
         },
         report_prompt="Return the required JSON object.",
     )
+    agent.report_pair_belief_self_readonly(reporter_payload=reporter_payload)
 
     assert len(calls) == 2
     for url, payload in calls:
         assert url == f"{base_url}/chat/completions"
         assert payload["model"] == model
-    assert calls[1][1]["max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert calls[1][1]["max_tokens"] == PAIR_BELIEF_MAX_TOKENS
     assert calls[1][1]["response_format"] == {
         "type": "json_object"
     }
@@ -512,7 +513,7 @@ def test_local_routes_preserve_alias_and_model_for_gameplay_and_belief(
             temperature=0.2,
             max_tokens=8,
         )
-        agent.report_suspected_werewolves_readonly(
+        reporter_payload = agent.build_readonly_pair_belief_payload(
             observation={
                 "observer_id": 1,
                 "identity": "Villager",
@@ -522,6 +523,7 @@ def test_local_routes_preserve_alias_and_model_for_gameplay_and_belief(
             },
             report_prompt="Return the required JSON object.",
         )
+        agent.report_pair_belief_self_readonly(reporter_payload=reporter_payload)
 
     assert len(calls) == 6
     for index, (_alias, (base_url, model)) in enumerate(
@@ -538,7 +540,7 @@ def test_local_routes_preserve_alias_and_model_for_gameplay_and_belief(
         }
         assert (
             belief_payload["max_tokens"]
-            == PRIVATE_BELIEF_MAX_TOKENS
+            == PAIR_BELIEF_MAX_TOKENS
         )
         assert belief_payload["thinking"] == {"type": "disabled"}
 
@@ -565,7 +567,7 @@ def test_server_qwen_belief_uses_strict_schema_without_network(
         model_name=model,
     )
 
-    agent.report_suspected_werewolves_readonly(
+    reporter_payload = agent.build_readonly_pair_belief_payload(
         observation={
             "observer_id": 1,
             "identity": "Villager",
@@ -575,25 +577,26 @@ def test_server_qwen_belief_uses_strict_schema_without_network(
         },
         report_prompt="Return the required JSON object.",
     )
+    agent.report_pair_belief_self_readonly(reporter_payload=reporter_payload)
 
     assert len(calls) == 1
     url, payload = calls[0]
     assert url == "http://127.0.0.1:8000/v1/chat/completions"
     assert payload["model"] == model
-    assert payload["max_tokens"] == PRIVATE_BELIEF_MAX_TOKENS
+    assert payload["max_tokens"] == PAIR_BELIEF_MAX_TOKENS
     assert payload["response_format"] == {
         "type": "json_schema",
         "json_schema": {
-            "name": "private_belief_report",
+            "name": "pair_belief_self_report",
             "strict": True,
-            "schema": PRIVATE_BELIEF_JSON_SCHEMA,
+            "schema": PAIR_BELIEF_JSON_SCHEMA,
         },
     }
     transport_schema = payload["response_format"][
         "json_schema"
     ]["schema"]
     array_schema = transport_schema["properties"][
-        "suspected_werewolves"
+        "pair_probabilities"
     ]
     assert "uniqueItems" not in array_schema
     assert "contains" not in array_schema

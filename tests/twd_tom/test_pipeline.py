@@ -8,14 +8,22 @@ import yaml
 
 from script.twd_tom import pipeline
 from werewolf.models.twd_tom.samples import (
-    SAMPLE_SCHEMA_VERSION,
-)
-from werewolf.models.twd_tom.schema import (
-    LABEL_PROMPT_VERSION,
-    PROJECTED_SCHEMA_VERSION,
-    PROJECTION_VERSION,
+    ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.public_events import PUBLIC_EVENT_SCHEMA_VERSION
+
+
+@pytest.fixture(autouse=True)
+def _clean_collection_gate(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "require_clean_collection_worktree",
+        lambda: {
+            "repository_root": str(pipeline.REPO_ROOT),
+            "git_commit_sha": "a" * 40,
+            "git_worktree_clean": True,
+        },
+    )
 
 
 def _pipeline_config(
@@ -80,9 +88,7 @@ def _pipeline_config(
         },
         "pipeline": {
             "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
-            "raw_schema_version": SAMPLE_SCHEMA_VERSION,
-            "projected_schema_version": PROJECTED_SCHEMA_VERSION,
-            "projection_version": PROJECTION_VERSION,
+            "raw_schema_version": ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
             "collection": {
                 "game_count": len(seeds),
                 "seeds": list(seeds),
@@ -90,13 +96,6 @@ def _pipeline_config(
                 "max_belief_calls_per_game": 20,
                 "max_total_calls_per_game": 30,
                 "max_wall_seconds_per_game": 60.0,
-            },
-            "project": {},
-            "split": {
-                "seed": 11,
-                "train_game_count": 1,
-                "validation_game_count": 1,
-                "test_game_count": 1,
             },
         },
     }
@@ -140,7 +139,7 @@ def _use_temporary_repo(
 
 def _install_fake_collection(
     monkeypatch,
-    suspicion_sample_factory,
+    actor_pair_sample_factory,
     *,
     games_dir: Path,
 ):
@@ -185,9 +184,7 @@ def _install_fake_collection(
             )
         )
         sample = (
-            suspicion_sample_factory(
-                game_id=game_id,
-            )
+            actor_pair_sample_factory(game_id=game_id)
         )
         with samples_path.open(
             "a",
@@ -420,8 +417,6 @@ def test_cli_exposes_only_run_and_collection_instance_parameters():
     assert pipeline.STAGES == (
         "validate",
         "collect",
-        "project",
-        "split",
     )
 
 
@@ -558,7 +553,7 @@ def test_invalid_run_id_fails_closed(
     "stage",
     ("project", "split"),
 )
-def test_collection_overrides_are_rejected_for_later_stages(
+def test_removed_projection_stages_are_rejected(
     tmp_path,
     stage,
 ):
@@ -567,7 +562,7 @@ def test_collection_overrides_are_rejected_for_later_stages(
     )
     with pytest.raises(
         ValueError,
-        match="only allowed for validate and collect",
+        match="unsupported pipeline stage",
     ):
         pipeline.run_pipeline_stage(
             config_path=config_path,
@@ -599,7 +594,7 @@ def test_training_stages_are_not_supported(tmp_path, stage):
 def test_collect_calls_existing_core_sequentially(
     tmp_path,
     monkeypatch,
-    suspicion_sample_factory,
+    actor_pair_sample_factory,
     seeds,
 ):
     _use_temporary_repo(
@@ -612,7 +607,7 @@ def test_collect_calls_existing_core_sequentially(
     )
     calls = _install_fake_collection(
         monkeypatch,
-        suspicion_sample_factory,
+        actor_pair_sample_factory,
         games_dir=(
             tmp_path
             / "logs"
@@ -667,13 +662,7 @@ def test_collect_calls_existing_core_sequentially(
         record["schema_version"]
         for record in records
     } == {
-        SAMPLE_SCHEMA_VERSION,
-    }
-    assert {
-        record["label_prompt_version"]
-        for record in records
-    } == {
-        LABEL_PROMPT_VERSION,
+        ACTOR_PAIR_BELIEF_SCHEMA_VERSION,
     }
     assert all(
         "pair_targets" not in record
@@ -701,7 +690,7 @@ def test_collect_calls_existing_core_sequentially(
 def test_collect_override_preserves_seed_order_and_yaml(
     tmp_path,
     monkeypatch,
-    suspicion_sample_factory,
+    actor_pair_sample_factory,
     seeds,
 ):
     _use_temporary_repo(
@@ -721,7 +710,7 @@ def test_collect_override_preserves_seed_order_and_yaml(
     )
     calls = _install_fake_collection(
         monkeypatch,
-        suspicion_sample_factory,
+        actor_pair_sample_factory,
         games_dir=games_dir,
     )
     monkeypatch.setenv(
@@ -935,7 +924,7 @@ def test_collect_requires_api_key_but_validate_does_not(
 def test_explicit_staged_synthetic_flow(
     tmp_path,
     monkeypatch,
-    suspicion_sample_factory,
+    actor_pair_sample_factory,
 ):
     _use_temporary_repo(
         tmp_path,
@@ -947,7 +936,7 @@ def test_explicit_staged_synthetic_flow(
     original_yaml = config_path.read_bytes()
     calls = _install_fake_collection(
         monkeypatch,
-        suspicion_sample_factory,
+        actor_pair_sample_factory,
         games_dir=(
             tmp_path
             / "logs"
@@ -1017,107 +1006,7 @@ def test_explicit_staged_synthetic_flow(
         "FAKE_API_KEY",
         raising=False,
     )
-    project_summary = (
-        pipeline.run_pipeline_stage(
-            config_path=config_path,
-            run_id="test_run",
-            stage="project",
-        )
-    )
-    projected_path = Path(
-        project_summary["output_path"]
-    )
-    assert project_summary[
-        "record_count"
-    ] == 3
-    projected_records = [
-        json.loads(line)
-        for line in projected_path.read_text(
-            encoding="utf-8"
-        ).splitlines()
-    ]
-    assert {
-        record["schema_version"]
-        for record in projected_records
-    } == {
-        PROJECTED_SCHEMA_VERSION,
-    }
-    assert {
-        record["projection_version"]
-        for record in projected_records
-    } == {
-        PROJECTION_VERSION,
-    }
-    assert {
-        path.name
-        for path in data_run.iterdir()
-    } == {
-        "raw.jsonl",
-        "projected.jsonl",
-    }
-
-    split_summary = (
-        pipeline.run_pipeline_stage(
-            config_path=config_path,
-            run_id="test_run",
-            stage="split",
-        )
-    )
-    split_dir = Path(
-        split_summary["output_path"]
-    )
-    manifest = json.loads(
-        (
-            split_dir
-            / "split_manifest.json"
-        ).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert {
-        split_name: manifest[
-            "splits"
-        ][split_name]["game_count"]
-        for split_name in (
-            "train",
-            "validation",
-            "test",
-        )
-    } == {
-        "train": 1,
-        "validation": 1,
-        "test": 1,
-    }
-    assert manifest["split_seed"] == 11
-    game_sets = [
-        set(
-            manifest["splits"][
-                split_name
-            ]["game_ids"]
-        )
-        for split_name in (
-            "train",
-            "validation",
-            "test",
-        )
-    ]
-    assert not (
-        game_sets[0] & game_sets[1]
-        or game_sets[0] & game_sets[2]
-        or game_sets[1] & game_sets[2]
-    )
-    assert {
-        path.name
-        for path in data_run.iterdir()
-    } == {
-        "raw.jsonl",
-        "projected.jsonl",
-        "split",
-    }
-
-    # The order-specific raw-data trainer has its own one-batch smoke tests;
-    # the online collection/projection pipeline deliberately stops here.
     assert "test-secret" not in json.dumps(
-        [validate_summary, collect_summary, project_summary, split_summary]
+        [validate_summary, collect_summary]
     )
     assert config_path.read_bytes() == original_yaml

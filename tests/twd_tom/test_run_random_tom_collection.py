@@ -12,8 +12,8 @@ from werewolf.models.twd_tom.collector import (
 )
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
-from werewolf.speech.private_belief_perceiver import (
-    PlayingAgentBeliefReporter,
+from werewolf.speech.pair_belief_self_reporter import (
+    ReadonlyPairBeliefSelfReporter,
 )
 
 
@@ -496,6 +496,18 @@ def test_builds_complete_sample_collector(
                 / "samples.jsonl"
             ),
             game_id="game_001",
+            collection_provenance={
+                "generator_name": "twd_tom_actor_pair_belief_collector",
+                "generator_version": "1",
+                "git_commit_sha": "a" * 40,
+                "git_worktree_clean": True,
+                "collection_timestamp_utc": "2026-08-03T00:00:00+00:00",
+                "game_seed": 1,
+                "source_config_path": "configs/test.yaml",
+                "source_config_sha256": "b" * 64,
+                "resolved_runtime_config_sha256": "c" * 64,
+                "resolved_backend_config_sha256": {"backend": "d" * 64},
+            },
         )
     )
 
@@ -507,7 +519,7 @@ def test_builds_complete_sample_collector(
 
         assert isinstance(
             collector.snapshot_collector.reporter,
-            PlayingAgentBeliefReporter,
+            ReadonlyPairBeliefSelfReporter,
         )
         assert collector.snapshot_collector.agents == tuple(agents)
 
