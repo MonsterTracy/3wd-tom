@@ -607,6 +607,52 @@ class SpeechPerceiverTest(unittest.TestCase):
             [],
         )
 
+    def test_strict_parse_exposes_backend_failure(
+        self,
+    ):
+        backend = FakeBackend(
+            error=RuntimeError(
+                "backend unavailable"
+            )
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "backend unavailable",
+        ):
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
+    def test_strict_parse_rejects_malformed_response(
+        self,
+    ):
+        backend = FakeBackend(
+            "not a structured response"
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "No structured speech action",
+        ):
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
     def test_returns_empty_when_backend_raises(
         self,
     ):

@@ -378,10 +378,10 @@ def build_reparse_report(
 
     if parser is None or not hasattr(
         parser,
-        "parse",
+        "parse_strict",
     ):
         raise TypeError(
-            "parser must provide parse()"
+            "parser must provide parse_strict()"
         )
 
     events: list[
@@ -488,7 +488,7 @@ def build_reparse_report(
 
             try:
                 raw_new_actions = (
-                    parser.parse(
+                    parser.parse_strict(
                         speaker=speaker_id,
                         speech=speech,
                         day=day,

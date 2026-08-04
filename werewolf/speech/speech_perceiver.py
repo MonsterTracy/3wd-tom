@@ -125,45 +125,112 @@ class SpeechPerceiver:
         )
 
         try:
-            prompt = self._build_prompt(
+            return self._parse_configured(
                 speaker=speaker,
                 speech=speech,
                 day=day,
                 phase=phase,
-            )
-
-            response_text = self.backend.chat(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                model=self.model_name,
-                temperature=0,
-                max_tokens=(
-                    SPEECH_PARSER_MAX_TOKENS
+                protected_actions=(
+                    protected_actions
                 ),
-            )
-
-            parsed = self._extract_response_actions(
-                response_text
-            )
-
-            llm_actions = self._normalize(
-                parsed=parsed,
-                speaker=speaker,
-            )
-
-            return self._merge_actions(
-                protected_actions,
-                llm_actions,
             )
         except Exception:
             # A literal public self-role declaration is still valid public
             # evidence even if the LLM parser fails. No hidden role or
             # game-state information is used here.
             return protected_actions
+
+    def parse_strict(
+        self,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+    ) -> list[list[str]]:
+        """Parse one speech while exposing configuration and parser errors.
+
+        This entry point is for offline audits and reparsing only. The online
+        environment continues to call :meth:`parse`, which remains fail-closed
+        so a parser outage cannot interrupt a game.
+        """
+
+        if self.backend is None or not self.model_name:
+            raise RuntimeError(
+                "speech parser backend and model must be configured"
+            )
+
+        if type(speaker) is not int or not 1 <= speaker <= 7:
+            raise ValueError(
+                "speaker must be an integer in [1, 7]"
+            )
+
+        if not isinstance(speech, str) or not speech.strip():
+            raise ValueError(
+                "speech must be non-empty text"
+            )
+
+        protected_actions = (
+            self._extract_explicit_self_claim_actions(
+                speaker=speaker,
+                speech=speech,
+            )
+        )
+
+        return self._parse_configured(
+            speaker=speaker,
+            speech=speech,
+            day=day,
+            phase=phase,
+            protected_actions=(
+                protected_actions
+            ),
+        )
+
+    def _parse_configured(
+        self,
+        *,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+        protected_actions: Sequence[
+            Sequence[str]
+        ],
+    ) -> list[list[str]]:
+        prompt = self._build_prompt(
+            speaker=speaker,
+            speech=speech,
+            day=day,
+            phase=phase,
+        )
+
+        response_text = self.backend.chat(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model=self.model_name,
+            temperature=0,
+            max_tokens=(
+                SPEECH_PARSER_MAX_TOKENS
+            ),
+        )
+
+        parsed = self._extract_response_actions(
+            response_text
+        )
+
+        llm_actions = self._normalize(
+            parsed=parsed,
+            speaker=speaker,
+        )
+
+        return self._merge_actions(
+            protected_actions,
+            llm_actions,
+        )
 
     @staticmethod
     def _build_prompt(

@@ -61,7 +61,7 @@ class FakeParser:
     def __init__(self):
         self.calls = []
 
-    def parse(
+    def parse_strict(
         self,
         speaker,
         speech,
