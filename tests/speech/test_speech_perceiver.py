@@ -4,6 +4,7 @@ import unittest
 from werewolf.models import SpeechPerceiver
 from werewolf.speech.speech_perceiver import (
     SPEECH_PARSER_MAX_TOKENS,
+    SpeechActionValidationError,
 )
 
 
@@ -652,6 +653,159 @@ class SpeechPerceiverTest(unittest.TestCase):
                 1,
                 "speech",
             )
+
+    def test_strict_rejects_unknown_action_without_changing_parse(
+        self,
+    ):
+        backend = FakeBackend(
+            "player1 | invented_action | player2"
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "发言", 1, "speech"),
+            [],
+        )
+
+        with self.assertRaises(
+            SpeechActionValidationError
+        ) as caught:
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
+        self.assertEqual(caught.exception.invalid_count, 1)
+        self.assertEqual(
+            caught.exception.failures[0]["candidate"],
+            ["player1", "invented_action", "player2"],
+        )
+        self.assertIn(
+            "unsupported speech action",
+            caught.exception.failures[0]["reason"],
+        )
+
+    def test_strict_rejects_invalid_player_without_changing_parse(
+        self,
+    ):
+        backend = FakeBackend(
+            "player8 | support | player2"
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "发言", 1, "speech"),
+            [],
+        )
+
+        with self.assertRaisesRegex(
+            SpeechActionValidationError,
+            "player8",
+        ):
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
+    def test_strict_rejects_malformed_candidate_without_changing_parse(
+        self,
+    ):
+        responses = [
+            "player1 | support",
+            "player1 | support | player2 | extra",
+            json.dumps(
+                [
+                    {
+                        "subject": "player1",
+                        "action": "support",
+                    }
+                ]
+            )
+        ]
+
+        for response in responses:
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+
+                self.assertEqual(
+                    perceiver.parse(1, "发言", 1, "speech"),
+                    [],
+                )
+
+                with self.assertRaisesRegex(
+                    SpeechActionValidationError,
+                    "three-item sequence",
+                ):
+                    perceiver.parse_strict(
+                        1,
+                        "发言",
+                        1,
+                        "speech",
+                    )
+
+    def test_strict_rejects_entire_mixed_valid_invalid_output(
+        self,
+    ):
+        backend = FakeBackend(
+            "\n".join(
+                [
+                    "player1 | support | player2",
+                    "player1 | invented_action | player3",
+                ]
+            )
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "发言", 1, "speech"),
+            [["player1", "support", "player2"]],
+        )
+
+        with self.assertRaises(
+            SpeechActionValidationError
+        ) as caught:
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
+        self.assertEqual(caught.exception.invalid_count, 1)
+
+    def test_strict_none_is_a_valid_empty_result(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            ),
+            [],
+        )
 
     def test_returns_empty_when_backend_raises(
         self,

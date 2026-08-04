@@ -36,6 +36,7 @@ from werewolf.runtime_config import (
     normalize_runtime_config,
 )
 from werewolf.speech.speech_perceiver import (
+    SpeechActionValidationError,
     SpeechPerceiver,
 )
 
@@ -475,6 +476,9 @@ def build_reparse_report(
 
         parse_status = "ok"
         parse_error = None
+        invalid_new_actions: list[
+            dict[str, Any]
+        ] = []
         new_actions: list[
             list[str]
         ] = []
@@ -511,6 +515,20 @@ def build_reparse_report(
                     parse_status = (
                         "invalid_parser_output"
                     )
+            except SpeechActionValidationError as exc:
+                invalid_new_action_count += (
+                    exc.invalid_count
+                )
+                parse_status = (
+                    "invalid_parser_output"
+                )
+                parse_error = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                invalid_new_actions = (
+                    exc.failures
+                )
+                new_actions = []
             except Exception as exc:
                 parser_error_count += 1
                 parse_status = "error"
@@ -551,6 +569,9 @@ def build_reparse_report(
                 parse_status
             ),
             "parse_error": parse_error,
+            "invalid_new_actions": (
+                invalid_new_actions
+            ),
             "old_sp_actions": (
                 old_actions
             ),

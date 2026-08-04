@@ -15,6 +15,9 @@ from script.twd_tom.reparse_speeches import (
     load_game_log,
     run_reparse,
 )
+from werewolf.speech.speech_perceiver import (
+    SpeechActionValidationError,
+)
 
 
 def make_speech_record(
@@ -187,6 +190,10 @@ def test_build_report_compares_old_and_new_actions():
     ] == 1
 
     assert summary[
+        "invalid_new_action_count"
+    ] == 0
+
+    assert summary[
         "old_nonempty_event_count"
     ] == 2
 
@@ -264,6 +271,85 @@ def test_build_report_compares_old_and_new_actions():
     assert len(
         parser.calls
     ) == 3
+
+
+class RaisingParser:
+    def __init__(self, error):
+        self.error = error
+
+    def parse_strict(self, **kwargs):
+        del kwargs
+        raise self.error
+
+
+def _single_speech_report(parser):
+    return build_reparse_report(
+        [
+            make_speech_record(
+                source=1,
+                speech="测试发言",
+                old_actions=[],
+            )
+        ],
+        parser=parser,
+        source_path="game.json",
+        source_sha256="abc",
+        parser_backend_name="fake",
+        parser_model_name="fake",
+    )
+
+
+def test_schema_invalid_output_is_not_counted_as_parser_error():
+    failure = {
+        "candidate": [
+            "player1",
+            "invented_action",
+            "player2",
+        ],
+        "reason": "unsupported speech action",
+    }
+
+    report = _single_speech_report(
+        RaisingParser(
+            SpeechActionValidationError(
+                [failure]
+            )
+        )
+    )
+
+    assert report["summary"]["invalid_new_action_count"] == 1
+    assert report["summary"]["parser_error_count"] == 0
+    event = report["events"][0]
+    assert event["parse_status"] == "invalid_parser_output"
+    assert event["invalid_new_actions"] == [failure]
+    assert "invented_action" in event["parse_error"]
+    assert event["new_sp_actions"] == []
+
+
+def test_legal_empty_output_is_successful():
+    report = _single_speech_report(FakeParser())
+
+    assert report["summary"]["invalid_new_action_count"] == 0
+    assert report["summary"]["parser_error_count"] == 0
+    assert report["events"][0]["parse_status"] == "ok"
+    assert report["events"][0]["new_sp_actions"] == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("backend unavailable"),
+        ValueError("No structured speech action found"),
+    ],
+)
+def test_parser_failures_are_not_counted_as_invalid_output(error):
+    report = _single_speech_report(
+        RaisingParser(error)
+    )
+
+    assert report["summary"]["parser_error_count"] == 1
+    assert report["summary"]["invalid_new_action_count"] == 0
+    assert report["events"][0]["parse_status"] == "error"
 
 
 def test_load_game_log_reads_list(

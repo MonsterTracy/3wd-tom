@@ -72,6 +72,22 @@ def _load_tom_schema():
     return ACTION_NAMES, SpeechAction
 
 
+class SpeechActionValidationError(ValueError):
+    """Report candidates that violate the speech-action schema."""
+
+    def __init__(self, failures: list[dict[str, Any]]):
+        self.failures = failures
+        self.invalid_count = len(failures)
+        super().__init__(
+            "invalid speech action candidate(s): "
+            + json.dumps(
+                failures,
+                ensure_ascii=False,
+                default=repr,
+            )
+        )
+
+
 class SpeechPerceiver:
     """Convert one public speech turn into structured speech actions.
 
@@ -184,6 +200,7 @@ class SpeechPerceiver:
             protected_actions=(
                 protected_actions
             ),
+            strict=True,
         )
 
     def _parse_configured(
@@ -196,6 +213,7 @@ class SpeechPerceiver:
         protected_actions: Sequence[
             Sequence[str]
         ],
+        strict: bool = False,
     ) -> list[list[str]]:
         prompt = self._build_prompt(
             speaker=speaker,
@@ -219,12 +237,14 @@ class SpeechPerceiver:
         )
 
         parsed = self._extract_response_actions(
-            response_text
+            response_text,
+            strict=strict,
         )
 
         llm_actions = self._normalize(
             parsed=parsed,
             speaker=speaker,
+            strict=strict,
         )
 
         return self._merge_actions(
@@ -434,6 +454,8 @@ player{speaker}: {speech}"""
     def _extract_response_actions(
         cls,
         response_text: str,
+        *,
+        strict: bool = False,
     ) -> list:
         """Read preferred pipe triplets with legacy JSON compatibility."""
 
@@ -454,7 +476,8 @@ player{speaker}: {speech}"""
 
         # The new ONUW-style format has priority.
         pipe_actions = cls._extract_pipe_triplets(
-            text
+            text,
+            preserve_invalid=strict,
         )
 
         if pipe_actions:
@@ -468,7 +491,7 @@ player{speaker}: {speech}"""
         except ValueError:
             pass
 
-        if cls._contains_empty_marker(
+        if not strict and cls._contains_empty_marker(
             text
         ):
             return []
@@ -543,6 +566,8 @@ player{speaker}: {speech}"""
     def _extract_pipe_triplets(
         cls,
         response_text: str,
+        *,
+        preserve_invalid: bool = False,
     ) -> list[list[str]]:
         """Extract strict ONUW-style pipe triplets from separate lines."""
 
@@ -576,6 +601,19 @@ player{speaker}: {speech}"""
             )
 
             if match is None:
+                if preserve_invalid and re.search(
+                    r"[|｜]",
+                    line,
+                ):
+                    actions.append(
+                        [
+                            part.strip()
+                            for part in re.split(
+                                r"[|｜]",
+                                line,
+                            )
+                        ]
+                    )
                 continue
 
             actions.append(
@@ -650,6 +688,8 @@ player{speaker}: {speech}"""
         cls,
         parsed: list,
         speaker: int,
+        *,
+        strict: bool = False,
     ) -> list[list[str]]:
         """Validate actions and force the subject to the real speaker."""
 
@@ -664,6 +704,7 @@ player{speaker}: {speech}"""
             return []
 
         actions: list[list[str]] = []
+        failures: list[dict[str, Any]] = []
         seen: set[
             tuple[str, str, str]
         ] = set()
@@ -674,15 +715,32 @@ player{speaker}: {speech}"""
             )
 
             if raw_action is None:
+                if strict:
+                    failures.append(
+                        {
+                            "candidate": item,
+                            "reason": (
+                                "candidate must be a mapping with action/object "
+                                "or a three-item sequence"
+                            ),
+                        }
+                    )
                 continue
 
             (
-                _,
+                raw_subject,
                 action_name,
                 object_player,
             ) = raw_action
 
             try:
+                if strict:
+                    speech_action_type.from_values(
+                        subject=raw_subject,
+                        action=action_name,
+                        object_=object_player,
+                    )
+
                 action = (
                     speech_action_type
                     .from_values(
@@ -697,7 +755,16 @@ player{speaker}: {speech}"""
                 TypeError,
                 ValueError,
                 KeyError,
-            ):
+            ) as exc:
+                if strict:
+                    failures.append(
+                        {
+                            "candidate": item,
+                            "reason": (
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        }
+                    )
                 continue
 
             normalized = action.to_list()
@@ -709,6 +776,11 @@ player{speaker}: {speech}"""
             seen.add(key)
             actions.append(
                 normalized
+            )
+
+        if failures:
+            raise SpeechActionValidationError(
+                failures
             )
 
         return actions
