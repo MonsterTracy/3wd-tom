@@ -17,6 +17,7 @@ from script.twd_tom.reparse_speeches import (
 )
 from werewolf.speech.speech_perceiver import (
     SpeechActionValidationError,
+    SpeechPerceiver,
 )
 
 
@@ -282,13 +283,21 @@ class RaisingParser:
         raise self.error
 
 
-def _single_speech_report(parser):
+def _single_speech_report(
+    parser,
+    *,
+    old_actions=None,
+):
     return build_reparse_report(
         [
             make_speech_record(
                 source=1,
                 speech="测试发言",
-                old_actions=[],
+                old_actions=(
+                    []
+                    if old_actions is None
+                    else old_actions
+                ),
             )
         ],
         parser=parser,
@@ -350,6 +359,154 @@ def test_parser_failures_are_not_counted_as_invalid_output(error):
     assert report["summary"]["parser_error_count"] == 1
     assert report["summary"]["invalid_new_action_count"] == 0
     assert report["events"][0]["parse_status"] == "error"
+
+
+class StaticResponseBackend:
+    def __init__(self, response):
+        self.response = response
+
+    def chat(self, **kwargs):
+        del kwargs
+        return self.response
+
+
+@pytest.mark.parametrize(
+    ("response", "invalid_fragment"),
+    [
+        (
+            "player1 | support | player2\n解释：这是理由",
+            "解释：这是理由",
+        ),
+        (
+            "以下是结果：\nplayer1 | support | player2",
+            "以下是结果：",
+        ),
+        (
+            "NONE\nplayer1 | support | player2",
+            "NONE",
+        ),
+        (
+            "NONE\n解释：没有动作",
+            "解释：没有动作",
+        ),
+    ],
+)
+def test_protocol_contamination_is_invalid_not_parser_error(
+    response,
+    invalid_fragment,
+):
+    parser = SpeechPerceiver(
+        backend=StaticResponseBackend(response),
+        model_name="fake-model",
+    )
+
+    report = _single_speech_report(parser)
+    event = report["events"][0]
+
+    assert event["parse_status"] == "invalid_parser_output"
+    assert report["summary"]["invalid_new_action_count"] > 0
+    assert report["summary"]["parser_error_count"] == 0
+    assert invalid_fragment in str(event["invalid_new_actions"])
+    assert event["new_sp_actions"] == []
+
+
+def test_canonical_old_action_is_retained():
+    report = _single_speech_report(
+        FakeParser(),
+        old_actions=[
+            [
+                " Player_1 ",
+                " SUPPORT ",
+                "player 2",
+            ]
+        ],
+    )
+
+    event = report["events"][0]
+    assert event["old_sp_actions"] == [
+        ["player1", "support", "player2"]
+    ]
+    assert event["invalid_old_action_count"] == 0
+    assert event["invalid_old_actions"] == []
+
+
+@pytest.mark.parametrize(
+    ("candidate", "reason_fragment"),
+    [
+        (
+            ["player1", "invented_action", "player2"],
+            "unsupported speech action",
+        ),
+        (
+            ["player8", "support", "player2"],
+            "invalid player reference",
+        ),
+        (
+            ["player1", "support", "player99"],
+            "invalid player reference",
+        ),
+        (["player1", "support"], "exactly three fields"),
+        (
+            ["player1", "support", "player2", "extra"],
+            "exactly three fields",
+        ),
+        (["player1", "support", 2], "non-empty strings"),
+        (["player1", "support", None], "non-empty strings"),
+        (["player1", "support", {}], "non-empty strings"),
+    ],
+)
+def test_invalid_old_action_uses_canonical_schema(
+    candidate,
+    reason_fragment,
+):
+    report = _single_speech_report(
+        FakeParser(),
+        old_actions=[candidate],
+    )
+
+    event = report["events"][0]
+    assert event["old_sp_actions"] == []
+    assert event["invalid_old_action_count"] == 1
+    assert event["invalid_old_actions"][0]["candidate"] == candidate
+    assert reason_fragment in event["invalid_old_actions"][0]["reason"]
+    assert report["summary"]["invalid_old_action_count"] == 1
+    assert report["summary"]["old_action_name_counts"] == {}
+
+
+def test_mixed_old_actions_keep_valid_rows_and_report_invalid_rows():
+    old_actions = [
+        ["player1", "support", "player2"],
+        ["player1", "invented_action", "player3"],
+    ]
+    original = json.dumps(old_actions, ensure_ascii=False)
+
+    report = _single_speech_report(
+        FakeParser(),
+        old_actions=old_actions,
+    )
+
+    event = report["events"][0]
+    assert event["old_sp_actions"] == [
+        ["player1", "support", "player2"]
+    ]
+    assert event["invalid_old_action_count"] == 1
+    assert event["invalid_old_actions"][0]["candidate"] == old_actions[1]
+    assert report["summary"]["invalid_old_action_count"] == 1
+    assert report["summary"]["old_action_name_counts"] == {
+        "support": 1
+    }
+    assert json.dumps(old_actions, ensure_ascii=False) == original
+
+
+def test_non_list_old_actions_are_reported_invalid():
+    report = _single_speech_report(
+        FakeParser(),
+        old_actions="not-a-list",
+    )
+
+    event = report["events"][0]
+    assert event["invalid_old_action_count"] == 1
+    assert event["invalid_old_actions"][0]["error_type"] == "TypeError"
 
 
 def test_load_game_log_reads_list(

@@ -35,6 +35,9 @@ from werewolf.backends import (
 from werewolf.runtime_config import (
     normalize_runtime_config,
 )
+from werewolf.models.twd_tom.schema import (
+    parse_speech_action,
+)
 from werewolf.speech.speech_perceiver import (
     SpeechActionValidationError,
     SpeechPerceiver,
@@ -190,59 +193,63 @@ def _normalize_action_rows(
     value: Any,
 ) -> tuple[
     list[list[str]],
-    int,
+    list[dict[str, Any]],
 ]:
-    """Normalize valid action triplets and count malformed entries."""
+    """Normalize actions with the canonical schema and report failures."""
 
     if not isinstance(value, list):
-        return [], 1
+        return [], [
+            {
+                "candidate": value,
+                "error_type": "TypeError",
+                "reason": "speech actions must be a list",
+            }
+        ]
 
     normalized: list[
         list[str]
     ] = []
 
-    invalid_count = 0
+    failures: list[dict[str, Any]] = []
 
     for item in value:
-        if (
-            not isinstance(
-                item,
-                Sequence,
-            )
-            or isinstance(
-                item,
-                (str, bytes),
-            )
-            or len(item) != 3
-        ):
-            invalid_count += 1
-            continue
+        try:
+            if (
+                isinstance(item, (str, bytes))
+                or not isinstance(item, Sequence)
+                or len(item) != 3
+            ):
+                raise ValueError(
+                    "speech action must contain exactly three fields"
+                )
 
-        subject, action, object_player = (
-            item
-        )
+            if not all(
+                isinstance(field, str)
+                and field.strip()
+                for field in item
+            ):
+                raise TypeError(
+                    "speech action fields must be non-empty strings"
+                )
 
-        if not all(
-            isinstance(part, str)
-            and part.strip()
-            for part in (
-                subject,
-                action,
-                object_player,
+            action = parse_speech_action(
+                item
             )
-        ):
-            invalid_count += 1
+        except (TypeError, ValueError, KeyError) as exc:
+            failures.append(
+                {
+                    "candidate": item,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc),
+                }
+            )
             continue
 
         normalized.append(
-            [
-                subject.strip(),
-                action.strip(),
-                object_player.strip(),
-            ]
+            action.to_list()
         )
 
-    return normalized, invalid_count
+    return normalized, failures
 
 
 def _action_keys(
@@ -462,7 +469,7 @@ def build_reparse_report(
 
         (
             old_actions,
-            old_invalid_count,
+            invalid_old_actions,
         ) = _normalize_action_rows(
             content.get(
                 "sp_actions",
@@ -471,7 +478,7 @@ def build_reparse_report(
         )
 
         invalid_old_action_count += (
-            old_invalid_count
+            len(invalid_old_actions)
         )
 
         parse_status = "ok"
@@ -502,18 +509,21 @@ def build_reparse_report(
 
                 (
                     new_actions,
-                    new_invalid_count,
+                    invalid_new_rows,
                 ) = _normalize_action_rows(
                     raw_new_actions
                 )
 
                 invalid_new_action_count += (
-                    new_invalid_count
+                    len(invalid_new_rows)
                 )
 
-                if new_invalid_count:
+                if invalid_new_rows:
                     parse_status = (
                         "invalid_parser_output"
+                    )
+                    invalid_new_actions = (
+                        invalid_new_rows
                     )
             except SpeechActionValidationError as exc:
                 invalid_new_action_count += (
@@ -603,7 +613,10 @@ def build_reparse_report(
                 for action in removed_keys
             ],
             "invalid_old_action_count": (
-                old_invalid_count
+                len(invalid_old_actions)
+            ),
+            "invalid_old_actions": (
+                invalid_old_actions
             ),
         }
 

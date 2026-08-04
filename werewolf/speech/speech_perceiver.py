@@ -471,7 +471,22 @@ player{speaker}: {speech}"""
                 "LLM response content is empty."
             )
 
-        if cls._is_empty_marker(text):
+        if strict:
+            meaningful_lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            ]
+
+            if (
+                len(meaningful_lines) == 1
+                and "`" not in meaningful_lines[0]
+                and cls._is_empty_marker(
+                    meaningful_lines[0]
+                )
+            ):
+                return []
+        elif cls._is_empty_marker(text):
             return []
 
         # The new ONUW-style format has priority.
@@ -485,11 +500,32 @@ player{speaker}: {speech}"""
 
         # Keep old JSON responses readable during migration.
         try:
-            return cls._extract_json_array(
+            json_actions = cls._extract_json_array(
                 text
             )
         except ValueError:
             pass
+        else:
+            if strict:
+                try:
+                    exact_json = json.loads(text)
+                except json.JSONDecodeError:
+                    exact_json = None
+
+                if not isinstance(exact_json, list):
+                    raise SpeechActionValidationError(
+                        [
+                            {
+                                "candidate": text,
+                                "reason": (
+                                    "legacy JSON action output contains "
+                                    "extra non-protocol text"
+                                ),
+                            }
+                        ]
+                    )
+
+            return json_actions
 
         if not strict and cls._contains_empty_marker(
             text
@@ -571,48 +607,70 @@ player{speaker}: {speech}"""
     ) -> list[list[str]]:
         """Extract strict ONUW-style pipe triplets from separate lines."""
 
-        cleaned_text = re.sub(
-            r"```(?:[a-zA-Z0-9_-]+)?\s*",
-            "",
-            response_text,
-            flags=re.IGNORECASE,
-        ).replace(
-            "```",
-            "",
-        )
+        if preserve_invalid:
+            cleaned_text = response_text
+        else:
+            cleaned_text = re.sub(
+                r"```(?:[a-zA-Z0-9_-]+)?\s*",
+                "",
+                response_text,
+                flags=re.IGNORECASE,
+            ).replace(
+                "```",
+                "",
+            )
 
         actions: list[list[str]] = []
+        failures: list[dict[str, Any]] = []
+        lines: list[tuple[str, str]] = []
 
         for raw_line in cleaned_text.splitlines():
-            line = raw_line.strip()
+            original_line = raw_line.strip()
 
-            if not line:
+            if not original_line:
                 continue
 
-            # Tolerate accidental bullets or numbered lists.
-            line = _BULLET_PREFIX_PATTERN.sub(
-                "",
-                line,
-                count=1,
+            if preserve_invalid:
+                line = original_line
+            else:
+                # Tolerate accidental bullets or numbered lists online.
+                line = _BULLET_PREFIX_PATTERN.sub(
+                    "",
+                    original_line,
+                    count=1,
+                )
+
+            lines.append(
+                (original_line, line)
             )
+
+        recognized_protocol = any(
+            re.search(r"[|｜]", line)
+            or cls._is_empty_marker(line)
+            for _, line in lines
+        )
+
+        for original_line, line in lines:
 
             match = _PIPE_TRIPLET_PATTERN.fullmatch(
                 line
             )
 
             if match is None:
-                if preserve_invalid and re.search(
-                    r"[|｜]",
-                    line,
-                ):
-                    actions.append(
-                        [
-                            part.strip()
-                            for part in re.split(
-                                r"[|｜]",
-                                line,
-                            )
-                        ]
+                if preserve_invalid and recognized_protocol:
+                    reason = (
+                        "NONE must be the only non-empty response line"
+                        if cls._is_empty_marker(line)
+                        else (
+                            "non-empty response line does not match "
+                            "the pipe triplet protocol"
+                        )
+                    )
+                    failures.append(
+                        {
+                            "candidate": original_line,
+                            "reason": reason,
+                        }
                     )
                 continue
 
@@ -628,6 +686,11 @@ player{speaker}: {speech}"""
                         "object"
                     ),
                 ]
+            )
+
+        if failures:
+            raise SpeechActionValidationError(
+                failures
             )
 
         return actions

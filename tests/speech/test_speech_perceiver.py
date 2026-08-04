@@ -721,19 +721,28 @@ class SpeechPerceiverTest(unittest.TestCase):
         self,
     ):
         responses = [
-            "player1 | support",
-            "player1 | support | player2 | extra",
-            json.dumps(
-                [
-                    {
-                        "subject": "player1",
-                        "action": "support",
-                    }
-                ]
-            )
+            (
+                "player1 | support",
+                "pipe triplet protocol",
+            ),
+            (
+                "player1 | support | player2 | extra",
+                "pipe triplet protocol",
+            ),
+            (
+                json.dumps(
+                    [
+                        {
+                            "subject": "player1",
+                            "action": "support",
+                        }
+                    ]
+                ),
+                "three-item sequence",
+            ),
         ]
 
-        for response in responses:
+        for response, error_pattern in responses:
             with self.subTest(response=response):
                 perceiver = SpeechPerceiver(
                     backend=FakeBackend(response),
@@ -747,7 +756,7 @@ class SpeechPerceiverTest(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     SpeechActionValidationError,
-                    "three-item sequence",
+                    error_pattern,
                 ):
                     perceiver.parse_strict(
                         1,
@@ -806,6 +815,101 @@ class SpeechPerceiverTest(unittest.TestCase):
             ),
             [],
         )
+
+    def test_strict_accepts_one_triplet_with_blank_lines(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "\n\t\nplayer1 | support | player2\n  \n"
+            ),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse_strict(
+                1,
+                "发言",
+                1,
+                "speech",
+            ),
+            [["player1", "support", "player2"]],
+        )
+
+    def test_strict_rejects_extra_non_protocol_lines(
+        self,
+    ):
+        valid_action = "player1 | support | player2"
+        responses = [
+            (
+                f"{valid_action}\n解释：这是抽取原因",
+                "解释：这是抽取原因",
+            ),
+            (
+                f"以下是结果：\n{valid_action}",
+                "以下是结果：",
+            ),
+            (
+                f"```\n{valid_action}\n```",
+                "```",
+            ),
+            (
+                f"- {valid_action}",
+                "- player1",
+            ),
+        ]
+
+        for response, invalid_line in responses:
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+
+                self.assertEqual(
+                    perceiver.parse(1, "发言", 1, "speech"),
+                    [["player1", "support", "player2"]],
+                )
+
+                with self.assertRaises(
+                    SpeechActionValidationError
+                ) as caught:
+                    perceiver.parse_strict(
+                        1,
+                        "发言",
+                        1,
+                        "speech",
+                    )
+
+                self.assertIn(
+                    invalid_line,
+                    str(caught.exception.failures),
+                )
+
+    def test_strict_rejects_none_mixed_with_other_content(
+        self,
+    ):
+        responses = [
+            "NONE\nplayer1 | support | player2",
+            "NONE\n解释：没有动作",
+        ]
+
+        for response in responses:
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+
+                with self.assertRaises(
+                    SpeechActionValidationError
+                ):
+                    perceiver.parse_strict(
+                        1,
+                        "发言",
+                        1,
+                        "speech",
+                    )
 
     def test_returns_empty_when_backend_raises(
         self,
