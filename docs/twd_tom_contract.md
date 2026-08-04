@@ -324,7 +324,11 @@ second-order checkpoints declare `observer_readout` as
 `cyclic_rotation_v1`. They additionally declare `observer_event_conditioning`
 as `cyclic_relative_player_relations_v1` and
 `second_order_subject_supervision` as
-`latest_completed_public_action_mask_v1`;
+`post_completed_public_speech_pre_next_action_v1`. Formal second-order samples
+are limited to a complete `public_speech` immediately followed by the next
+reasoning player's `turn_start`. All label-valid observer rows at that shared
+cutoff are supervised except the reasoning player's own row. Vote, phase,
+death, exile, and other system-event boundaries are excluded. New
 checkpoints missing or mismatching that architecture and supervision contract
 are rejected rather than converted. The first-order checkpoint contract is
 unchanged.
@@ -359,9 +363,8 @@ the fixed incidence projection above produces a `[7,7]` wolf-marginal matrix
 whose rows sum to two. Both are logged without logits, roles, private
 knowledge, or labels. No legacy `suspicion_matrix` alias is written. The result
 is not added to observations, prompts, actions, votes, environment state, or
-the original game log. Each record also contains
-`observer_update_mask [7]`, `latest_completed_public_action_actor_ids`, and
-`latest_completed_public_action_type`, calculated from the same latest action
-block used by formal supervision. Predictions remain present for all seven
-observers; an update-false row has no new observable actor evidence at this
-snapshot.
+the original game log. Each record also contains `supervision_boundary` and
+`observer_supervision_mask [7]`, calculated from the same completed-speech and
+other-player contract used by formal supervision. Predictions remain present
+for all seven observers; rows outside the formal supervision mask are logged
+but are not described as supervised.

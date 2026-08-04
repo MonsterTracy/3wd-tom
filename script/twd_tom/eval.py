@@ -235,7 +235,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         supervised_indices = dataset.second_order_supervised_indices()
         if not supervised_indices:
             raise ValueError(
-                "evaluation dataset contains no latest-action targets"
+                "evaluation dataset contains no post-speech other-player targets"
             )
         loader_dataset = Subset(dataset, supervised_indices)
     loader = DataLoader(

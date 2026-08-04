@@ -390,7 +390,9 @@ def build_data_loader(
     if config.tom_order == 2:
         eligible_indices = dataset.second_order_supervised_indices()
         if not eligible_indices:
-            raise ValueError("dataset has no latest-action observer targets")
+            raise ValueError(
+                "dataset has no post-speech other-player observer targets"
+            )
         loader_dataset = Subset(
             dataset,
             eligible_indices,
@@ -435,15 +437,33 @@ def build_training_data_loaders(
     return train_loader, train_dataset, validation_loader, validation_dataset
 
 
+def _second_order_batch_subject_mask(
+    batch: Mapping[str, torch.Tensor],
+) -> torch.Tensor:
+    reasoning_player_id = batch.get("reasoning_player_id")
+    boundary = batch.get("post_completed_public_speech_pre_next_action")
+    if reasoning_player_id is None or boundary is None:
+        raise ValueError("second-order batch requires formal supervision fields")
+    if not torch.all(boundary):
+        raise ValueError(
+            "second-order batch contains a non-speech-boundary snapshot"
+        )
+    return second_order_effective_subject_mask(
+        batch["subject_mask"],
+        reasoning_player_id,
+    )
+
+
 def count_supervised_subjects(data_loader: DataLoader) -> int:
     total = 0
     for batch in data_loader:
         mask = batch["subject_mask"]
-        if "latest_completed_public_action_mask" in batch:
-            mask = second_order_effective_subject_mask(
-                mask,
-                batch["latest_completed_public_action_mask"],
-            )
+        has_second_order_fields = (
+            "reasoning_player_id" in batch
+            or "post_completed_public_speech_pre_next_action" in batch
+        )
+        if has_second_order_fields:
+            mask = _second_order_batch_subject_mask(batch)
         total += int(mask.sum().item())
     return total
 
@@ -469,7 +489,10 @@ def _move_batch_to_device(
     for field in ("known_werewolves", "known_non_werewolves"):
         if field in batch:
             moved[field] = batch[field].to(device)
-    for field in ("latest_completed_public_action_mask",):
+    for field in (
+        "reasoning_player_id",
+        "post_completed_public_speech_pre_next_action",
+    ):
         if field in batch:
             moved[field] = batch[field].to(device)
     return moved
@@ -576,10 +599,10 @@ class MetricAccumulator:
                 "mean_predicted_observer_pairwise_tv",
             ):
                 result.setdefault(name, 0.0)
-            result["latest_action_valid_subject_count"] = (
+            result["post_speech_other_player_valid_subject_count"] = (
                 self.valid_subject_count
             )
-            result["latest_action_snapshot_fraction"] = (
+            result["post_speech_supervised_snapshot_fraction"] = (
                 self.processed_snapshot_count / self.source_snapshot_count
             )
         return result
@@ -592,12 +615,7 @@ def _effective_subject_mask(
     subject_mask = batch["subject_mask"]
     if model.tom_order == 1:
         return subject_mask.to(dtype=torch.bool)
-    update_mask = batch.get("latest_completed_public_action_mask")
-    if update_mask is None:
-        raise ValueError(
-            "second-order batch requires latest_completed_public_action_mask"
-        )
-    return second_order_effective_subject_mask(subject_mask, update_mask)
+    return _second_order_batch_subject_mask(batch)
 
 
 def _targets_for_loss(

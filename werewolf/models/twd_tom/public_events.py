@@ -238,38 +238,31 @@ def public_speech_actions(events: Any) -> list[list[str]]:
     ]
 
 
-def latest_completed_public_action(
+def is_post_completed_public_speech_pre_next_action(
     events: Any,
-) -> tuple[tuple[int, ...], str | None]:
-    """Return actors and type for the latest completed public action block."""
+    *,
+    reasoning_player_id: int,
+) -> bool:
+    """Return whether this is the formal synchronized ToM2 boundary."""
 
-    for event in reversed(normalize_public_events(events)):
-        event_type = event["event_type"]
-        if event_type == "public_speech":
-            actors = {event["speaker"]}
-            actors.update(action[0] for action in event["sp_actions"])
-            return (
-                tuple(sorted(PLAYER_TO_ID[player] for player in actors)),
-                event_type,
-            )
-        if event_type == "vote_result":
-            actor_ids = tuple(
-                sorted(PLAYER_TO_ID[vote["voter"]] for vote in event["votes"])
-            )
-            if actor_ids:
-                return actor_ids, event_type
-    return (), None
-
-
-def latest_completed_public_action_mask(events: Any) -> tuple[bool, ...]:
-    """Mark only actors in the latest completed public action block."""
-
-    actor_ids, _action_type = latest_completed_public_action(events)
-    actor_id_set = set(actor_ids)
-    return tuple(
-        player_id in actor_id_set
-        for player_id in range(1, len(PLAYER_NAMES) + 1)
-    )
+    if (
+        isinstance(reasoning_player_id, bool)
+        or not isinstance(reasoning_player_id, int)
+        or not 1 <= reasoning_player_id <= len(PLAYER_NAMES)
+    ):
+        raise ValueError("reasoning_player_id must be an integer in [1, 7]")
+    normalized = normalize_public_events(events)
+    if len(normalized) < 2:
+        return False
+    current_turn = normalized[-1]
+    if (
+        current_turn["event_type"] != "turn_start"
+        or PLAYER_TO_ID[current_turn["speaker"]] != reasoning_player_id
+    ):
+        raise ValueError(
+            "public events must end with the reasoning player's turn_start"
+        )
+    return normalized[-2]["event_type"] == "public_speech"
 
 
 def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
@@ -368,8 +361,7 @@ __all__ = [
     "copy_public_events",
     "normalize_public_event",
     "normalize_public_events",
-    "latest_completed_public_action",
-    "latest_completed_public_action_mask",
+    "is_post_completed_public_speech_pre_next_action",
     "parse_public_phase",
     "public_event_digest",
     "public_speech_actions",

@@ -44,7 +44,10 @@ from werewolf.models.twd_tom.belief_backbone import (
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
-from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
+from werewolf.models.twd_tom.dataset import (
+    CYCLIC_ROTATION_VERSION,
+    second_order_effective_subject_mask,
+)
 from werewolf.models.twd_tom.schema import (
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
@@ -325,7 +328,7 @@ def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
 
 
 @pytest.mark.parametrize("shuffle", [False, True])
-def test_second_order_loader_filters_zero_latest_action_indices(
+def test_second_order_loader_keeps_only_completed_speech_boundaries(
     tmp_path,
     shuffle,
 ):
@@ -347,9 +350,10 @@ def test_second_order_loader_filters_zero_latest_action_indices(
     assert isinstance(loader.dataset, Subset)
     assert tuple(loader.dataset.indices) == (1,)
     batch = next(iter(loader))
-    assert (
-        batch["subject_mask"]
-        & batch["latest_completed_public_action_mask"]
+    assert batch["post_completed_public_speech_pre_next_action"].all()
+    assert second_order_effective_subject_mask(
+        batch["subject_mask"],
+        batch["reasoning_player_id"],
     ).any()
 
 
@@ -381,9 +385,10 @@ def test_formal_second_order_loader_reads_first_batch(
     batch = next(iter(loader))
     assert len(dataset) > 0
     assert batch["subject_mask"].shape[1:] == (7,)
-    assert (
-        batch["subject_mask"]
-        & batch["latest_completed_public_action_mask"]
+    assert batch["post_completed_public_speech_pre_next_action"].all()
+    assert second_order_effective_subject_mask(
+        batch["subject_mask"],
+        batch["reasoning_player_id"],
     ).any(dim=1).all()
 
 
@@ -621,11 +626,13 @@ def test_one_batch_train_validation_smoke_and_best_eval(
             best["train_metrics"],
             best["validation_metrics"],
         ):
-            assert metrics["latest_action_valid_subject_count"] >= 1
+            assert metrics["post_speech_other_player_valid_subject_count"] >= 1
             assert metrics["valid_subject_count"] == metrics[
-                "latest_action_valid_subject_count"
+                "post_speech_other_player_valid_subject_count"
             ]
-            assert 0 < metrics["latest_action_snapshot_fraction"] <= 1
+            assert 0 < metrics[
+                "post_speech_supervised_snapshot_fraction"
+            ] <= 1
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
@@ -670,7 +677,7 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     assert loss.grad_fn is not None
 
 
-def test_effective_subject_mask_is_second_order_latest_action_intersection_only():
+def test_effective_subject_mask_excludes_only_the_reasoning_player():
     first_order = ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=8),
         tom_order=1,
@@ -680,19 +687,33 @@ def test_effective_subject_mask_is_second_order_latest_action_intersection_only(
         tom_order=2,
     )
     subject_mask = torch.tensor([[True, True, False, True, False, False, False]])
-    update_mask = torch.tensor([[True, False, True, False, False, False, False]])
     batch = {
         "subject_mask": subject_mask,
-        "latest_completed_public_action_mask": update_mask,
+        "reasoning_player_id": torch.tensor([4]),
+        "post_completed_public_speech_pre_next_action": torch.tensor([True]),
     }
     assert torch.equal(_effective_subject_mask(first_order, batch), subject_mask)
     assert torch.equal(
         _effective_subject_mask(second_order, batch),
-        subject_mask & update_mask,
+        torch.tensor([[True, True, False, False, False, False, False]]),
     )
 
 
-def test_second_order_loss_aggregates_only_latest_action_rows():
+def test_effective_subject_mask_rejects_non_speech_boundary():
+    model = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=8),
+        tom_order=2,
+    )
+    batch = {
+        "subject_mask": torch.ones((1, 7), dtype=torch.bool),
+        "reasoning_player_id": torch.tensor([4]),
+        "post_completed_public_speech_pre_next_action": torch.tensor([False]),
+    }
+    with pytest.raises(ValueError, match="non-speech-boundary"):
+        _effective_subject_mask(model, batch)
+
+
+def test_second_order_loss_aggregates_all_valid_other_player_rows():
     logits = torch.zeros((1, 7, 21))
     targets = torch.zeros_like(logits)
     targets[0, 0, 0] = 1
@@ -702,9 +723,6 @@ def test_second_order_loss_aggregates_only_latest_action_rows():
     original_mask = torch.tensor(
         [[True, True, False, False, False, False, False]]
     )
-    update_mask = torch.tensor(
-        [[True, False, False, False, False, False, False]]
-    )
     second_order = ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=8),
         tom_order=2,
@@ -713,14 +731,15 @@ def test_second_order_loss_aggregates_only_latest_action_rows():
         second_order,
         {
             "subject_mask": original_mask,
-            "latest_completed_public_action_mask": update_mask,
+            "reasoning_player_id": torch.tensor([1]),
+            "post_completed_public_speech_pre_next_action": torch.tensor([True]),
         },
     )
     loss_targets = _targets_for_loss(second_order, targets, effective)
-    assert targets[0, 1, 1] == 1
-    assert loss_targets[0, 1].count_nonzero() == 0
+    assert targets[0, 0, 0] == 1
+    assert loss_targets[0, 0].count_nonzero() == 0
     actual = masked_distribution_cross_entropy(logits, loss_targets, effective)
-    expected = -torch.log_softmax(logits[0, 0], dim=-1)[0]
+    expected = -torch.log_softmax(logits[0, 1], dim=-1)[1]
     torch.testing.assert_close(actual, expected)
 
 

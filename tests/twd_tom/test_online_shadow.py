@@ -139,9 +139,8 @@ def test_strict_load_and_public_only_probability_matrix(
     assert "suspicion_matrix" not in record
     assert record["event_idx"] == public_events[-1]["event_idx"]
     assert record["public_event_count"] == len(public_events)
-    assert record["observer_update_mask"] == [False] * 7
-    assert record["latest_completed_public_action_actor_ids"] == []
-    assert record["latest_completed_public_action_type"] is None
+    assert record["observer_supervision_mask"] == [False] * 7
+    assert record["supervision_boundary"] is None
     assert "observer_evidence_mask" not in record
     assert "observer_public_action_count" not in record
 
@@ -159,7 +158,7 @@ def test_strict_load_and_public_only_probability_matrix(
         assert forbidden not in serialized
 
 
-def test_shadow_records_only_latest_completed_public_action_block(
+def test_shadow_records_all_other_players_after_a_completed_speech(
     tmp_path,
     second_checkpoint,
 ):
@@ -174,22 +173,25 @@ def test_shadow_records_only_latest_completed_public_action_block(
             speaker_id=2,
             public_events=public_events,
         )
-    assert record["observer_update_mask"] == [
+    assert record["observer_supervision_mask"] == [
+        True,
         False,
         True,
         True,
-        False,
-        False,
-        False,
-        False,
+        True,
+        True,
+        True,
     ]
-    assert record["latest_completed_public_action_actor_ids"] == [2, 3]
-    assert record["latest_completed_public_action_type"] == "public_speech"
+    assert record["supervision_boundary"] == (
+        "post_completed_public_speech_pre_next_action_v1"
+    )
     assert len(record["pair_probability_matrix"]) == 7
     assert len(record["wolf_marginal_matrix"]) == 7
 
 
-def test_shadow_update_mask_matches_dataset(tmp_path, second_checkpoint):
+def test_shadow_supervision_mask_matches_dataset_reasoning_player(
+    tmp_path, second_checkpoint
+):
     sample = make_training_sample(2, with_latest_action=True)
     dataset = TWDToMDataset([sample], tom_order=2)
     item = dataset[0]
@@ -200,9 +202,12 @@ def test_shadow_update_mask_matches_dataset(tmp_path, second_checkpoint):
             speaker_id=sample["speaker_id"],
             public_events=sample["public_events"],
         )
-    assert record["observer_update_mask"] == item[
-        "latest_completed_public_action_mask"
-    ].tolist()
+    expected = [
+        player_id != item["reasoning_player_id"].item()
+        for player_id in range(1, 8)
+    ]
+    assert record["observer_supervision_mask"] == expected
+    assert item["post_completed_public_speech_pre_next_action"]
 
 
 def test_old_seven_class_and_first_order_checkpoints_are_rejected(
@@ -432,9 +437,8 @@ def test_minimal_game_fixture_writes_one_real_shadow_record(
     assert len(records[0]["pair_probability_matrix"][0]) == 21
     assert len(records[0]["wolf_marginal_matrix"]) == 7
     assert len(records[0]["wolf_marginal_matrix"][0]) == 7
-    assert records[0]["observer_update_mask"] == [False] * 7
-    assert records[0]["latest_completed_public_action_actor_ids"] == []
-    assert records[0]["latest_completed_public_action_type"] is None
+    assert records[0]["observer_supervision_mask"] == [False] * 7
+    assert records[0]["supervision_boundary"] is None
     assert "suspicion_matrix" not in records[0]
 
 

@@ -14,8 +14,7 @@ from script.twd_tom.eval import build_model_from_checkpoint, load_checkpoint
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.dataset import TOM_INPUT_SCOPES
 from werewolf.models.twd_tom.public_events import (
-    latest_completed_public_action,
-    latest_completed_public_action_mask,
+    is_post_completed_public_speech_pre_next_action,
     parse_public_phase,
 )
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
@@ -24,6 +23,7 @@ from werewolf.models.twd_tom.schema import (
     NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
+    SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
     normalize_player,
 )
@@ -142,8 +142,9 @@ class SecondOrderToMShadow:
                     "second-order shadow model returned no wolf marginals"
                 )
         latency_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
-        latest_actor_ids, latest_action_type = latest_completed_public_action(
-            snapshot.public_events
+        supervision_boundary = is_post_completed_public_speech_pre_next_action(
+            snapshot.public_events,
+            reasoning_player_id=speaker_id,
         )
 
         pair_row_sums = pair_probabilities.sum(dim=-1)
@@ -188,13 +189,15 @@ class SecondOrderToMShadow:
             "pair_ordering": PAIR_ORDERING,
             "player_ordering": list(CANONICAL_PLAYER_ORDERING),
             "public_event_count": len(snapshot.public_events),
-            "observer_update_mask": list(
-                latest_completed_public_action_mask(snapshot.public_events)
+            "supervision_boundary": (
+                SECOND_ORDER_SUBJECT_SUPERVISION
+                if supervision_boundary
+                else None
             ),
-            "latest_completed_public_action_actor_ids": list(
-                latest_actor_ids
-            ),
-            "latest_completed_public_action_type": latest_action_type,
+            "observer_supervision_mask": [
+                supervision_boundary and player_id != speaker_id
+                for player_id in range(1, NUM_PLAYERS + 1)
+            ],
             "pair_probability_matrix": (
                 pair_probabilities[0].detach().cpu().tolist()
             ),

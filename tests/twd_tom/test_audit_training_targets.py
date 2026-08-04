@@ -53,21 +53,20 @@ def test_seven_epoch_rotation_audit_is_seat_symmetric_and_read_only(tmp_path):
     assert before["snapshot_count"] == validation["snapshot_count"] == 2
     assert after["snapshot_count"] == 14
     for summary in (before, after, validation):
-        assert 0 < summary["update_valid_observer_row_count"] <= summary[
+        assert 0 < summary["supervised_other_player_row_count"] <= summary[
             "valid_observer_row_count"
         ]
-        assert 0 < summary["latest_action_snapshot_fraction"] < 1
-        assert summary["no_latest_completed_public_action_snapshot_count"] > 0
-        assert "update_conditioned_target_pair_entropy" in summary
-        assert "update_conditioned_target_marginal_spread" in summary
-        assert "update_conditioned_target_observer_pairwise_tv" in summary
-        assert set(summary["update_rows_by_actor_id"]) == set(
+        assert 0 < summary["supervised_snapshot_fraction"] < 1
+        assert summary["non_speech_boundary_snapshot_count"] > 0
+        assert "supervised_target_pair_entropy" in summary
+        assert "supervised_target_marginal_spread" in summary
+        assert "supervised_target_observer_pairwise_tv" in summary
+        assert set(summary["supervised_rows_by_observer_id"]) == set(
             PLAYER_NAMES
         )
-        assert summary["multi_actor_speech_snapshot_count"] == 0
     assert before["valid_observer_count_per_snapshot_distribution"] == {
         "0": 1,
-        "1": 1,
+        "3": 1,
     }
     assert after["absolute_player_marginal_mean_gap"] == pytest.approx(0.0)
     assert all(

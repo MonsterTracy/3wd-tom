@@ -19,8 +19,7 @@ from werewolf.models.twd_tom.dataset import (
     second_order_effective_subject_mask,
 )
 from werewolf.models.twd_tom.public_events import (
-    latest_completed_public_action,
-    latest_completed_public_action_mask,
+    is_post_completed_public_speech_pre_next_action,
     structured_event_tokens,
 )
 from werewolf.models.twd_tom.schema import (
@@ -119,11 +118,14 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
     assert item["pair_targets"].shape == (7, 21)
-    assert item["latest_completed_public_action_mask"].shape == (7,)
+    assert item["reasoning_player_id"].shape == ()
+    assert isinstance(
+        item["post_completed_public_speech_pre_next_action"], bool
+    )
     assert "suspicion_targets" not in item
 
 
-def test_latest_completed_action_mask_is_zero_before_first_speech():
+def test_first_turn_is_not_a_completed_speech_boundary():
     events = [
         {
             "event_idx": 0,
@@ -136,11 +138,12 @@ def test_latest_completed_action_mask_is_zero_before_first_speech():
             "speaker": "player4",
         },
     ]
-    assert latest_completed_public_action(events) == ((), None)
-    assert latest_completed_public_action_mask(events) == (False,) * 7
+    assert not is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=4
+    )
 
 
-def test_system_events_do_not_create_latest_action_actors():
+def test_system_events_do_not_create_a_completed_speech_boundary():
     events = [
         {
             "event_idx": 0,
@@ -163,11 +166,12 @@ def test_system_events_do_not_create_latest_action_actors():
             "speaker": "player4",
         },
     ]
-    assert latest_completed_public_action(events) == ((), None)
-    assert latest_completed_public_action_mask(events) == (False,) * 7
+    assert not is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=4
+    )
 
 
-def test_latest_speech_actor_replaces_earlier_actor_without_accumulating():
+def test_completed_speech_immediately_before_current_turn_is_the_boundary():
     events = [
         {
             "event_idx": 0,
@@ -192,15 +196,8 @@ def test_latest_speech_actor_replaces_earlier_actor_without_accumulating():
             "speaker": "player5",
         },
     ]
-    assert latest_completed_public_action(events) == ((4,), "public_speech")
-    assert latest_completed_public_action_mask(events) == (
-        False,
-        False,
-        False,
-        True,
-        False,
-        False,
-        False,
+    assert is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=5
     )
     events.extend(
         [
@@ -218,19 +215,12 @@ def test_latest_speech_actor_replaces_earlier_actor_without_accumulating():
             },
         ]
     )
-    assert latest_completed_public_action(events) == ((5,), "public_speech")
-    assert latest_completed_public_action_mask(events) == (
-        False,
-        False,
-        False,
-        False,
-        True,
-        False,
-        False,
+    assert is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=6
     )
 
 
-def test_latest_speech_uses_speaker_and_action_subject_not_object():
+def test_nested_speech_actions_do_not_change_the_synchronized_boundary():
     events = [
         {
             "event_idx": 0,
@@ -250,14 +240,12 @@ def test_latest_speech_uses_speaker_and_action_subject_not_object():
             "speaker": "player5",
         },
     ]
-    assert latest_completed_public_action(events) == (
-        (3, 4),
-        "public_speech",
+    assert is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=5
     )
-    assert latest_completed_public_action_mask(events)[1] is False
 
 
-def test_latest_vote_block_uses_voters_not_targets_and_skips_system_events():
+def test_vote_and_later_system_events_are_not_speech_boundaries():
     events = [
         {
             "event_idx": 0,
@@ -293,16 +281,18 @@ def test_latest_vote_block_uses_voters_not_targets_and_skips_system_events():
             "speaker": "player5",
         },
     ]
-    assert latest_completed_public_action(events) == ((1, 3), "vote_result")
-    assert latest_completed_public_action_mask(events) == (
-        True,
-        False,
-        True,
-        False,
-        False,
-        False,
-        False,
+    assert not is_post_completed_public_speech_pre_next_action(
+        events, reasoning_player_id=5
     )
+
+
+def test_boundary_rejects_a_reasoning_player_other_than_current_turn():
+    events = make_full_history_training_sample()["public_events"]
+    with pytest.raises(ValueError, match="reasoning player"):
+        is_post_completed_public_speech_pre_next_action(
+            events,
+            reasoning_player_id=7,
+        )
 
 
 def test_second_order_indices_filter_zero_effective_mask_deterministically():
@@ -321,29 +311,25 @@ def test_second_order_indices_accept_sparse_normalized_pair_targets():
     item = dataset[0]
     expected = second_order_effective_subject_mask(
         item["subject_mask"],
-        item["latest_completed_public_action_mask"],
+        item["reasoning_player_id"],
     ).any()
     assert dataset.second_order_supervised_indices() == ((0,) if expected else ())
 
 
-def test_second_order_indices_filter_latest_actor_without_subject_target():
+def test_second_order_indices_filter_when_only_reasoning_player_has_target():
     dataset = TWDToMDataset(
         [second_order_sample(with_latest_action=True)],
         tom_order=2,
     )
-    actor_ids, _action_type = latest_completed_public_action(
-        dataset.samples[0]["public_events"]
-    )
-    for player_id in actor_ids:
-        dataset.samples[0]["_pair_targets"].pop(
-            PLAYER_NAMES[player_id - 1],
-            None,
-        )
+    reasoning_player = PLAYER_NAMES[dataset.samples[0]["speaker_id"] - 1]
+    for player in PLAYER_NAMES:
+        if player != reasoning_player:
+            dataset.samples[0]["_pair_targets"].pop(player, None)
     item = dataset[0]
-    assert item["latest_completed_public_action_mask"].any()
+    assert item["post_completed_public_speech_pre_next_action"]
     assert not second_order_effective_subject_mask(
         item["subject_mask"],
-        item["latest_completed_public_action_mask"],
+        item["reasoning_player_id"],
     ).any()
     assert dataset.second_order_supervised_indices() == ()
 
@@ -360,34 +346,49 @@ def test_second_order_indices_do_not_depend_on_target_probability_values():
 
 
 @pytest.mark.parametrize(
-    ("subject_mask", "update_mask", "error", "match"),
+    ("subject_mask", "reasoning_player_id", "error", "match"),
     [
-        ([True] * 7, torch.ones(7, dtype=torch.bool), TypeError, "torch.Tensor"),
-        (torch.ones(7, dtype=torch.bool), [True] * 7, TypeError, "torch.Tensor"),
-        (torch.ones(7), torch.ones(7, dtype=torch.bool), TypeError, "dtype"),
-        (torch.ones(7, dtype=torch.bool), torch.ones(7), TypeError, "dtype"),
+        ([True] * 7, torch.tensor(1), TypeError, "torch.Tensor"),
+        (torch.ones(7, dtype=torch.bool), 1, TypeError, "torch.Tensor"),
+        (torch.ones(7), torch.tensor(1), TypeError, "dtype"),
+        (torch.ones(7, dtype=torch.bool), torch.tensor(1.0), TypeError, "integral"),
         (
-            torch.ones(7, dtype=torch.bool),
             torch.ones(1, 7, dtype=torch.bool),
+            torch.tensor(1),
             ValueError,
-            "shapes must match",
+            "batch dimensions",
         ),
         (
             torch.ones(6, dtype=torch.bool),
-            torch.ones(6, dtype=torch.bool),
+            torch.tensor(1),
             ValueError,
             "last dimension must be 7",
         ),
+        (torch.ones(7, dtype=torch.bool), torch.tensor(0), ValueError, r"\[1, 7\]"),
     ],
 )
 def test_effective_subject_mask_rejects_non_boolean_or_wrong_shape(
     subject_mask,
-    update_mask,
+    reasoning_player_id,
     error,
     match,
 ):
     with pytest.raises(error, match=match):
-        second_order_effective_subject_mask(subject_mask, update_mask)
+        second_order_effective_subject_mask(subject_mask, reasoning_player_id)
+
+
+def test_effective_subject_mask_keeps_all_valid_other_players():
+    subject_mask = torch.tensor(
+        [[True, False, True, True, False, True, True]]
+    )
+    actual = second_order_effective_subject_mask(
+        subject_mask,
+        torch.tensor([4]),
+    )
+    assert torch.equal(
+        actual,
+        torch.tensor([[True, False, True, False, False, True, True]]),
+    )
 
 
 def test_first_order_pair_projection_semantics_are_unchanged():
@@ -466,7 +467,10 @@ def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
     second = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
     second_batch = collate_twd_tom_samples([second])
     assert second_batch["pair_targets"].shape == (1, 7, 21)
-    assert second_batch["latest_completed_public_action_mask"].shape == (1, 7)
+    assert second_batch["reasoning_player_id"].shape == (1,)
+    assert second_batch[
+        "post_completed_public_speech_pre_next_action"
+    ].shape == (1,)
     assert "suspicion_targets" not in second_batch
     assert "known_werewolves" not in second_batch
     assert "known_non_werewolves" not in second_batch

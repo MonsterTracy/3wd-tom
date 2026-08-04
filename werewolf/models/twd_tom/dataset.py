@@ -18,8 +18,7 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
-    latest_completed_public_action,
-    latest_completed_public_action_mask,
+    is_post_completed_public_speech_pre_next_action,
     normalize_public_events,
     parse_public_phase,
     public_event_digest,
@@ -521,42 +520,51 @@ def load_twd_tom_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 def second_order_effective_subject_mask(
     subject_mask: torch.Tensor,
-    latest_completed_action_mask: torch.Tensor,
+    reasoning_player_id: torch.Tensor,
 ) -> torch.Tensor:
-    """Return observers valid under the formal second-order supervision mask."""
+    """Return valid observers other than the current reasoning player."""
 
     if not isinstance(subject_mask, torch.Tensor):
         raise TypeError(
             "subject_mask must be a torch.Tensor; "
             f"got {type(subject_mask).__name__}"
         )
-    if not isinstance(latest_completed_action_mask, torch.Tensor):
+    if not isinstance(reasoning_player_id, torch.Tensor):
         raise TypeError(
-            "latest_completed_public_action_mask must be a torch.Tensor; "
-            f"got {type(latest_completed_action_mask).__name__}"
+            "reasoning_player_id must be a torch.Tensor; "
+            f"got {type(reasoning_player_id).__name__}"
         )
     if subject_mask.dtype is not torch.bool:
         raise TypeError(
             f"subject_mask dtype must be torch.bool; got {subject_mask.dtype}"
         )
-    if latest_completed_action_mask.dtype is not torch.bool:
+    if reasoning_player_id.dtype not in (torch.int32, torch.int64):
         raise TypeError(
-            "latest_completed_public_action_mask dtype must be torch.bool; "
-            f"got {latest_completed_action_mask.dtype}"
+            "reasoning_player_id dtype must be integral; "
+            f"got {reasoning_player_id.dtype}"
         )
-    if subject_mask.shape != latest_completed_action_mask.shape:
+    if reasoning_player_id.shape != subject_mask.shape[:-1]:
         raise ValueError(
-            "effective mask shapes must match; "
-            f"subject_mask={tuple(subject_mask.shape)}, "
-            "latest_completed_public_action_mask="
-            f"{tuple(latest_completed_action_mask.shape)}"
+            "reasoning_player_id shape must match subject_mask batch dimensions; "
+            f"reasoning_player_id={tuple(reasoning_player_id.shape)}, "
+            f"subject_mask={tuple(subject_mask.shape)}"
         )
     if subject_mask.ndim == 0 or subject_mask.shape[-1] != NUM_PLAYERS:
         raise ValueError(
             "effective mask last dimension must be 7; "
             f"got shape {tuple(subject_mask.shape)}"
         )
-    return subject_mask & latest_completed_action_mask
+    if torch.any((reasoning_player_id < 1) | (reasoning_player_id > NUM_PLAYERS)):
+        raise ValueError("reasoning_player_id values must be in [1, 7]")
+    canonical_observer_ids = torch.arange(
+        1,
+        NUM_PLAYERS + 1,
+        device=subject_mask.device,
+    )
+    other_player_mask = canonical_observer_ids != reasoning_player_id.unsqueeze(
+        -1
+    ).to(device=subject_mask.device)
+    return subject_mask & other_player_mask
 
 
 class TWDToMDataset(Dataset):
@@ -641,7 +649,7 @@ class TWDToMDataset(Dataset):
         self._epoch = epoch
 
     def second_order_supervised_indices(self) -> tuple[int, ...]:
-        """Return deterministic indices with a valid latest-action target."""
+        """Return speech-boundary samples with valid other-player targets."""
 
         if self.tom_order != 2:
             raise ValueError(
@@ -650,9 +658,11 @@ class TWDToMDataset(Dataset):
         eligible = []
         for index in range(len(self)):
             item = self[index]
+            if not item["post_completed_public_speech_pre_next_action"]:
+                continue
             effective_mask = second_order_effective_subject_mask(
                 item["subject_mask"],
-                item["latest_completed_public_action_mask"],
+                item["reasoning_player_id"],
             )
             if effective_mask.any().item():
                 eligible.append(index)
@@ -705,19 +715,17 @@ class TWDToMDataset(Dataset):
             "metadata": metadata,
         }
         if self.tom_order == 2:
-            actor_ids, action_type = latest_completed_public_action(
-                sample["public_events"]
+            item["reasoning_player_id"] = torch.tensor(
+                sample["speaker_id"], dtype=torch.int64
             )
-            item["latest_completed_public_action_mask"] = torch.tensor(
-                latest_completed_public_action_mask(sample["public_events"]),
-                dtype=torch.bool,
+            boundary = is_post_completed_public_speech_pre_next_action(
+                sample["public_events"],
+                reasoning_player_id=sample["speaker_id"],
             )
-            item["metadata"]["latest_completed_public_action_actor_ids"] = (
-                list(actor_ids)
-            )
-            item["metadata"]["latest_completed_public_action_type"] = (
-                action_type
-            )
+            item["post_completed_public_speech_pre_next_action"] = boundary
+            item["metadata"][
+                "post_completed_public_speech_pre_next_action"
+            ] = boundary
         else:
             known_wolves = torch.zeros((NUM_PLAYERS, NUM_PLAYERS), dtype=torch.float32)
             known_non_wolves = torch.zeros_like(known_wolves)
@@ -784,14 +792,19 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         )
     else:
         if any(
-            "latest_completed_public_action_mask" not in item
+            "reasoning_player_id" not in item
+            or "post_completed_public_speech_pre_next_action" not in item
             for item in batch
         ):
             raise ValueError(
-                "second-order samples require latest public action fields"
+                "second-order samples require formal supervision fields"
             )
-        result["latest_completed_public_action_mask"] = torch.stack(
-            [item["latest_completed_public_action_mask"] for item in batch]
+        result["reasoning_player_id"] = torch.stack(
+            [item["reasoning_player_id"] for item in batch]
+        )
+        result["post_completed_public_speech_pre_next_action"] = torch.tensor(
+            [item["post_completed_public_speech_pre_next_action"] for item in batch],
+            dtype=torch.bool,
         )
     return result
 
