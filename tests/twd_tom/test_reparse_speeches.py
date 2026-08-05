@@ -715,6 +715,9 @@ backends:
   fake:
     type: openai_compatible
     api_key_env: FAKE_API_KEY
+    base_url: http://127.0.0.1:8000/v1
+    default_model: fake-model
+    supports_json_schema: true
 parser:
   backend: fake
   model: fake-model
@@ -730,6 +733,7 @@ env_config:
 
     fake_backend = object()
     fake_parser = FakeParser()
+    backend_load_calls = []
 
     monkeypatch.setattr(
         reparse_module,
@@ -746,12 +750,21 @@ env_config:
         },
     )
 
+    def fake_load_named_backends(
+        config,
+        env_file=None,
+        *,
+        max_retries=None,
+    ):
+        backend_load_calls.append(
+            (config, env_file, max_retries)
+        )
+        return {"fake": fake_backend}
+
     monkeypatch.setattr(
         reparse_module,
         "load_named_backends",
-        lambda config, env_file=None: {
-            "fake": fake_backend,
-        },
+        fake_load_named_backends,
     )
 
     monkeypatch.setattr(
@@ -800,6 +813,22 @@ env_config:
     assert result[
         "new_nonempty_event_count"
     ] == 1
+
+    assert len(backend_load_calls) == 1
+    loaded_config, env_file, max_retries = backend_load_calls[0]
+    assert env_file is None
+    assert max_retries == 0
+    assert loaded_config["backends"]["fake"] == {
+        "type": "openai_compatible",
+        "api_key_env": "FAKE_API_KEY",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "default_model": "fake-model",
+        "supports_json_schema": True,
+    }
+    assert loaded_config["parser"] == {
+        "backend": "fake",
+        "model": "fake-model",
+    }
 
     assert output_path.is_file()
 

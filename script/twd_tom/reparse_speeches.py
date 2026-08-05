@@ -945,6 +945,7 @@ def run_reparse(
             env_file=(
                 config.env_file
             ),
+            max_retries=0,
         )
     )
 
