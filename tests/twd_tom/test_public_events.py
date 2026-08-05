@@ -3,11 +3,16 @@ from copy import deepcopy
 import pytest
 
 from werewolf.models.twd_tom.public_events import (
+    PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
     public_event_digest,
     structured_event_tokens,
     structured_input_digest,
 )
+
+
+def test_public_event_schema_identifies_extended_speech_actions():
+    assert PUBLIC_EVENT_SCHEMA_VERSION == "classic7_public_event_sequence_v2"
 
 
 def _events():

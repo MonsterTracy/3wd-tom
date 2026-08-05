@@ -19,7 +19,7 @@ Each public speech follows:
 `H_t -> B_t -> A_t -> H_{t+1}`
 
 `H_t` is the already committed prefix of the sole append-only
-`public_events` history (`classic7_public_event_sequence_v1`). It contains
+`public_events` history (`classic7_public_event_sequence_v2`). It contains
 public phase changes, turn starts, complete public speeches, revealed
 voter-target results, exile results, and death announcements in publication
 order. Before the current speaker generates `A_t`, every alive observer
@@ -34,9 +34,24 @@ Each `public_speech` stores the final public `raw_text` and its exact
 not encode `raw_text`. `public_event_digest` covers the full canonical event
 JSON including text; `structured_input_digest` covers exactly the raw-text-free
 pre-token projection. Model features contain only that structured projection.
+The v2 speech-action contract keeps the original seven action IDs and appends
+`check_as_good`, `check_as_werewolf`, `save`, `poison`, `guard`, and
+`vote_intent`, all in the same `[speaker, action, target_player]` form.
 Reports, roles, private observations,
 actual roles, teammate information, Seer checks, Witch knife targets, and all
 future events are supervision-side data only.
+
+### Speech action semantic modules and non-redundancy
+
+The 13 actions remain one flat discrete vocabulary. The semantic modules are
+prompt-only organization and do not enter events, features, embeddings, or
+checkpoints: `ROLE_ESTIMATE` contains the five `point_as_*` actions;
+`SOCIAL_STANCE` contains `support` and `oppose`; `CLAIMED_SKILL_REPORT`
+contains `check_as_good`, `check_as_werewolf`, `save`, `poison`, and `guard`;
+and `ACTION_INTENT` contains `vote_intent`. Under A1, extraction records only
+explicit atomic propositions, uses the most specific action without expanding
+it into broader correlated actions, and retains multiple actions only when the
+speech explicitly states multiple independent propositions in source order.
 
 ## Hard knowledge
 

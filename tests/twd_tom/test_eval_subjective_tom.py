@@ -23,6 +23,8 @@ from script.twd_tom.train import (
     sha256_file,
 )
 from werewolf.models.twd_tom.schema import (
+    ACTION_NAMES,
+    ACTION_TO_ID,
     PAIR_ORDERING,
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
@@ -137,6 +139,31 @@ def test_checkpoint_contract_mismatch_is_rejected(tmp_path, field, value):
     checkpoint[field] = value
     with pytest.raises(ValueError, match="checkpoint"):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+def test_checkpoint_records_the_complete_speech_action_contract(tmp_path):
+    checkpoint = make_checkpoint(tmp_path)
+
+    assert checkpoint["speech_action_count"] == len(ACTION_NAMES) == 13
+    assert checkpoint["speech_action_to_id"] == dict(ACTION_TO_ID)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["speech_action_count", "speech_action_to_id"],
+)
+def test_checkpoint_without_current_speech_action_contract_is_rejected(
+    tmp_path,
+    field,
+):
+    checkpoint = make_checkpoint(tmp_path)
+    checkpoint.pop(field)
+
+    with pytest.raises(ValueError, match=field):
+        build_model_from_checkpoint(
+            checkpoint,
+            device=torch.device("cpu"),
+        )
 
 
 def test_old_architecture_fields_are_rejected(tmp_path):

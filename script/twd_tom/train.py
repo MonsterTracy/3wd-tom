@@ -46,6 +46,8 @@ from werewolf.models.twd_tom.public_events import (
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import (
+    ACTION_NAMES,
+    ACTION_TO_ID,
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
     PROJECTION_VERSION,
@@ -859,6 +861,8 @@ def checkpoint_payload(
         "tom_order": config.tom_order,
         "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
+        "speech_action_count": len(ACTION_NAMES),
+        "speech_action_to_id": dict(ACTION_TO_ID),
         "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
         "public_phase_to_id": dict(PHASE_TO_ID),
         **checkpoint_task_contract(config.tom_order),

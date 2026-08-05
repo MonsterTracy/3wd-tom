@@ -19,11 +19,18 @@ def test_action_vocabulary_is_minimal_and_fixed():
         "point_as_guard",
         "support",
         "oppose",
+        "check_as_good",
+        "check_as_werewolf",
+        "save",
+        "poison",
+        "guard",
+        "vote_intent",
     )
 
     assert "suspect" not in ACTION_NAMES
     assert "certainty" not in ACTION_NAMES
     assert "vote_intention" not in ACTION_NAMES
+    assert len(ACTION_NAMES) == 13
 
 
 def test_padding_ids_are_separate_from_real_values():
@@ -32,7 +39,23 @@ def test_padding_ids_are_separate_from_real_values():
     assert PLAYER_TO_ID["player7"] == 7
 
     assert ACTION_TO_ID["<pad>"] == 0
-    assert ACTION_TO_ID["point_as_werewolf"] == 1
+    assert ACTION_TO_ID == {
+        "<pad>": 0,
+        "point_as_werewolf": 1,
+        "point_as_villager": 2,
+        "point_as_seer": 3,
+        "point_as_witch": 4,
+        "point_as_guard": 5,
+        "support": 6,
+        "oppose": 7,
+        "check_as_good": 8,
+        "check_as_werewolf": 9,
+        "save": 10,
+        "poison": 11,
+        "guard": 12,
+        "vote_intent": 13,
+    }
+    assert len(set(ACTION_TO_ID.values())) == len(ACTION_TO_ID)
 
 
 def test_parse_onuw_style_speech_action():
@@ -53,11 +76,39 @@ def test_parse_onuw_style_speech_action():
     ]
 
 
-def test_unsupported_action_is_rejected():
+@pytest.mark.parametrize(
+    "action_name",
+    (
+        "suspect",
+        "check_good",
+        "checked_good",
+        "heal",
+        "protected",
+        "intend_vote",
+    ),
+)
+def test_unsupported_action_is_rejected(action_name):
     with pytest.raises(ValueError, match="unsupported speech action"):
         parse_speech_action(
-            ["player1", "suspect", "player2"]
+            ["player1", action_name, "player2"]
         )
+
+
+@pytest.mark.parametrize(
+    "action_name",
+    (
+        "check_as_good",
+        "check_as_werewolf",
+        "save",
+        "poison",
+        "guard",
+        "vote_intent",
+    ),
+)
+def test_extended_actions_use_canonical_validation(action_name):
+    assert parse_speech_action(
+        ["player1", action_name, "player2"]
+    ).to_list() == ["player1", action_name, "player2"]
 
 
 @pytest.mark.parametrize(

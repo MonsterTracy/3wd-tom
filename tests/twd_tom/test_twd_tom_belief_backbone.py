@@ -77,6 +77,38 @@ def test_qwen2_receives_inputs_embeds_and_attention_mask(model):
     assert "input_ids" not in observed
 
 
+def test_qwen2_forward_accepts_all_extended_speech_actions(model):
+    action_names = (
+        "check_as_good",
+        "check_as_werewolf",
+        "save",
+        "poison",
+        "guard",
+        "vote_intent",
+    )
+    features = {
+        "subject_ids": torch.ones((1, 6), dtype=torch.long),
+        "action_ids": torch.tensor(
+            [[ACTION_TO_ID[name] for name in action_names]]
+        ),
+        "object_ids": torch.tensor([[2, 3, 4, 5, 6, 7]]),
+        "event_type_ids": torch.full(
+            (1, 6),
+            STRUCTURED_TOKEN_TO_ID["speech_action"],
+            dtype=torch.long,
+        ),
+        "phase_ids": torch.zeros((1, 6), dtype=torch.long),
+        "day_values": torch.ones((1, 6), dtype=torch.float32),
+        "attention_mask": torch.ones((1, 6), dtype=torch.long),
+    }
+
+    with torch.no_grad():
+        output = model(**features)
+
+    assert model.action_embedding.num_embeddings == 14
+    assert output["observer_pair_logits"].shape == (1, 7, 21)
+
+
 def test_output_contract_and_last_non_padding_pooling(model):
     with torch.no_grad():
         output = model(**make_features())

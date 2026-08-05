@@ -60,15 +60,12 @@ class SpeechPerceiverPilotCasesTest(
 
         return actions, prompt
 
-    def test_weak_attention_is_encoded_as_oppose(
+    def test_explicit_logic_disagreement_is_encoded_as_oppose(
         self,
     ):
         actions, prompt = self.parse_with_response(
             speaker=5,
-            speech=(
-                "目前我比较关注2号，"
-                "因为平安夜可能和他有关。"
-            ),
+            speech="我不同意2号的逻辑。",
             response=(
                 "player5 | oppose | player2"
             ),
@@ -85,11 +82,7 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
         self.assertIn(
-            "怀疑、关注、不信任",
-            prompt,
-        )
-        self.assertIn(
-            "不转换成数值强度",
+            "明确反对、不认可、不信任或批评",
             prompt,
         )
 
@@ -153,7 +146,7 @@ class SpeechPerceiverPilotCasesTest(
             prompt,
         )
 
-    def test_seer_good_check_supports_checked_player(
+    def test_seer_good_check_preserves_check_semantics(
         self,
     ):
         actions, prompt = self.parse_with_response(
@@ -164,7 +157,7 @@ class SpeechPerceiverPilotCasesTest(
             ),
             response=(
                 "player1 | point_as_seer | player1\n"
-                "player1 | support | player2"
+                "player1 | check_as_good | player2"
             ),
         )
 
@@ -178,13 +171,13 @@ class SpeechPerceiverPilotCasesTest(
                 ],
                 [
                     "player1",
-                    "support",
+                    "check_as_good",
                     "player2",
                 ],
             ],
         )
         self.assertIn(
-            "不能转换成具体的 point_as_villager",
+            "普通认好、普通怀疑、转述他人查验",
             prompt,
         )
 
@@ -219,7 +212,7 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
         self.assertIn(
-            "即使两个动作的 object 相同，也都保留",
+            "独立命题共存",
             prompt,
         )
 
@@ -271,27 +264,124 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
 
-    def test_vote_tendency_is_encoded_as_oppose(
+    def test_a1_vote_boundaries_preserve_only_explicit_propositions(
         self,
     ):
-        actions, _ = self.parse_with_response(
-            speaker=6,
-            speech="这一轮我倾向投4号。",
-            response=(
-                "player6 | oppose | player4"
+        cases = (
+            (
+                "这一轮我倾向投4号。",
+                "NONE",
+                [],
+            ),
+            (
+                "这一轮我投4号。",
+                "player6 | vote_intent | player4",
+                [["player6", "vote_intent", "player4"]],
+            ),
+            (
+                "我不信4号，这一轮我倾向投4号。",
+                "player6 | oppose | player4",
+                [["player6", "oppose", "player4"]],
+            ),
+            (
+                "我不信4号，这一轮我投4号。",
+                (
+                    "player6 | oppose | player4\n"
+                    "player6 | vote_intent | player4"
+                ),
+                [
+                    ["player6", "oppose", "player4"],
+                    ["player6", "vote_intent", "player4"],
+                ],
+            ),
+            (
+                "我觉得4号是狼，这一轮我倾向投4号。",
+                "player6 | point_as_werewolf | player4",
+                [["player6", "point_as_werewolf", "player4"]],
             ),
         )
 
-        self.assertEqual(
-            actions,
-            [
+        for speech, response, expected in cases:
+            with self.subTest(speech=speech):
+                actions, prompt = self.parse_with_response(
+                    speaker=6,
+                    speech=speech,
+                    response=response,
+                )
+                self.assertEqual(actions, expected)
+                self.assertIn(
+                    "投票偏好本身也不等于 support 或 oppose",
+                    prompt,
+                )
+
+    def test_a1_cross_module_actions_preserve_source_order_without_expansion(
+        self,
+    ):
+        cases = (
+            (
+                1,
+                "我觉得3号是狼。",
+                "player1 | point_as_werewolf | player3",
+                [["player1", "point_as_werewolf", "player3"]],
+            ),
+            (
+                1,
+                "我验3号查杀，今天投3号。",
+                (
+                    "player1 | check_as_werewolf | player3\n"
+                    "player1 | vote_intent | player3"
+                ),
                 [
-                    "player6",
-                    "oppose",
-                    "player4",
-                ]
-            ],
+                    ["player1", "check_as_werewolf", "player3"],
+                    ["player1", "vote_intent", "player3"],
+                ],
+            ),
+            (
+                1,
+                "我是预言家，验3号查杀。",
+                (
+                    "player1 | point_as_seer | player1\n"
+                    "player1 | check_as_werewolf | player3"
+                ),
+                [
+                    ["player1", "point_as_seer", "player1"],
+                    ["player1", "check_as_werewolf", "player3"],
+                ],
+            ),
+            (
+                1,
+                "3号是好人，但为了统一票型今天投3号。",
+                (
+                    "player1 | point_as_villager | player3\n"
+                    "player1 | vote_intent | player3"
+                ),
+                [
+                    ["player1", "point_as_villager", "player3"],
+                    ["player1", "vote_intent", "player3"],
+                ],
+            ),
+            (
+                1,
+                "我验3号金水，也同意他的逻辑。",
+                (
+                    "player1 | check_as_good | player3\n"
+                    "player1 | support | player3"
+                ),
+                [
+                    ["player1", "check_as_good", "player3"],
+                    ["player1", "support", "player3"],
+                ],
+            ),
         )
+
+        for speaker, speech, response, expected in cases:
+            with self.subTest(speech=speech):
+                actions, _ = self.parse_with_response(
+                    speaker=speaker,
+                    speech=speech,
+                    response=response,
+                )
+                self.assertEqual(actions, expected)
 
     def test_pure_report_without_endorsement_is_not_a_stance(
         self,

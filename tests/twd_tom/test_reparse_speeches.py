@@ -410,6 +410,54 @@ def test_protocol_contamination_is_invalid_not_parser_error(
     assert event["new_sp_actions"] == []
 
 
+def test_extended_actions_are_counted_and_compared_without_mutating_log():
+    new_actions = [
+        ["player1", "check_as_good", "player2"],
+        ["player1", "check_as_werewolf", "player3"],
+        ["player1", "save", "player4"],
+        ["player1", "poison", "player5"],
+        ["player1", "guard", "player6"],
+        ["player1", "vote_intent", "player7"],
+    ]
+    records = [
+        make_speech_record(
+            source=1,
+            speech="公开发言",
+            old_actions=[["player1", "support", "player2"]],
+        )
+    ]
+    original = json.dumps(records, ensure_ascii=False, sort_keys=True)
+    parser = SpeechPerceiver(
+        backend=StaticResponseBackend(
+            "\n".join(" | ".join(action) for action in new_actions)
+        ),
+        model_name="fake-model",
+    )
+
+    report = build_reparse_report(
+        records,
+        parser=parser,
+        source_path="game.json",
+        source_sha256="abc",
+        parser_backend_name="fake",
+        parser_model_name="fake",
+    )
+
+    event = report["events"][0]
+    assert event["parse_status"] == "ok"
+    assert event["new_sp_actions"] == new_actions
+    assert event["added_actions"] == sorted(new_actions)
+    assert event["removed_actions"] == [
+        ["player1", "support", "player2"]
+    ]
+    assert report["summary"]["new_action_name_counts"] == {
+        action[1]: 1 for action in new_actions
+    }
+    assert report["summary"]["invalid_new_action_count"] == 0
+    assert report["summary"]["parser_error_count"] == 0
+    assert json.dumps(records, ensure_ascii=False, sort_keys=True) == original
+
+
 def test_canonical_old_action_is_retained():
     report = _single_speech_report(
         FakeParser(),

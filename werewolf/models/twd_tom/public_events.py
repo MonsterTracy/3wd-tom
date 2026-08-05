@@ -16,7 +16,7 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v1"
+PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v2"
 PUBLIC_EVENT_TYPES = frozenset(
     {
         "phase_change",

@@ -97,6 +97,27 @@ def test_encodes_exact_subject_action_object_ids_and_dtypes():
     assert features["day_values"].dtype == torch.float32
 
 
+@pytest.mark.parametrize(
+    "action_name",
+    (
+        "check_as_good",
+        "check_as_werewolf",
+        "save",
+        "poison",
+        "guard",
+        "vote_intent",
+    ),
+)
+def test_extended_actions_encode_to_their_canonical_ids(action_name):
+    features = PublicEventFeatureBuilder().encode_events(
+        _events(actions=[["player1", action_name, "player2"]])
+    )
+    index = features["event_type_ids"].tolist().index(
+        STRUCTURED_TOKEN_TO_ID["speech_action"]
+    )
+    assert features["action_ids"][index].item() == ACTION_TO_ID[action_name]
+
+
 def test_preserves_duplicate_actions_inside_one_speech_boundary():
     action = ["player1", "support", "player2"]
     features = PublicEventFeatureBuilder().encode_events(

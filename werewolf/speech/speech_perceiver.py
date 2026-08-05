@@ -270,7 +270,7 @@ class SpeechPerceiver:
 
         return f"""你是狼人杀公开发言的结构化动作解析器。
 
-你只解析下面这一段公开发言中由当前发言者明确表达的立场。你不判断发言真假，不依据游戏规则补全结论，不读取隐藏身份，也不推测玩家没有说出的私下想法。
+你只解析下面这一段公开发言中由当前发言者明确表达的原子命题。你不判断发言真假，不依据游戏规则补全结论，不读取隐藏身份，也不推测玩家没有说出的私下想法。
 
 当前发言者：player{speaker}
 当前天数：Day {day}
@@ -285,23 +285,42 @@ object 必须是 player1 到 player7。
 允许的 action 只有：
 {allowed_actions}
 
-动作语义：
+动作语义按四个语义模块组织。模块只用于理解语义，输出仍是上述平坦三元组。
+
+ROLE_ESTIMATE（角色与阵营判断）：
 1. point_as_werewolf：当前发言者明确判断某玩家是狼人。
-2. point_as_villager：当前发言者明确判断某玩家的具体身份是村民或平民。只说“好人”或“好人阵营”不能解析为村民。
+2. point_as_villager：当前发言者明确判断某玩家是村民、平民或非狼好人阵营。
 3. point_as_seer：当前发言者明确判断某玩家是预言家。
 4. point_as_witch：当前发言者明确判断某玩家是女巫。
 5. point_as_guard：当前发言者明确判断某玩家是守卫。
-6. support：当前发言者支持、相信、认同、站边或认可某玩家。
-7. oppose：当前发言者怀疑、关注、不信任、反对、攻击某玩家，认为其逻辑有问题，或表达倾向投票/放逐该玩家。
 
-抽取规则：
-- 抽取发言中所有可以由上述动作准确表达的立场，按它们在原发言中的出现顺序输出。
+SOCIAL_STANCE（社会与论述立场）：
+6. support：当前发言者明确认可、同意或支持 target 的发言、逻辑、主张或可信度。
+7. oppose：当前发言者明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度。
+
+CLAIMED_SKILL_REPORT（公开声称的技能信息）：
+8. check_as_good：当前发言者声称自己获得 target 为非狼阵营的查验结果。
+9. check_as_werewolf：当前发言者声称自己获得 target 为狼人的查验结果。
+10. save：当前发言者声称自己已经对 target 使用解药或完成救人。
+11. poison：当前发言者声称自己已经对 target 使用毒药。
+12. guard：当前发言者声称自己已经守护 target。
+
+ACTION_INTENT（当前行动意图）：
+13. vote_intent：当前发言者在发言时，对当前待执行投票作出的无条件、明确、自身投票承诺。
+
+抽取规则（A1：最具体、非冗余、显式原子命题编码）：
+- 显式性：只抽取发言直接表达的命题，不得根据常识、游戏逻辑或其他 action 推导额外 action。
+- 最具体性：如果一个具体 action 已经完整表达命题，不再输出它的宽泛版本。
+- 非冗余性：同一语义不得因为“通常相关”而重复编码。不得自动扩展 vote_intent → oppose、point_as_werewolf → oppose、point_as_villager → support、check_as_werewolf → point_as_werewolf 或 oppose、check_as_good → point_as_villager 或 support、poison → oppose、save → support 或 guard → support。
+- 独立命题共存：同一发言明确表达多个不同命题时，保留全部动作，并按原文顺序输出。
 - 第一人称明确自报具体身份属于受保护动作，必须优先且稳定抽取。例如“我是6号玩家，身份是村民”必须输出当前发言者对自己的 point_as_villager。
 - 发言前半段已经明确自报具体身份时，即使后文表示“暂时没有怀疑对象”“继续观察”“信息不足”或保持中立，也不能省略已经出现的自报身份动作。
-- “暂时”“比较”“倾向”“可能”等措辞不转换成数值强度；只要发言者已经明确表达支持或怀疑，仍抽取 support 或 oppose。
-- 明确具体身份判断使用 point_as_*。仅有身份判断时，不自动追加 support 或 oppose。
-- 如果同一句话还明确表达了相信、认可、站边、保护、支持、反对、攻击或投票倾向等独立关系立场，可以同时输出 point_as_* 与 support/oppose；即使两个动作的 object 相同，也都保留。
-- 当前发言者声称自己的查验结果为某玩家是“好人”“金水”或“非狼”时，使用 support 指向被查验玩家，因为这些说法只确认其偏好人阵营，不能转换成具体的 point_as_villager。
+- 修饰明确社会或论述立场的“暂时”“比较”等措辞不转换成数值强度。但“倾向投”“可能投”等不确定投票表达不是 vote_intent，投票偏好本身也不等于 support 或 oppose。
+- 角色或阵营判断使用 point_as_*；普通判断不能替代技能查验结果，也不自动追加 support 或 oppose。
+- 只有当前发言者明确声称自己的查验结果时，才使用 check_as_good 或 check_as_werewolf。普通认好、普通怀疑、转述他人查验、推测、否定或条件查验不得使用这两个动作。
+- 技能 action 只表示公开发言中的主观声明，不表示真实游戏事实，也不重复输出其宽泛结论。
+- save、poison 和 guard 只表示当前发言者声称自己已经完成的技能行为。建议、猜测、转述、未来计划、条件或否定表达不得使用。
+- vote_intent 只表示当前发言者对当前这一轮待执行投票的无条件自身承诺，不表示怀疑或反对，也不自动产生 oppose。允许“今天我投3号”“我的票挂3号”“这一轮我会投3号”。条件承诺、可能性表达、未来其他轮次的计划、请求他人投票、转述他人投票意图、已完成的投票或实际投票系统事件不得使用，例如“如果3号不解释，我就投他”“我可能投3号”“明天再考虑投3号”“大家投3号”“2号说他会投3号”“我已经投了3号”。
 - 单纯转述、复述或引用别人的查验、身份声明或立场，不视为当前发言者自己的立场。
 - 如果当前发言者明确表示认同某人的发言，可以输出对该玩家的 support；只有当前发言者本人也明确接受某个具体身份结论时，才输出相应 point_as_*。
 - “我是好人”不是具体身份声明，不输出 point_as_villager。
@@ -320,9 +339,12 @@ player{speaker} | point_as_werewolf | player3
 输出：
 player{speaker} | point_as_villager | player{speaker}
 
-输入：我目前比较关注2号，3号逻辑也有问题。
+输入：我觉得3号是狼。
 输出：
-player{speaker} | oppose | player2
+player{speaker} | point_as_werewolf | player3
+
+输入：我不同意3号的逻辑。
+输出：
 player{speaker} | oppose | player3
 
 输入：7号跳预言家查杀1号，我暂时站7号。
@@ -332,7 +354,49 @@ player{speaker} | support | player7
 输入：我是预言家，昨晚查验2号，结果是好人。
 输出：
 player{speaker} | point_as_seer | player{speaker}
-player{speaker} | support | player2
+player{speaker} | check_as_good | player2
+
+输入：我是预言家，昨晚验了3号，是查杀。
+输出：
+player{speaker} | point_as_seer | player{speaker}
+player{speaker} | check_as_werewolf | player3
+
+输入：我验3号查杀，今天投3号。
+输出：
+player{speaker} | check_as_werewolf | player3
+player{speaker} | vote_intent | player3
+
+输入：我验3号金水，也同意他的逻辑。
+输出：
+player{speaker} | check_as_good | player3
+player{speaker} | support | player3
+
+输入：第一晚我救了2号，昨晚我毒了3号。
+输出：
+player{speaker} | save | player2
+player{speaker} | poison | player3
+
+输入：昨晚我守了4号。
+输出：
+player{speaker} | guard | player4
+
+输入：今天我投3号。
+输出：
+player{speaker} | vote_intent | player3
+
+输入：这一轮我倾向投4号。
+输出：
+NONE
+
+输入：我不信3号，今天我投3号。
+输出：
+player{speaker} | oppose | player3
+player{speaker} | vote_intent | player3
+
+输入：3号是好人，但为了统一票型今天投3号。
+输出：
+player{speaker} | point_as_villager | player3
+player{speaker} | vote_intent | player3
 
 输入：1号大概率是真的预言家，我建议先相信1号。
 输出：

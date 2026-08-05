@@ -151,12 +151,25 @@ class SpeechPerceiverTest(unittest.TestCase):
             "oppose",
             prompt,
         )
+        for action_name in (
+            "check_as_good",
+            "check_as_werewolf",
+            "save",
+            "poison",
+            "guard",
+            "vote_intent",
+        ):
+            self.assertIn(action_name, prompt)
+        for unsupported_alias in (
+            "check_good",
+            "checked_good",
+            "heal",
+            "protected",
+            "intend_vote",
+        ):
+            self.assertNotIn(unsupported_alias, prompt)
         self.assertIn(
-            "好人”“金水”或“非狼",
-            prompt,
-        )
-        self.assertIn(
-            "可以同时输出 point_as_* 与 support/oppose",
+            "独立命题共存",
             prompt,
         )
         self.assertIn(
@@ -175,6 +188,60 @@ class SpeechPerceiverTest(unittest.TestCase):
             "certainty",
             prompt,
         )
+
+    def test_prompt_freezes_a1_semantic_modules_and_non_redundancy(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
+        )
+
+        perceiver.parse(1, "公开发言", 1, "speech")
+        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+
+        for module_name in (
+            "ROLE_ESTIMATE",
+            "SOCIAL_STANCE",
+            "CLAIMED_SKILL_REPORT",
+            "ACTION_INTENT",
+        ):
+            self.assertIn(module_name, prompt)
+        self.assertIn(
+            "A1：最具体、非冗余、显式原子命题编码",
+            prompt,
+        )
+        for principle in (
+            "显式性",
+            "最具体性",
+            "非冗余性",
+            "独立命题共存",
+        ):
+            self.assertIn(principle, prompt)
+        self.assertIn(
+            "明确认可、同意或支持 target 的发言、逻辑、主张或可信度",
+            prompt,
+        )
+        self.assertIn(
+            "明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度",
+            prompt,
+        )
+        for forbidden_expansion in (
+            "vote_intent → oppose",
+            "point_as_werewolf → oppose",
+            "point_as_villager → support",
+            "check_as_werewolf → point_as_werewolf 或 oppose",
+            "check_as_good → point_as_villager 或 support",
+            "poison → oppose",
+            "save → support",
+            "guard → support",
+        ):
+            self.assertIn(forbidden_expansion, prompt)
+        self.assertIn(
+            "投票偏好本身也不等于 support 或 oppose",
+            prompt,
+        )
+        self.assertNotIn("倾向投票/放逐", prompt)
 
     def test_preserves_distinct_actions_for_same_object(
         self,
@@ -260,6 +327,80 @@ class SpeechPerceiverTest(unittest.TestCase):
             "也不能省略已经出现的自报身份动作",
             prompt,
         )
+
+    def test_existing_specific_self_claim_actions_remain_unchanged(
+        self,
+    ):
+        expected_actions = {
+            "村民": "point_as_villager",
+            "预言家": "point_as_seer",
+            "女巫": "point_as_witch",
+            "守卫": "point_as_guard",
+        }
+
+        for role, action_name in expected_actions.items():
+            with self.subTest(role=role):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend("NONE"),
+                    model_name="test-model",
+                )
+
+                self.assertEqual(
+                    perceiver.parse(
+                        speaker=2,
+                        speech=f"我是{role}。",
+                        day=1,
+                        phase="speech",
+                    ),
+                    [["player2", action_name, "player2"]],
+                )
+
+    def test_vote_intent_prompt_requires_current_unconditional_self_commitment(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
+        )
+
+        perceiver.parse(
+            speaker=1,
+            speech="公开发言",
+            day=1,
+            phase="speech",
+        )
+        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+
+        self.assertIn(
+            "对当前待执行投票作出的无条件、明确、自身投票承诺",
+            prompt,
+        )
+        for accepted in (
+            "今天我投3号",
+            "我的票挂3号",
+            "这一轮我会投3号",
+        ):
+            self.assertIn(accepted, prompt)
+        for rejected_category in (
+            "条件承诺",
+            "可能性表达",
+            "未来其他轮次的计划",
+            "请求他人投票",
+            "转述他人投票意图",
+            "已完成的投票",
+            "实际投票系统事件",
+        ):
+            self.assertIn(rejected_category, prompt)
+        for rejected_example in (
+            "如果3号不解释，我就投他",
+            "我可能投3号",
+            "明天再考虑投3号",
+            "大家投3号",
+            "2号说他会投3号",
+            "我已经投了3号",
+        ):
+            self.assertIn(rejected_example, prompt)
+        self.assertNotIn("所有未来计划", prompt)
 
     def test_merges_protected_self_claim_with_other_llm_actions(
         self,
@@ -455,6 +596,39 @@ class SpeechPerceiverTest(unittest.TestCase):
                 ]
             ],
         )
+
+    def test_strict_accepts_extended_actions_in_pipe_and_complete_json(
+        self,
+    ):
+        expected = [
+            ["player1", "check_as_good", "player2"],
+            ["player1", "check_as_werewolf", "player3"],
+            ["player1", "save", "player4"],
+            ["player1", "poison", "player5"],
+            ["player1", "guard", "player6"],
+            ["player1", "vote_intent", "player7"],
+        ]
+        responses = [
+            "\n".join(" | ".join(action) for action in expected),
+            json.dumps(expected),
+        ]
+
+        for response in responses:
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+
+                self.assertEqual(
+                    perceiver.parse_strict(
+                        1,
+                        "公开发言",
+                        1,
+                        "speech",
+                    ),
+                    expected,
+                )
 
     def test_extracts_first_legacy_json_array_from_text(
         self,
