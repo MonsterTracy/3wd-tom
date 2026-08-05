@@ -806,6 +806,87 @@ class SpeechPerceiverTest(unittest.TestCase):
                 "speech",
             )
 
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_strict_with_response_preserves_pipe_text(
+        self,
+    ):
+        raw_response = (
+            "\nplayer1 | vote_intent | player3\n"
+        )
+        backend = FakeBackend(raw_response)
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        actions, returned_response = (
+            perceiver.parse_strict_with_response(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+        )
+
+        self.assertEqual(
+            actions,
+            [["player1", "vote_intent", "player3"]],
+        )
+        self.assertEqual(returned_response, raw_response)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_strict_with_response_preserves_json_text(
+        self,
+    ):
+        raw_response = (
+            '[ [ "player1", "support", "player2" ] ]'
+        )
+        backend = FakeBackend(raw_response)
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        actions, returned_response = (
+            perceiver.parse_strict_with_response(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+        )
+
+        self.assertEqual(
+            actions,
+            [["player1", "support", "player2"]],
+        )
+        self.assertEqual(returned_response, raw_response)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_strict_with_response_preserves_none_text(
+        self,
+    ):
+        raw_response = "NONE"
+        backend = FakeBackend(raw_response)
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        actions, returned_response = (
+            perceiver.parse_strict_with_response(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+        )
+
+        self.assertEqual(actions, [])
+        self.assertEqual(returned_response, raw_response)
+        self.assertEqual(len(backend.calls), 1)
+
     def test_strict_parse_rejects_malformed_response(
         self,
     ):
@@ -863,6 +944,32 @@ class SpeechPerceiverTest(unittest.TestCase):
             "unsupported speech action",
             caught.exception.failures[0]["reason"],
         )
+
+    def test_strict_with_response_attaches_invalid_raw_text(
+        self,
+    ):
+        raw_response = "player1 | invented_action | player2"
+        backend = FakeBackend(raw_response)
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        with self.assertRaises(
+            SpeechActionValidationError
+        ) as caught:
+            perceiver.parse_strict_with_response(
+                1,
+                "发言",
+                1,
+                "speech",
+            )
+
+        self.assertEqual(
+            caught.exception.raw_response,
+            raw_response,
+        )
+        self.assertEqual(len(backend.calls), 1)
 
     def test_strict_rejects_invalid_player_without_changing_parse(
         self,
@@ -975,8 +1082,9 @@ class SpeechPerceiverTest(unittest.TestCase):
     def test_strict_none_is_a_valid_empty_result(
         self,
     ):
+        backend = FakeBackend("NONE")
         perceiver = SpeechPerceiver(
-            backend=FakeBackend("NONE"),
+            backend=backend,
             model_name="test-model",
         )
 
@@ -989,6 +1097,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ),
             [],
         )
+        self.assertEqual(len(backend.calls), 1)
 
     def test_strict_accepts_one_triplet_with_blank_lines(
         self,

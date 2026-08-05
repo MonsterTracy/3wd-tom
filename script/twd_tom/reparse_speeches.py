@@ -386,10 +386,10 @@ def build_reparse_report(
 
     if parser is None or not hasattr(
         parser,
-        "parse_strict",
+        "parse_strict_with_response",
     ):
         raise TypeError(
-            "parser must provide parse_strict()"
+            "parser must provide parse_strict_with_response()"
         )
 
     events: list[
@@ -489,6 +489,7 @@ def build_reparse_report(
         new_actions: list[
             list[str]
         ] = []
+        raw_backend_response = None
 
         if not speech.strip():
             parse_status = (
@@ -498,8 +499,11 @@ def build_reparse_report(
             parser_call_count += 1
 
             try:
-                raw_new_actions = (
-                    parser.parse_strict(
+                (
+                    raw_new_actions,
+                    raw_backend_response,
+                ) = (
+                    parser.parse_strict_with_response(
                         speaker=speaker_id,
                         speech=speech,
                         day=day,
@@ -538,12 +542,22 @@ def build_reparse_report(
                 invalid_new_actions = (
                     exc.failures
                 )
+                raw_backend_response = (
+                    exc.raw_response
+                )
                 new_actions = []
             except Exception as exc:
                 parser_error_count += 1
                 parse_status = "error"
                 parse_error = (
                     f"{type(exc).__name__}: {exc}"
+                )
+                raw_backend_response = (
+                    getattr(
+                        exc,
+                        "raw_response",
+                        None,
+                    )
                 )
                 new_actions = []
 
@@ -579,6 +593,9 @@ def build_reparse_report(
                 parse_status
             ),
             "parse_error": parse_error,
+            "raw_backend_response": (
+                raw_backend_response
+            ),
             "invalid_new_actions": (
                 invalid_new_actions
             ),

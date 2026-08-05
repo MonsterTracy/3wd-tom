@@ -106,6 +106,26 @@ class FakeParser:
 
         return []
 
+    def parse_strict_with_response(
+        self,
+        speaker,
+        speech,
+        day,
+        phase,
+    ):
+        actions = self.parse_strict(
+            speaker=speaker,
+            speech=speech,
+            day=day,
+            phase=phase,
+        )
+        if not actions:
+            return actions, "NONE"
+        return actions, "\n".join(
+            " | ".join(action)
+            for action in actions
+        )
+
 
 def test_build_report_compares_old_and_new_actions():
     parser = FakeParser()
@@ -247,6 +267,9 @@ def test_build_report_compares_old_and_new_actions():
     assert events[0][
         "changed"
     ] is False
+    assert events[0]["raw_backend_response"] == (
+        "player4 | point_as_villager | player4"
+    )
 
     assert events[1][
         "added_actions"
@@ -261,6 +284,7 @@ def test_build_report_compares_old_and_new_actions():
     assert events[2][
         "parse_status"
     ] == "error"
+    assert events[2]["raw_backend_response"] is None
 
     assert (
         "fake parser failure"
@@ -278,7 +302,7 @@ class RaisingParser:
     def __init__(self, error):
         self.error = error
 
-    def parse_strict(self, **kwargs):
+    def parse_strict_with_response(self, **kwargs):
         del kwargs
         raise self.error
 
@@ -309,6 +333,7 @@ def _single_speech_report(
 
 
 def test_schema_invalid_output_is_not_counted_as_parser_error():
+    raw_response = "player1 | invented_action | player2"
     failure = {
         "candidate": [
             "player1",
@@ -321,7 +346,8 @@ def test_schema_invalid_output_is_not_counted_as_parser_error():
     report = _single_speech_report(
         RaisingParser(
             SpeechActionValidationError(
-                [failure]
+                [failure],
+                raw_response=raw_response,
             )
         )
     )
@@ -333,6 +359,7 @@ def test_schema_invalid_output_is_not_counted_as_parser_error():
     assert event["invalid_new_actions"] == [failure]
     assert "invented_action" in event["parse_error"]
     assert event["new_sp_actions"] == []
+    assert event["raw_backend_response"] == raw_response
 
 
 def test_legal_empty_output_is_successful():
@@ -342,6 +369,7 @@ def test_legal_empty_output_is_successful():
     assert report["summary"]["parser_error_count"] == 0
     assert report["events"][0]["parse_status"] == "ok"
     assert report["events"][0]["new_sp_actions"] == []
+    assert report["events"][0]["raw_backend_response"] == "NONE"
 
 
 @pytest.mark.parametrize(
@@ -359,15 +387,57 @@ def test_parser_failures_are_not_counted_as_invalid_output(error):
     assert report["summary"]["parser_error_count"] == 1
     assert report["summary"]["invalid_new_action_count"] == 0
     assert report["events"][0]["parse_status"] == "error"
+    assert report["events"][0]["raw_backend_response"] is None
+
+
+def test_unparseable_backend_text_is_preserved_as_parser_error():
+    raw_response = "not a structured response"
+    report = _single_speech_report(
+        SpeechPerceiver(
+            backend=StaticResponseBackend(raw_response),
+            model_name="fake-model",
+        )
+    )
+
+    event = report["events"][0]
+    assert event["parse_status"] == "error"
+    assert event["raw_backend_response"] == raw_response
+    assert report["summary"]["parser_error_count"] == 1
+    assert report["summary"]["invalid_new_action_count"] == 0
 
 
 class StaticResponseBackend:
-    def __init__(self, response):
+    def __init__(self, response=None, *, error=None):
         self.response = response
+        self.error = error
+        self.calls = 0
 
     def chat(self, **kwargs):
         del kwargs
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
         return self.response
+
+
+def test_backend_exception_has_null_raw_response_without_retry():
+    backend = StaticResponseBackend(
+        error=RuntimeError("backend unavailable")
+    )
+    report = _single_speech_report(
+        SpeechPerceiver(
+            backend=backend,
+            model_name="fake-model",
+        )
+    )
+
+    event = report["events"][0]
+    assert event["parse_status"] == "error"
+    assert event["raw_backend_response"] is None
+    assert "backend unavailable" in event["parse_error"]
+    assert report["summary"]["parser_error_count"] == 1
+    assert report["summary"]["invalid_new_action_count"] == 0
+    assert backend.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -408,6 +478,7 @@ def test_protocol_contamination_is_invalid_not_parser_error(
     assert report["summary"]["parser_error_count"] == 0
     assert invalid_fragment in str(event["invalid_new_actions"])
     assert event["new_sp_actions"] == []
+    assert event["raw_backend_response"] == response
 
 
 def test_extended_actions_are_counted_and_compared_without_mutating_log():
@@ -427,10 +498,11 @@ def test_extended_actions_are_counted_and_compared_without_mutating_log():
         )
     ]
     original = json.dumps(records, ensure_ascii=False, sort_keys=True)
+    raw_response = "\n".join(
+        " | ".join(action) for action in new_actions
+    )
     parser = SpeechPerceiver(
-        backend=StaticResponseBackend(
-            "\n".join(" | ".join(action) for action in new_actions)
-        ),
+        backend=StaticResponseBackend(raw_response),
         model_name="fake-model",
     )
 
@@ -455,6 +527,7 @@ def test_extended_actions_are_counted_and_compared_without_mutating_log():
     }
     assert report["summary"]["invalid_new_action_count"] == 0
     assert report["summary"]["parser_error_count"] == 0
+    assert event["raw_backend_response"] == raw_response
     assert json.dumps(records, ensure_ascii=False, sort_keys=True) == original
 
 

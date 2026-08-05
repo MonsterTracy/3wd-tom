@@ -75,9 +75,15 @@ def _load_tom_schema():
 class SpeechActionValidationError(ValueError):
     """Report candidates that violate the speech-action schema."""
 
-    def __init__(self, failures: list[dict[str, Any]]):
+    def __init__(
+        self,
+        failures: list[dict[str, Any]],
+        *,
+        raw_response: str | None = None,
+    ):
         self.failures = failures
         self.invalid_count = len(failures)
+        self._raw_response = raw_response
         super().__init__(
             "invalid speech action candidate(s): "
             + json.dumps(
@@ -86,6 +92,12 @@ class SpeechActionValidationError(ValueError):
                 default=repr,
             )
         )
+
+    @property
+    def raw_response(self) -> str | None:
+        """Return the unchanged backend text when one was produced."""
+
+        return self._raw_response
 
 
 class SpeechPerceiver:
@@ -170,6 +182,25 @@ class SpeechPerceiver:
         so a parser outage cannot interrupt a game.
         """
 
+        actions, _raw_response = (
+            self.parse_strict_with_response(
+                speaker=speaker,
+                speech=speech,
+                day=day,
+                phase=phase,
+            )
+        )
+        return actions
+
+    def parse_strict_with_response(
+        self,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+    ) -> tuple[list[list[str]], str]:
+        """Strictly parse once and return actions plus unchanged response."""
+
         if self.backend is None or not self.model_name:
             raise RuntimeError(
                 "speech parser backend and model must be configured"
@@ -192,7 +223,7 @@ class SpeechPerceiver:
             )
         )
 
-        return self._parse_configured(
+        return self._parse_configured_with_response(
             speaker=speaker,
             speech=speech,
             day=day,
@@ -215,6 +246,30 @@ class SpeechPerceiver:
         ],
         strict: bool = False,
     ) -> list[list[str]]:
+        actions, _raw_response = (
+            self._parse_configured_with_response(
+                speaker=speaker,
+                speech=speech,
+                day=day,
+                phase=phase,
+                protected_actions=protected_actions,
+                strict=strict,
+            )
+        )
+        return actions
+
+    def _parse_configured_with_response(
+        self,
+        *,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+        protected_actions: Sequence[
+            Sequence[str]
+        ],
+        strict: bool = False,
+    ) -> tuple[list[list[str]], str]:
         prompt = self._build_prompt(
             speaker=speaker,
             speech=speech,
@@ -236,20 +291,32 @@ class SpeechPerceiver:
             ),
         )
 
-        parsed = self._extract_response_actions(
+        try:
+            parsed = self._extract_response_actions(
+                response_text,
+                strict=strict,
+            )
+
+            llm_actions = self._normalize(
+                parsed=parsed,
+                speaker=speaker,
+                strict=strict,
+            )
+        except SpeechActionValidationError as exc:
+            raise SpeechActionValidationError(
+                exc.failures,
+                raw_response=response_text,
+            ) from exc
+        except ValueError as exc:
+            exc.raw_response = response_text
+            raise
+
+        return (
+            self._merge_actions(
+                protected_actions,
+                llm_actions,
+            ),
             response_text,
-            strict=strict,
-        )
-
-        llm_actions = self._normalize(
-            parsed=parsed,
-            speaker=speaker,
-            strict=strict,
-        )
-
-        return self._merge_actions(
-            protected_actions,
-            llm_actions,
         )
 
     @staticmethod
