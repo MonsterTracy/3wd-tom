@@ -37,30 +37,21 @@ class GPTAgent(LLMAgent):
         if request_max_tokens is None and is_o1:
             request_max_tokens = 32000
         if 'speech' in phase:
-            if self.backend is not None and self.model_name:
-                messages = [{'role': 'user', 'content': prompt}]
-                raw_action, metadata = self._chat_with_metadata(
-                    messages,
-                    temperature=request_temperature,
-                    max_tokens=request_max_tokens,
-                )
-                validate_gameplay_public_speech(
-                    raw_action,
-                    finish_reason=(
-                        metadata.get("finish_reason")
-                        if isinstance(metadata, dict)
-                        else None
-                    ),
-                    player_id=observation.get("current_act_idx"),
-                    phase=phase,
-                )
-                raw_action = raw_action.strip()
-                checked_action = self.extract_answer(raw_action)
-                gen_times = 0
-            else:
-                raw_action = "aaa"
-                gen_times = -1
-                checked_action = 'bbb'
+            messages = [{'role': 'user', 'content': prompt}]
+            raw_action, metadata = self._chat_with_metadata(
+                messages,
+                temperature=request_temperature,
+                max_tokens=request_max_tokens,
+            )
+            validate_gameplay_public_speech(
+                raw_action,
+                finish_reason=metadata["finish_reason"],
+                player_id=observation.get("current_act_idx"),
+                phase=phase,
+            )
+            raw_action = raw_action.strip()
+            checked_action = self.extract_answer(raw_action)
+            gen_times = 0
             env_action = ('speech', checked_action)
 
             if self.has_log:

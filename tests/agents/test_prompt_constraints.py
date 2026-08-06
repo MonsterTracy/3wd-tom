@@ -81,9 +81,10 @@ def _speech_observation(identity, *, game_log=None):
             "day": 1,
             "day_or_night": "day",
             "phase": "speech",
+            "last_night_result": {"day": 0, "dead_players": []},
+            "prior_exiles": [],
             "alive_players": [1, 2, 3, 4, 5, 6, 7],
-            "eliminated_players": [],
-            "legal_vote_targets": [],
+            "suggestible_exile_targets": [1, 2, 4, 5, 6, 7],
         },
     }
 
@@ -116,7 +117,10 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertIn("strict_classic7", strict_prompt)
         self.assertIn("当前发言者必须是 player3", strict_prompt)
         self.assertIn("禁止输出上述范围以外的玩家编号", strict_prompt)
-        self.assertIn("不得引用未来事件", strict_prompt)
+        self.assertIn(
+            "不得把尚未发生的未来系统事件描述为已经由系统确认发生",
+            strict_prompt,
+        )
         self.assertIn("只输出中文公开发言正文", strict_prompt)
         for section in (
             "【权威公共状态】",
@@ -190,13 +194,23 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertIn("不能直接公开狼人队友身份", werewolf)
         self.assertIn("不能直接公开狼队夜间讨论、狼刀真实决策", werewolf)
         self.assertIn("你没有查验、解药、毒药或守护能力", villager)
+        self.assertIn("可以按策略假跳身份或作出虚假技能声明", villager)
         self.assertNotIn("狼人队伍的成员", villager)
         self.assertIn("player6=狼人", seer)
-        self.assertIn("禁止声称未来查验", seer)
+        self.assertIn("可以披露、隐藏、歪曲或虚构身份和技能声明", seer)
         self.assertIn("解药真实状态：已使用", witch)
         self.assertIn("毒药真实状态：未使用", witch)
         self.assertIn("player5", witch)
         self.assertIn("已真实发生的守护目标：player2", guard)
+        for forbidden_contract in (
+            "不得声称执行过查验",
+            "只能引用上面已经真实发生的查验",
+            "只能依据这些真实状态发言",
+            "只能引用已经真实发生的守护",
+        ):
+            self.assertNotIn(forbidden_contract, "\n".join(
+                (werewolf, villager, seer, witch, guard)
+            ))
 
 
 if __name__ == "__main__":

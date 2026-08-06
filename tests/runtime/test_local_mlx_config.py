@@ -549,14 +549,18 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
             "current_act_idx": 1,
             "game_log": [],
             "valid_action": ("speech", -1),
-            "authoritative_public_state": {
-                "day": 1,
-                "day_or_night": "day",
-                "phase": "speech",
-                "alive_players": [1, 2, 3, 4, 5, 6, 7],
-                "eliminated_players": [],
-                "legal_vote_targets": [],
-            },
+                "authoritative_public_state": {
+                    "day": 1,
+                    "day_or_night": "day",
+                    "phase": "speech",
+                    "last_night_result": {
+                        "day": 0,
+                        "dead_players": [],
+                    },
+                    "prior_exiles": [],
+                    "alive_players": [1, 2, 3, 4, 5, 6, 7],
+                    "suggestible_exile_targets": [2, 3, 4, 5, 6, 7],
+                },
         }
     )
 

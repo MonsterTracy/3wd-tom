@@ -173,13 +173,23 @@ class LLMAgent(Agent):
     def _chat_with_metadata(self, messages, **kwargs):
         if self.backend is None or not self.model_name:
             raise BackendError("Agent backend and model_name are required.")
-        if hasattr(self.backend, "chat_with_metadata"):
-            return self.backend.chat_with_metadata(
-                messages=messages,
-                model=self.model_name,
-                **kwargs,
+        if not hasattr(self.backend, "chat_with_metadata"):
+            raise BackendError(
+                "gameplay public speech backend must support chat_with_metadata"
             )
-        return self._chat(messages, **kwargs), None
+        content, metadata = self.backend.chat_with_metadata(
+            messages=messages,
+            model=self.model_name,
+            **kwargs,
+        )
+        if (
+            not isinstance(metadata, dict)
+            or not isinstance(metadata.get("finish_reason"), str)
+        ):
+            raise BackendError(
+                "gameplay public speech response requires finish_reason metadata"
+            )
+        return content, metadata
 
     def _build_readonly_belief_context(self, observation):
         """Build detached messages from this player's legal observation."""
@@ -306,9 +316,6 @@ class LLMAgent(Agent):
                                                 valid_actions=valid_actions_str)
         elif 'speech' in phase:
             identity = observation['identity']
-            identity_info = CON.player_identity_info.format(player_idx=observation['current_act_idx'],
-                                                            identity=CON.identity_chinese[identity],
-                                                            identity_ability=CON.identity_abilities[identity])
             if self.gameplay_prompt_profile == (
                 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
             ):
@@ -325,6 +332,11 @@ class LLMAgent(Agent):
                     + "\n\n** 输出"
                 )
             else:
+                identity_info = CON.player_identity_info.format(
+                    player_idx=observation['current_act_idx'],
+                    identity=CON.identity_chinese[identity],
+                    identity_ability=CON.identity_abilities[identity],
+                )
                 logs = self.format_log(observation['game_log'])
                 prompt = CON.speech_prompt.format(
                     game_description=CON.game_description,

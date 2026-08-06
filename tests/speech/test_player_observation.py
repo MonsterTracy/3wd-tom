@@ -183,15 +183,24 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.day = 2
         self.env.day_or_night = "day"
         self.env.phase = "speech"
-        self.env.current_act_idx = 0
-        self.env.alive = [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+        self.env.current_act_idx = 1
+        self.env.alive = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
         self.env.game_log.extend(
             [
                 Log(
                     viewer=list(range(7)),
                     source=-1,
-                    target=3,
-                    content={"vote_outcome": 3, "expelled": 3},
+                    target=[3],
+                    content={"dead_list": [3]},
+                    day=1,
+                    time="第1天夜晚",
+                    event="end_night",
+                ),
+                Log(
+                    viewer=list(range(7)),
+                    source=-1,
+                    target=2,
+                    content={"vote_outcome": 2, "expelled": 2},
                     day=1,
                     time="第1天白天",
                     event="end_vote",
@@ -201,7 +210,9 @@ class PlayerObservationTest(unittest.TestCase):
                     source=4,
                     target=list(range(7)),
                     content={
-                        "speech_content": "player3 已死，大家不用管他。",
+                        "speech_content": (
+                            "player1 已死亡，player3 仍存活，应该投 player4。"
+                        ),
                         "sp_actions": [],
                     },
                     day=2,
@@ -213,7 +224,7 @@ class PlayerObservationTest(unittest.TestCase):
 
         observations = [
             self.env.get_observation_for(player_id)
-            for player_id in (1, 3, 4, 5)
+            for player_id in (1, 2, 3, 5)
         ]
         public_state = observations[0]["authoritative_public_state"]
         self.assertTrue(
@@ -222,41 +233,54 @@ class PlayerObservationTest(unittest.TestCase):
                 for observation in observations[1:]
             )
         )
-        self.assertEqual(public_state["alive_players"], [1, 3, 5, 6, 7])
+        self.assertEqual(public_state["alive_players"], [1, 2, 5, 6, 7])
         self.assertEqual(
-            public_state["eliminated_players"],
-            [
-                {"player_id": 2, "status": "dead"},
-                {"player_id": 4, "status": "exiled"},
-            ],
+            public_state["last_night_result"],
+            {"day": 1, "dead_players": [4]},
         )
-        self.assertEqual(public_state["legal_vote_targets"], [])
+        self.assertEqual(
+            public_state["prior_exiles"],
+            [{"player_id": 3, "day": 1}],
+        )
+        self.assertEqual(
+            public_state["suggestible_exile_targets"],
+            [1, 5, 6, 7],
+        )
 
         prompt = LLMAgent(
             gameplay_prompt_profile="strict_classic7"
         ).format_observation(observations[0])
-        authoritative, remainder = prompt.split(
+        before_private, remainder = prompt.split(
             "【你合法知道的私有信息】",
             1,
         )
-        self.assertIn("存活玩家：player1, player3, player5, player6, player7", authoritative)
-        self.assertIn("player2：已死亡", authoritative)
-        self.assertIn("player4：已放逐", authoritative)
-        self.assertIn("本轮合法投票目标：当前无投票动作", authoritative)
-        self.assertNotIn("player3 已死", authoritative)
+        authoritative = before_private.split(
+            "【权威公共状态】",
+            1,
+        )[1]
+        for label in (
+            "【当前阶段】",
+            "【昨夜公开结果】",
+            "【此前放逐】",
+            "【当前存活】",
+            "【当前可公开建议放逐】",
+        ):
+            self.assertEqual(prompt.count(label), 1)
+        self.assertIn("【昨夜公开结果】player4 昨夜死亡", authoritative)
+        self.assertIn("player3 已于第1天放逐", authoritative)
+        self.assertIn("【当前存活】player1, player2, player5, player6, player7", authoritative)
+        self.assertIn("【当前可公开建议放逐】player1, player5, player6, player7", authoritative)
+        self.assertNotIn("player1 已死亡", authoritative)
+        self.assertNotIn("player3 仍存活", authoritative)
         self.assertNotIn("player0", prompt)
+        self.assertNotIn("狼人", authoritative)
+        self.assertNotIn("查验", authoritative)
         self.assertIn("【其他玩家此前的公开主张】", remainder)
-        self.assertIn("player5：player3 已死，大家不用管他。", remainder)
-        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
-
-        self.env.phase = "vote"
-        vote_state = self.env.get_observation_for(1)[
-            "authoritative_public_state"
-        ]
-        self.assertEqual(
-            vote_state["legal_vote_targets"],
-            [1, 3, 5, 6, 7],
+        self.assertIn(
+            "player5：player1 已死亡，player3 仍存活，应该投 player4。",
+            remainder,
         )
+        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
 
     def test_invalid_player_id_is_rejected(self):
         with self.assertRaises(ValueError):

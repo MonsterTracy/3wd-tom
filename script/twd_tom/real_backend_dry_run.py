@@ -673,24 +673,18 @@ class AuditedBackend:
         usage = None
         raised = None
         try:
-            if hasattr(self.backend, "chat_with_metadata"):
-                response_text, usage = self.backend.chat_with_metadata(
-                    messages=messages,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format=response_format,
-                    **kwargs,
+            if not hasattr(self.backend, "chat_with_metadata"):
+                raise TypeError(
+                    "audited backend requires explicit response metadata"
                 )
-            else:
-                response_text = self.backend.chat(
-                    messages=messages,
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format=response_format,
-                    **kwargs,
-                )
+            response_text, usage = self.backend.chat_with_metadata(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=response_format,
+                **kwargs,
+            )
             if not isinstance(response_text, str):
                 raise TypeError("backend response must be text")
         except Exception as exc:

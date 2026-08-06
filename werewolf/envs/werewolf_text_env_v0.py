@@ -818,49 +818,54 @@ class WerewolfTextEnvV0(gym.Env):
     def _build_authoritative_public_state(self):
         """Return a read-only view of deterministic public game state."""
 
-        exiled = {
-            log.content["expelled"]
+        prior_exiles = [
+            {
+                "player_id": log.content["expelled"] + 1,
+                "day": log.day,
+            }
             for log in self.game_log
             if log.event == "end_vote"
             and isinstance(log.content, dict)
             and isinstance(log.content.get("expelled"), int)
             and 0 <= log.content["expelled"] < self.n_player
-        }
+        ]
+        last_night_result = next(
+            (
+                {
+                    "day": log.day,
+                    "dead_players": [
+                        player_idx + 1
+                        for player_idx in log.content["dead_list"]
+                    ],
+                }
+                for log in reversed(self.game_log)
+                if log.event == "end_night"
+                and log.day == self.day - 1
+                and isinstance(log.content, dict)
+                and isinstance(log.content.get("dead_list"), list)
+            ),
+            None,
+        )
         alive_players = [
             index + 1
             for index, is_alive in enumerate(self.alive)
             if is_alive == 1
         ]
-        eliminated_players = [
-            {
-                "player_id": index + 1,
-                "status": (
-                    "exiled" if index in exiled else "dead"
-                ),
-            }
-            for index, is_alive in enumerate(self.alive)
-            if is_alive != 1
+        current_speaker = self.current_act_idx + 1
+        suggestible_exile_targets = [
+            player_id
+            for player_id in alive_players
+            if player_id != current_speaker
         ]
-
-        legal_vote_targets = []
-        if self.phase in {"vote", "vote_pk"}:
-            legal_vote_targets = [
-                target
-                for action_type, target
-                in self._get_valid_action_for_current_actor()
-                if action_type in {"vote", "vote_pk"}
-                and isinstance(target, int)
-                and 1 <= target <= self.n_player
-                and target in alive_players
-            ]
 
         return {
             "day": self.day,
             "day_or_night": self.day_or_night,
             "phase": self.phase,
+            "last_night_result": last_night_result,
+            "prior_exiles": prior_exiles,
             "alive_players": alive_players,
-            "eliminated_players": eliminated_players,
-            "legal_vote_targets": legal_vote_targets,
+            "suggestible_exile_targets": suggestible_exile_targets,
         }
 
     def get_twd_tom_hard_knowledge_for(self, player_id):

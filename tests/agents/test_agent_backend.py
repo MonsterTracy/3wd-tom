@@ -8,6 +8,7 @@ from werewolf.agents.llm_agent import (
     validate_gameplay_public_speech,
 )
 from werewolf.agents.twdm_agent import TWDMStrategyAgent
+from werewolf.backends import BackendError
 from werewolf.registry import Registry
 
 
@@ -17,6 +18,25 @@ class RecordingBackend:
         self.calls = []
 
     def chat(
+        self,
+        messages,
+        model=None,
+        temperature=0.7,
+        max_tokens=None,
+        response_format=None,
+        **kwargs,
+    ):
+        self._record(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            **kwargs,
+        )
+        return self.responses.pop(0)
+
+    def _record(
         self,
         messages,
         model=None,
@@ -35,7 +55,19 @@ class RecordingBackend:
                 **kwargs,
             }
         )
-        return self.responses.pop(0)
+
+
+class MetadataBackend(RecordingBackend):
+    def __init__(self, responses=None, metadata=None):
+        super().__init__(responses)
+        self.metadata = list(
+            metadata
+            or [{"finish_reason": "stop"}] * len(self.responses)
+        )
+
+    def chat_with_metadata(self, **kwargs):
+        self._record(**kwargs)
+        return self.responses.pop(0), self.metadata.pop(0)
 
 
 class AgentBackendTest(unittest.TestCase):
@@ -81,7 +113,7 @@ class AgentBackendTest(unittest.TestCase):
                     )
 
     def test_gpt_agent_speech_uses_backend_chat_and_agent_model(self):
-        backend = RecordingBackend(["这是发言"])
+        backend = MetadataBackend(["这是发言"])
         agent = GPTAgent(
             backend=backend,
             model_name="agent-model",
@@ -103,6 +135,41 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(backend.calls[0]["model"], "agent-model")
         self.assertEqual(backend.calls[0]["temperature"], 0.2)
         self.assertIsNone(backend.calls[0]["max_tokens"])
+
+    def test_gameplay_speech_requires_explicit_fresh_metadata(self):
+        no_metadata_backend = RecordingBackend(["不会被旧路径读取"])
+        agent = GPTAgent(
+            backend=no_metadata_backend,
+            model_name="agent-model",
+        )
+        agent.rate_limit = 0
+        observation = {
+            "phase": "1_day_speech",
+            "identity": "Villager",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": ("speech", -1),
+        }
+
+        with self.assertRaisesRegex(
+            BackendError,
+            "must support chat_with_metadata",
+        ):
+            agent.act(observation)
+        self.assertEqual(no_metadata_backend.calls, [])
+
+        backend = MetadataBackend(
+            ["第一次发言", "第二次发言"],
+            metadata=[{"finish_reason": "stop"}, None],
+        )
+        agent.backend = backend
+        self.assertEqual(agent.act(observation), ("speech", "第一次发言"))
+        with self.assertRaisesRegex(
+            BackendError,
+            "requires finish_reason metadata",
+        ):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_gpt_agent_applies_gameplay_max_tokens_to_speech_and_action(self):
         observations = (
@@ -134,7 +201,11 @@ class AgentBackendTest(unittest.TestCase):
 
         for name, response, observation, expected in observations:
             with self.subTest(name=name):
-                backend = RecordingBackend([response])
+                backend = (
+                    MetadataBackend([response])
+                    if name == "speech"
+                    else RecordingBackend([response])
+                )
                 agent = GPTAgent(
                     backend=backend,
                     model_name="agent-model",
@@ -149,7 +220,7 @@ class AgentBackendTest(unittest.TestCase):
                 )
 
     def test_gpt_agent_preserves_legacy_o1_limit_when_unconfigured(self):
-        backend = RecordingBackend(["公开发言"])
+        backend = MetadataBackend(["公开发言"])
         agent = GPTAgent(
             backend=backend,
             model_name="o1-test-model",
