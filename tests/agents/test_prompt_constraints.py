@@ -241,6 +241,35 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertIn('{"public_actions":[]}', empty_renderer)
         self.assertIn("不得点名其他玩家", empty_renderer)
 
+    def test_renderer_separates_oppose_from_vote_intent(self):
+        observation = _speech_observation("Villager")
+        stance_only = build_strict_classic7_speech_render_prompt(
+            authoritative_public_state=observation["authoritative_public_state"],
+            actor=3,
+            public_actions=[
+                {"action": "point_as_villager", "target": 3},
+                {"action": "oppose", "target": 4},
+            ],
+        )
+        with_vote = build_strict_classic7_speech_render_prompt(
+            authoritative_public_state=observation["authoritative_public_state"],
+            actor=3,
+            public_actions=[
+                {"action": "point_as_villager", "target": 3},
+                {"action": "oppose", "target": 4},
+                {"action": "vote_intent", "target": 4},
+            ],
+        )
+
+        self.assertIn('"action":"point_as_villager","target":3', stance_only)
+        self.assertIn('"action":"oppose","target":4', stance_only)
+        self.assertIn("不自动产生 support", stance_only)
+        self.assertIn("oppose(X) 不等于 vote_intent(X)", stance_only)
+        self.assertIn("计划没有 vote_intent", stance_only)
+        self.assertIn("不得表达投票给、票出、放逐、驱逐", stance_only)
+        self.assertIn("vote_intent target player4", with_vote)
+        self.assertIn("才可被表达为投票给、票出、放逐、驱逐", with_vote)
+
 
 if __name__ == "__main__":
     unittest.main()

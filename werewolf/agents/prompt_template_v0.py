@@ -377,7 +377,19 @@ def build_strict_classic7_speech_render_prompt(
         "计划为空：生成简短、非目标化的观望发言；不得点名其他玩家，"
         "不得生成身份、技能或投票声明。"
         if not public_actions
-        else "计划非空：每个 target 都必须以 playerN 或 N号明确出现。"
+        else "计划非空：每个 target 都必须以 playerN、玩家N 或 N号明确出现。"
+    )
+    vote_targets = [
+        item["target"]
+        for item in public_actions
+        if item["action"] == "vote_intent"
+    ]
+    vote_rule = (
+        "只有计划中的 vote_intent target "
+        + ", ".join(f"player{target}" for target in vote_targets)
+        + " 才可被表达为投票给、票出、放逐、驱逐、归票或今天出。"
+        if vote_targets
+        else "计划没有 vote_intent：不得表达投票给、票出、放逐、驱逐、归票或今天出任何玩家。"
     )
     return f"""{state_text}
 
@@ -386,6 +398,9 @@ def build_strict_classic7_speech_render_prompt(
 【输出合同】
 - 只输出 2–4 句中文公开发言正文，建议不超过 200 个汉字。
 - 只能表达已验证计划中的声明、立场、技能声称和投票倾向。
+- point_as_villager(X) 只表达将 X 公开判断为村民，不自动产生 support(X)。
+- oppose(X) 只表达质疑、反对、不认可或认为其发言可疑；oppose(X) 不等于 vote_intent(X)。
+- {vote_rule}
 - 不得新增计划外玩家、角色判断、技能结果或投票目标。
 - 不得复述完整历史，不输出 JSON、Markdown、标题或分析。
 - {empty_plan_rule}"""

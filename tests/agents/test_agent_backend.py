@@ -389,6 +389,69 @@ class AgentBackendTest(unittest.TestCase):
                     planned_player_ids=planned,
                 )
 
+    def test_player_prefix_references_satisfy_real_plan_coverage(self):
+        speech = "我认为玩家3是值得信赖的村民，而玩家4的发言存在可疑之处。"
+        self.assertEqual(
+            validate_gameplay_public_speech(
+                speech,
+                finish_reason="stop",
+                player_id=2,
+                phase="1_day_speech",
+                planned_player_ids={3, 4},
+            ),
+            speech,
+        )
+
+    def test_explicit_player_reference_formats_are_supported(self):
+        for reference in (
+            "player3", "player 3", "Player3", "玩家3", "玩家 3",
+            "3号", "3号玩家", "3号位", "玩家三", "三号", "三号玩家", "三号位",
+        ):
+            with self.subTest(reference=reference):
+                self.assertEqual(
+                    validate_gameplay_public_speech(
+                        f"我关注{reference}。",
+                        finish_reason="stop",
+                        player_id=1,
+                        phase="1_day_speech",
+                        planned_player_ids={3},
+                    ),
+                    f"我关注{reference}。",
+                )
+
+    def test_non_player_numbers_are_not_player_references(self):
+        for text in (
+            "第3天", "第三天", "第3点", "3票", "3人死亡",
+            "第3轮", "第3项计划", "计划中的第3项", "3个目标",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    validate_gameplay_public_speech(
+                        text,
+                        finish_reason="stop",
+                        player_id=1,
+                        phase="1_day_speech",
+                        planned_player_ids=set(),
+                    ),
+                    text,
+                )
+
+    def test_invalid_explicit_player_references_are_rejected(self):
+        for reference in (
+            "player0", "player8", "玩家0", "玩家8",
+            "0号玩家", "8号位", "玩家八",
+        ):
+            with self.subTest(reference=reference), self.assertRaisesRegex(
+                GameplaySpeechQualityError,
+                "invalid player reference",
+            ):
+                validate_gameplay_public_speech(
+                    f"我关注{reference}。",
+                    finish_reason="stop",
+                    player_id=1,
+                    phase="1_day_speech",
+                )
+
     def test_strict_speech_stops_at_failed_stage_without_retry_or_fallback(self):
         cases = (
             ([BackendError("planner failed")], None, 1),

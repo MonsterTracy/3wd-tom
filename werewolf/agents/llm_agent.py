@@ -162,6 +162,35 @@ def validate_public_speech_plan(
     return PublicSpeechPlan(tuple(validated))
 
 
+_CHINESE_PLAYER_NUMBERS = {
+    character: number
+    for number, character in enumerate("零一二三四五六七八九")
+}
+_EXPLICIT_PLAYER_REFERENCE = re.compile(
+    r"player\s*(?P<english>\d+)(?!\d)"
+    r"|玩家\s*(?P<chinese_prefix>\d+|[零一二三四五六七八九])(?!\d)"
+    r"|(?<!第)(?P<suffix>\d+|[零一二三四五六七八九])\s*号(?:玩家|位)?",
+    re.IGNORECASE,
+)
+
+
+def _extract_explicit_player_references(content, *, context):
+    referenced_players = set()
+    for match in _EXPLICIT_PLAYER_REFERENCE.finditer(content):
+        value = next(group for group in match.groups() if group is not None)
+        player_number = (
+            int(value)
+            if value.isdigit()
+            else _CHINESE_PLAYER_NUMBERS[value]
+        )
+        if not 1 <= player_number <= 7:
+            raise GameplaySpeechQualityError(
+                f"invalid player reference {match.group(0)!r} ({context})"
+            )
+        referenced_players.add(player_number)
+    return referenced_players
+
+
 def validate_gameplay_public_speech(
     content,
     *,
@@ -182,19 +211,10 @@ def validate_gameplay_public_speech(
             f"truncated gameplay public speech ({context})"
         )
 
-    referenced_players = set()
-    for match in re.finditer(r"player\s*(\d+)(?!\d)", content, re.IGNORECASE):
-        referenced_players.add(int(match.group(1)))
-        if not 1 <= int(match.group(1)) <= 7:
-            raise GameplaySpeechQualityError(
-                f"invalid player reference {match.group(0)!r} ({context})"
-            )
-    for match in re.finditer(r"(?<!第)(\d+)\s*号(?:玩家|位)?", content):
-        referenced_players.add(int(match.group(1)))
-        if not 1 <= int(match.group(1)) <= 7:
-            raise GameplaySpeechQualityError(
-                f"invalid player reference {match.group(0)!r} ({context})"
-            )
+    referenced_players = _extract_explicit_player_references(
+        content,
+        context=context,
+    )
 
     stripped = content.lstrip()
     if stripped.startswith(("{", "[", "```", "# ")):
