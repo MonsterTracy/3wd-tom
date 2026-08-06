@@ -3,7 +3,8 @@ import unittest
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.prompt_template_v0 import (
     CON,
-    build_strict_classic7_speech_rules,
+    build_strict_classic7_speech_plan_prompt,
+    build_strict_classic7_speech_render_prompt,
 )
 from werewolf.agents.twdm_strategy import TWDMStrategy
 from werewolf.helper.log_utils import Log
@@ -114,33 +115,26 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
 
         self.assertEqual(default_prompt, legacy_prompt)
         self.assertNotIn("strict_classic7", legacy_prompt)
-        self.assertIn("strict_classic7", strict_prompt)
-        self.assertIn("当前发言者必须是 player3", strict_prompt)
-        self.assertIn("禁止输出上述范围以外的玩家编号", strict_prompt)
-        self.assertIn(
-            "不得把尚未发生的未来系统事件描述为已经由系统确认发生",
-            strict_prompt,
-        )
-        self.assertIn("只输出中文公开发言正文", strict_prompt)
+        self.assertIn("当前 speaker：player3", strict_prompt)
+        self.assertIn("Private Planner", strict_prompt)
+        self.assertIn("只输出 public_actions", strict_prompt)
         for section in (
             "【权威公共状态】",
             "【你合法知道的私有信息】",
             "【其他玩家此前的公开主张】",
-            "【公开发言要求】",
+            "【计划合同】",
         ):
             self.assertIn(section, strict_prompt)
 
         for contract in (
-            "输出 2–4 句",
-            "建议不超过 200 个汉字",
-            "不输出分析过程、标题、Markdown、JSON",
-            "不复述完整游戏历史",
-            "不解释狼人杀通用规则",
+            "不要输出最终自然语言发言或解释",
+            "空 public_actions 合法",
+            "只输出符合请求 JSON Schema 的对象",
         ):
             self.assertIn(contract, strict_prompt)
 
     def test_role_rules_only_describe_real_role_capabilities(self):
-        werewolf = build_strict_classic7_speech_rules(
+        werewolf = build_strict_classic7_speech_plan_prompt(
             _speech_observation(
                 "Werewolf",
                 game_log=[
@@ -152,10 +146,10 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        villager = build_strict_classic7_speech_rules(
+        villager = build_strict_classic7_speech_plan_prompt(
             _speech_observation("Villager")
         )
-        seer = build_strict_classic7_speech_rules(
+        seer = build_strict_classic7_speech_plan_prompt(
             _speech_observation(
                 "Seer",
                 game_log=[
@@ -167,7 +161,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        witch = build_strict_classic7_speech_rules(
+        witch = build_strict_classic7_speech_plan_prompt(
             _speech_observation(
                 "Witch",
                 game_log=[
@@ -180,7 +174,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        guard = build_strict_classic7_speech_rules(
+        guard = build_strict_classic7_speech_plan_prompt(
             _speech_observation(
                 "Guard",
                 game_log=[
@@ -211,6 +205,41 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             self.assertNotIn(forbidden_contract, "\n".join(
                 (werewolf, villager, seer, witch, guard)
             ))
+
+    def test_renderer_receives_only_authority_actor_and_validated_plan(self):
+        observation = _speech_observation(
+            "Werewolf",
+            game_log=[
+                _log(event="werewolf_team_info", content={"wolf_team": [1, 6]}),
+                _log(event="kill_decision", target=3),
+                _log(event="speech", source=2, content={"speech_content": "秘密原文"}),
+            ],
+        )
+        observation["current_act_idx"] = 6
+        observation["authoritative_public_state"]["suggestible_exile_targets"] = [
+            1, 2, 3, 4, 5, 7
+        ]
+        planner = build_strict_classic7_speech_plan_prompt(observation)
+        renderer = build_strict_classic7_speech_render_prompt(
+            authoritative_public_state=observation["authoritative_public_state"],
+            actor=6,
+            public_actions=[{"action": "oppose", "target": 2}],
+        )
+
+        self.assertIn("真实狼队信息（仅用于内部策略）：player1, player6", planner)
+        self.assertIn("真实夜间刀人决策（仅用于内部策略）：player3", planner)
+        self.assertIn("秘密原文", planner)
+        self.assertIn('"action":"oppose"', renderer)
+        for private_text in ("真实狼队信息", "夜间刀人", "秘密原文", "game_log"):
+            self.assertNotIn(private_text, renderer)
+
+        empty_renderer = build_strict_classic7_speech_render_prompt(
+            authoritative_public_state=observation["authoritative_public_state"],
+            actor=6,
+            public_actions=[],
+        )
+        self.assertIn('{"public_actions":[]}', empty_renderer)
+        self.assertIn("不得点名其他玩家", empty_renderer)
 
 
 if __name__ == "__main__":

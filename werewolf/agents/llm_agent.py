@@ -1,5 +1,6 @@
 import ast
 from copy import copy, deepcopy
+from dataclasses import dataclass
 import json
 import logging
 import random
@@ -9,11 +10,12 @@ from werewolf.agents.prompt_template_v0 import (
     CON,
     LEGACY_GAMEPLAY_PROMPT_PROFILE,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-    build_strict_classic7_speech_rules,
+    build_strict_classic7_speech_plan_prompt,
 )
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import JsonFormatter, CustomLoggerAdapter
+from werewolf.models.twd_tom.schema import ACTION_NAMES
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     private_belief_response_format,
@@ -49,12 +51,124 @@ class GameplaySpeechQualityError(ValueError):
     """A deterministic public-speech response contract violation."""
 
 
+class PublicSpeechPlanValidationError(ValueError):
+    """A private planner response violates the public-plan contract."""
+
+
+@dataclass(frozen=True)
+class PublicSpeechPlan:
+    """Validated public claims represented only by formal speech actions."""
+
+    public_actions: tuple[tuple[str, int], ...]
+
+    @property
+    def targets(self):
+        return frozenset(target for _action, target in self.public_actions)
+
+    def as_list(self):
+        return [
+            {"action": action, "target": target}
+            for action, target in self.public_actions
+        ]
+
+
+PUBLIC_SPEECH_PLAN_JSON_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["public_actions"],
+    "properties": {
+        "public_actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action", "target"],
+                "properties": {
+                    "action": {"type": "string", "enum": list(ACTION_NAMES)},
+                    "target": {"type": "integer", "enum": list(range(1, 8))},
+                },
+            },
+        },
+    },
+}
+
+
+def public_speech_plan_response_format(*, supports_json_schema):
+    if supports_json_schema is not True:
+        raise BackendError(
+            "strict speech planner requires backend JSON Schema support"
+        )
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "public_speech_plan",
+            "strict": True,
+            "schema": deepcopy(PUBLIC_SPEECH_PLAN_JSON_SCHEMA),
+        },
+    }
+
+
+def validate_public_speech_plan(
+    payload,
+    *,
+    authoritative_public_state,
+    player_id,
+    phase,
+    game_context=None,
+):
+    context = f"game={game_context or 'unavailable'}, player={player_id}, phase={phase}"
+
+    def reject(reason):
+        raise PublicSpeechPlanValidationError(f"{reason} ({context})")
+
+    if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
+        reject("plan must contain only public_actions")
+    public_actions = payload["public_actions"]
+    if not isinstance(public_actions, list):
+        reject("public_actions must be an array")
+    if not isinstance(authoritative_public_state, dict):
+        reject("authoritative public state is missing")
+    candidates = authoritative_public_state.get("suggestible_exile_targets")
+    if not isinstance(candidates, list):
+        reject("authoritative candidate set is missing")
+
+    validated = []
+    seen = set()
+    for item in public_actions:
+        if not isinstance(item, dict) or set(item) != {"action", "target"}:
+            reject("every public action must contain only action and target")
+        action = item["action"]
+        target = item["target"]
+        if action not in ACTION_NAMES:
+            reject(f"unsupported public action: {action!r}")
+        if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 7:
+            reject(f"invalid public action target: {target!r}")
+        pair = (action, target)
+        if pair in seen:
+            reject(f"duplicate public action: {action}/player{target}")
+        seen.add(pair)
+        validated.append(pair)
+
+    for checked, redundant in (
+        ("check_as_werewolf", "point_as_werewolf"),
+        ("check_as_good", "point_as_villager"),
+    ):
+        for target in range(1, 8):
+            if (checked, target) in seen and (redundant, target) in seen:
+                reject(f"redundant A1 actions for player{target}")
+    for action, target in validated:
+        if action == "vote_intent" and target not in candidates:
+            reject(f"vote_intent target player{target} is not currently suggestible")
+    return PublicSpeechPlan(tuple(validated))
+
+
 def validate_gameplay_public_speech(
     content,
     *,
     finish_reason=None,
     player_id=None,
     phase=None,
+    planned_player_ids=None,
 ):
     """Validate only high-confidence gameplay speech failures."""
 
@@ -68,12 +182,15 @@ def validate_gameplay_public_speech(
             f"truncated gameplay public speech ({context})"
         )
 
+    referenced_players = set()
     for match in re.finditer(r"player\s*(\d+)(?!\d)", content, re.IGNORECASE):
+        referenced_players.add(int(match.group(1)))
         if not 1 <= int(match.group(1)) <= 7:
             raise GameplaySpeechQualityError(
                 f"invalid player reference {match.group(0)!r} ({context})"
             )
     for match in re.finditer(r"(?<!第)(\d+)\s*号(?:玩家|位)?", content):
+        referenced_players.add(int(match.group(1)))
         if not 1 <= int(match.group(1)) <= 7:
             raise GameplaySpeechQualityError(
                 f"invalid player reference {match.group(0)!r} ({context})"
@@ -99,6 +216,19 @@ def validate_gameplay_public_speech(
         raise GameplaySpeechQualityError(
             f"internal control text in gameplay public speech ({context})"
         )
+    if planned_player_ids is not None:
+        planned = set(planned_player_ids)
+        allowed = planned | {player_id}
+        unexpected = referenced_players - allowed
+        if unexpected:
+            raise GameplaySpeechQualityError(
+                f"unplanned player reference(s) {sorted(unexpected)} ({context})"
+            )
+        missing = planned - referenced_players
+        if missing:
+            raise GameplaySpeechQualityError(
+                f"planned player reference(s) missing {sorted(missing)} ({context})"
+            )
     return content
 
 class LLMAgent(Agent):
@@ -319,17 +449,10 @@ class LLMAgent(Agent):
             if self.gameplay_prompt_profile == (
                 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
             ):
-                strict_rules = (
-                    build_strict_classic7_speech_rules(
+                prompt = (
+                    build_strict_classic7_speech_plan_prompt(
                         observation
                     )
-                )
-                prompt = (
-                    "** 游戏说明\n"
-                    + CON.game_description
-                    + "\n\n"
-                    + strict_rules
-                    + "\n\n** 输出"
                 )
             else:
                 identity_info = CON.player_identity_info.format(

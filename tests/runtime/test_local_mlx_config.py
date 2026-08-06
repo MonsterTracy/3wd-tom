@@ -516,8 +516,14 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
     calls = []
 
     def handler(request):
-        calls.append((str(request.url), json.loads(request.content)))
-        return _success_response(request, content="这是公开发言。")
+        payload = json.loads(request.content)
+        calls.append((str(request.url), payload))
+        content = (
+            '{"public_actions":[]}'
+            if payload.get("response_format", {}).get("type") == "json_schema"
+            else "这是公开发言。"
+        )
+        return _success_response(request, content=content)
 
     _mock_openai_clients(monkeypatch, handler)
     normalized = normalize_runtime_config(_server_qwen_config())
@@ -564,11 +570,17 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
         }
     )
 
-    assert len(calls) == 1
-    url, payload = calls[0]
-    assert url == "http://127.0.0.1:8000/v1/chat/completions"
-    assert payload["max_tokens"] == 512
-    assert payload["model"] == "qwen2.5-7b-instruct"
+    assert len(calls) == 2
+    assert {url for url, _payload in calls} == {
+        "http://127.0.0.1:8000/v1/chat/completions"
+    }
+    assert [payload["max_tokens"] for _url, payload in calls] == [512, 512]
+    assert [payload["model"] for _url, payload in calls] == [
+        "qwen2.5-7b-instruct",
+        "qwen2.5-7b-instruct",
+    ]
+    assert calls[0][1]["response_format"]["type"] == "json_schema"
+    assert "response_format" not in calls[1][1]
 
 
 @pytest.mark.parametrize(

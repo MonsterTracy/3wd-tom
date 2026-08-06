@@ -274,6 +274,56 @@ def test_gameplay_limit_and_finish_reason_are_audited(
     )
 
 
+def test_strict_plan_and_renderer_are_two_distinguishable_gameplay_calls(
+    tmp_path,
+):
+    session, writer = _new_session(tmp_path)
+    fake = FakeBackend(
+        responses=['{"public_actions":[]}', "我继续听大家发言。"],
+        usage={"finish_reason": "stop"},
+        supports_json_schema=True,
+    )
+    agent = GPTAgent(
+        backend=_backend(fake, session),
+        model_name="fake-model",
+        gameplay_prompt_profile="strict_classic7",
+        gameplay_max_tokens=512,
+    )
+    agent.rate_limit = 0
+    observation = {
+        **_observation(),
+        "valid_action": ("speech", -1),
+        "authoritative_public_state": {
+            "day": 1,
+            "day_or_night": "day",
+            "phase": "speech",
+            "last_night_result": {"day": 0, "dead_players": []},
+            "prior_exiles": [],
+            "alive_players": [1, 2, 3, 4, 5, 6, 7],
+            "suggestible_exile_targets": [2, 3, 4, 5, 6, 7],
+        },
+    }
+
+    with session.gameplay_context(
+        acting_player_id=1,
+        observation=observation,
+        public_events=_public_events(),
+    ):
+        assert agent.act(observation) == ("speech", "我继续听大家发言。")
+    writer.close()
+
+    records, _serialized = _records(tmp_path / "audit.jsonl")
+    assert [record["call_category"] for record in records] == [
+        "gameplay",
+        "gameplay",
+    ]
+    assert [record["response_format_type"] for record in records] == [
+        "json_schema",
+        None,
+    ]
+    assert records[1]["call_index"] == records[0]["call_index"] + 1
+
+
 def test_bad_request_error_message_is_capped_and_privacy_safe(
     tmp_path,
 ):

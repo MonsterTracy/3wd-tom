@@ -1,11 +1,19 @@
+import json
 import time
 import re
 import random
 from werewolf.agents.llm_agent import (
     LLMAgent,
+    PublicSpeechPlanValidationError,
+    public_speech_plan_response_format,
     validate_gameplay_public_speech,
+    validate_public_speech_plan,
 )
-from werewolf.agents.prompt_template_v0 import CON
+from werewolf.agents.prompt_template_v0 import (
+    CON,
+    STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+    build_strict_classic7_speech_render_prompt,
+)
 from . import agent_registry as AgentRegistry
 
 
@@ -37,20 +45,32 @@ class GPTAgent(LLMAgent):
         if request_max_tokens is None and is_o1:
             request_max_tokens = 32000
         if 'speech' in phase:
-            messages = [{'role': 'user', 'content': prompt}]
-            raw_action, metadata = self._chat_with_metadata(
-                messages,
-                temperature=request_temperature,
-                max_tokens=request_max_tokens,
-            )
-            validate_gameplay_public_speech(
-                raw_action,
-                finish_reason=metadata["finish_reason"],
-                player_id=observation.get("current_act_idx"),
-                phase=phase,
-            )
-            raw_action = raw_action.strip()
-            checked_action = self.extract_answer(raw_action)
+            if self.gameplay_prompt_profile == (
+                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+            ):
+                raw_action, checked_action, prompt = (
+                    self._generate_strict_public_speech(
+                        observation=observation,
+                        planner_prompt=prompt,
+                        temperature=request_temperature,
+                        max_tokens=request_max_tokens,
+                    )
+                )
+            else:
+                messages = [{'role': 'user', 'content': prompt}]
+                raw_action, metadata = self._chat_with_metadata(
+                    messages,
+                    temperature=request_temperature,
+                    max_tokens=request_max_tokens,
+                )
+                validate_gameplay_public_speech(
+                    raw_action,
+                    finish_reason=metadata["finish_reason"],
+                    player_id=observation.get("current_act_idx"),
+                    phase=phase,
+                )
+                raw_action = raw_action.strip()
+                checked_action = self.extract_answer(raw_action)
             gen_times = 0
             env_action = ('speech', checked_action)
 
@@ -112,6 +132,78 @@ class GPTAgent(LLMAgent):
                                         "phase": phase,
                                         "gen_times": retry_count - 1})
         return env_action
+
+    def _generate_strict_public_speech(
+        self,
+        *,
+        observation,
+        planner_prompt,
+        temperature,
+        max_tokens,
+    ):
+        player_id = observation.get("current_act_idx")
+        phase = observation.get("phase")
+        game_context = getattr(
+            getattr(self.backend, "session", None),
+            "game_id",
+            None,
+        )
+        plan_content, plan_metadata = self._chat_with_metadata(
+            [{"role": "user", "content": planner_prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=public_speech_plan_response_format(
+                supports_json_schema=getattr(
+                    self.backend,
+                    "supports_json_schema",
+                    False,
+                )
+            ),
+        )
+        context = (
+            f"game={game_context or 'unavailable'}, "
+            f"player={player_id}, phase={phase}"
+        )
+        if plan_metadata["finish_reason"] == "length":
+            raise PublicSpeechPlanValidationError(
+                f"planner response was truncated ({context})"
+            )
+        try:
+            plan_payload = json.loads(plan_content)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise PublicSpeechPlanValidationError(
+                f"planner response is not valid JSON ({context})"
+            ) from exc
+        plan = validate_public_speech_plan(
+            plan_payload,
+            authoritative_public_state=observation.get(
+                "authoritative_public_state"
+            ),
+            player_id=player_id,
+            phase=phase,
+            game_context=game_context,
+        )
+        renderer_prompt = build_strict_classic7_speech_render_prompt(
+            authoritative_public_state=observation[
+                "authoritative_public_state"
+            ],
+            actor=player_id,
+            public_actions=plan.as_list(),
+        )
+        rendered_content, render_metadata = self._chat_with_metadata(
+            [{"role": "user", "content": renderer_prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        validate_gameplay_public_speech(
+            rendered_content,
+            finish_reason=render_metadata["finish_reason"],
+            player_id=player_id,
+            phase=phase,
+            planned_player_ids=plan.targets,
+        )
+        final_speech = rendered_content.strip()
+        return final_speech, final_speech, renderer_prompt
 
     def extract_answer(self, response):
         pattern = r'\n\n\"(.*?)\"'

@@ -3,7 +3,7 @@ import unittest
 
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.prompt_template_v0 import (
-    build_strict_classic7_speech_rules,
+    build_strict_classic7_speech_plan_prompt,
 )
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
@@ -323,7 +323,7 @@ class PlayerObservationTest(unittest.TestCase):
                 seer_observation["game_log"]
             ),
         )
-        strict_rules = build_strict_classic7_speech_rules(
+        strict_rules = build_strict_classic7_speech_plan_prompt(
             seer_observation
         )
         self.assertIn("(尚无已完成查验)", strict_rules)
@@ -357,7 +357,7 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("0号", formatted)
         self.assertIn(
             "player3=好人",
-            build_strict_classic7_speech_rules(
+            build_strict_classic7_speech_plan_prompt(
                 seer_observation
             ),
         )
