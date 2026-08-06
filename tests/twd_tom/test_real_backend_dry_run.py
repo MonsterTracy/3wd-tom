@@ -757,6 +757,7 @@ def test_player_logs_are_isolated_and_closed_between_games(
     game_action_counts = {
         "game_001_seed_343": 2,
         "game_002_seed_344": 3,
+        "game_003_seed_345": 1,
     }
     closed_agents = []
 
@@ -796,6 +797,8 @@ def test_player_logs_are_isolated_and_closed_between_games(
                     "action_index": action_index,
                 },
             )
+        if game_id == "game_003_seed_345":
+            raise RuntimeError("mock game failure")
         (env.log_dir / "game_log.json").write_text(
             json.dumps(game_log),
             encoding="utf-8",
@@ -860,9 +863,19 @@ def test_player_logs_are_isolated_and_closed_between_games(
         second_dir = run_mock_game(
             "game_002_seed_344", 344, writer
         )
+        failed_dir = tmp_path / "game_003_seed_345"
+        with pytest.raises(RuntimeError, match="mock game failure"):
+            run_mock_game(
+                "game_003_seed_345", 345, writer
+            )
 
     assert (first_dir / "Player_1.jsonl").read_bytes() == first_contents
     assert all(not agent.has_log for agent in closed_agents)
+    assert len(
+        (failed_dir / "Player_1.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ) == 1
 
     for game_dir in (first_dir, second_dir):
         game_log = json.loads(

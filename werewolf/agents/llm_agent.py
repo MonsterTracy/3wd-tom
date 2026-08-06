@@ -300,17 +300,41 @@ class LLMAgent(Agent):
             **kwargs,
         )
 
-    def _chat_with_metadata(self, messages, **kwargs):
+    def _chat_with_metadata(
+        self,
+        messages,
+        *,
+        player_log_context=None,
+        **kwargs,
+    ):
         if self.backend is None or not self.model_name:
             raise BackendError("Agent backend and model_name are required.")
         if not hasattr(self.backend, "chat_with_metadata"):
             raise BackendError(
                 "gameplay public speech backend must support chat_with_metadata"
             )
-        content, metadata = self.backend.chat_with_metadata(
+        try:
+            content, metadata = self.backend.chat_with_metadata(
+                messages=messages,
+                model=self.model_name,
+                **kwargs,
+            )
+        except Exception as exc:
+            self._log_player_backend_call(
+                messages=messages,
+                content=None,
+                metadata=None,
+                player_log_context=player_log_context,
+                response_format=kwargs.get("response_format"),
+                error=exc,
+            )
+            raise
+        self._log_player_backend_call(
             messages=messages,
-            model=self.model_name,
-            **kwargs,
+            content=content,
+            metadata=metadata,
+            player_log_context=player_log_context,
+            response_format=kwargs.get("response_format"),
         )
         if (
             not isinstance(metadata, dict)
@@ -320,6 +344,49 @@ class LLMAgent(Agent):
                 "gameplay public speech response requires finish_reason metadata"
             )
         return content, metadata
+
+    def _log_player_backend_call(
+        self,
+        *,
+        messages,
+        content,
+        metadata,
+        player_log_context,
+        response_format,
+        error=None,
+    ):
+        if player_log_context is None or not self.has_log:
+            return
+        observation = player_log_context["observation"]
+        self.logger.info(
+            player_log_context["stage"],
+            extra={
+                "prompt": messages[0]["content"],
+                "messages": messages,
+                "response": content,
+                "action": content,
+                "finish_reason": (
+                    metadata.get("finish_reason")
+                    if isinstance(metadata, dict)
+                    else None
+                ),
+                "response_format": response_format,
+                "model": self.model_name,
+                "backend_id": getattr(self, "backend_id", None),
+                "game_id": getattr(
+                    getattr(self.backend, "session", None),
+                    "game_id",
+                    None,
+                ),
+                "dispatch_status": "error" if error else "ok",
+                "error_type": type(error).__name__ if error else None,
+                "error_message": str(error) if error else None,
+                "player_id": observation["current_act_idx"],
+                "role": observation["identity"],
+                "phase": observation["phase"],
+                "gen_times": 0,
+            },
+        )
 
     def _build_readonly_belief_context(self, observation):
         """Build detached messages from this player's legal observation."""

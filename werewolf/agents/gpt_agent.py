@@ -45,9 +45,10 @@ class GPTAgent(LLMAgent):
         if request_max_tokens is None and is_o1:
             request_max_tokens = 32000
         if 'speech' in phase:
-            if self.gameplay_prompt_profile == (
+            is_strict_speech = self.gameplay_prompt_profile == (
                 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
-            ):
+            )
+            if is_strict_speech:
                 raw_action, checked_action, prompt = (
                     self._generate_strict_public_speech(
                         observation=observation,
@@ -74,7 +75,7 @@ class GPTAgent(LLMAgent):
             gen_times = 0
             env_action = ('speech', checked_action)
 
-            if self.has_log:
+            if self.has_log and not is_strict_speech:
                 self.logger.info(phase,
                                  extra={"prompt": prompt,
                                         "response": checked_action,
@@ -150,6 +151,10 @@ class GPTAgent(LLMAgent):
         )
         plan_content, plan_metadata = self._chat_with_metadata(
             [{"role": "user", "content": planner_prompt}],
+            player_log_context={
+                "stage": "speech_plan",
+                "observation": observation,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=public_speech_plan_response_format(
@@ -192,6 +197,10 @@ class GPTAgent(LLMAgent):
         )
         rendered_content, render_metadata = self._chat_with_metadata(
             [{"role": "user", "content": renderer_prompt}],
+            player_log_context={
+                "stage": "speech_render",
+                "observation": observation,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
         )
