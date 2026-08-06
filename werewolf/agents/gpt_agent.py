@@ -1,7 +1,10 @@
 import time
 import re
 import random
-from werewolf.agents.llm_agent import LLMAgent
+from werewolf.agents.llm_agent import (
+    LLMAgent,
+    validate_gameplay_public_speech,
+)
 from werewolf.agents.prompt_template_v0 import CON
 from . import agent_registry as AgentRegistry
 
@@ -36,11 +39,22 @@ class GPTAgent(LLMAgent):
         if 'speech' in phase:
             if self.backend is not None and self.model_name:
                 messages = [{'role': 'user', 'content': prompt}]
-                raw_action = self._chat(
+                raw_action, metadata = self._chat_with_metadata(
                     messages,
                     temperature=request_temperature,
                     max_tokens=request_max_tokens,
-                ).strip()
+                )
+                validate_gameplay_public_speech(
+                    raw_action,
+                    finish_reason=(
+                        metadata.get("finish_reason")
+                        if isinstance(metadata, dict)
+                        else None
+                    ),
+                    player_id=observation.get("current_act_idx"),
+                    phase=phase,
+                )
+                raw_action = raw_action.strip()
                 checked_action = self.extract_answer(raw_action)
                 gen_times = 0
             else:

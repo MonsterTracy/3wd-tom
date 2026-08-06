@@ -810,6 +810,57 @@ class WerewolfTextEnvV0(gym.Env):
                 self.phase,
             ),
             'valid_action': valid_action,
+            'authoritative_public_state': (
+                self._build_authoritative_public_state()
+            ),
+        }
+
+    def _build_authoritative_public_state(self):
+        """Return a read-only view of deterministic public game state."""
+
+        exiled = {
+            log.content["expelled"]
+            for log in self.game_log
+            if log.event == "end_vote"
+            and isinstance(log.content, dict)
+            and isinstance(log.content.get("expelled"), int)
+            and 0 <= log.content["expelled"] < self.n_player
+        }
+        alive_players = [
+            index + 1
+            for index, is_alive in enumerate(self.alive)
+            if is_alive == 1
+        ]
+        eliminated_players = [
+            {
+                "player_id": index + 1,
+                "status": (
+                    "exiled" if index in exiled else "dead"
+                ),
+            }
+            for index, is_alive in enumerate(self.alive)
+            if is_alive != 1
+        ]
+
+        legal_vote_targets = []
+        if self.phase in {"vote", "vote_pk"}:
+            legal_vote_targets = [
+                target
+                for action_type, target
+                in self._get_valid_action_for_current_actor()
+                if action_type in {"vote", "vote_pk"}
+                and isinstance(target, int)
+                and 1 <= target <= self.n_player
+                and target in alive_players
+            ]
+
+        return {
+            "day": self.day,
+            "day_or_night": self.day_or_night,
+            "phase": self.phase,
+            "alive_players": alive_players,
+            "eliminated_players": eliminated_players,
+            "legal_vote_targets": legal_vote_targets,
         }
 
     def get_twd_tom_hard_knowledge_for(self, player_id):

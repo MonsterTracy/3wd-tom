@@ -77,6 +77,14 @@ def _speech_observation(identity, *, game_log=None):
         "current_act_idx": 3,
         "valid_action": [],
         "game_log": list(game_log or []),
+        "authoritative_public_state": {
+            "day": 1,
+            "day_or_night": "day",
+            "phase": "speech",
+            "alive_players": [1, 2, 3, 4, 5, 6, 7],
+            "eliminated_players": [],
+            "legal_vote_targets": [],
+        },
     }
 
 
@@ -107,13 +115,38 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertNotIn("strict_classic7", legacy_prompt)
         self.assertIn("strict_classic7", strict_prompt)
         self.assertIn("当前发言者必须是 player3", strict_prompt)
-        self.assertIn("禁止输出 player0、player8", strict_prompt)
+        self.assertIn("禁止输出上述范围以外的玩家编号", strict_prompt)
         self.assertIn("不得引用未来事件", strict_prompt)
-        self.assertIn("只输出自然语言公开发言", strict_prompt)
+        self.assertIn("只输出中文公开发言正文", strict_prompt)
+        for section in (
+            "【权威公共状态】",
+            "【你合法知道的私有信息】",
+            "【其他玩家此前的公开主张】",
+            "【公开发言要求】",
+        ):
+            self.assertIn(section, strict_prompt)
+
+        for contract in (
+            "输出 2–4 句",
+            "建议不超过 200 个汉字",
+            "不输出分析过程、标题、Markdown、JSON",
+            "不复述完整游戏历史",
+            "不解释狼人杀通用规则",
+        ):
+            self.assertIn(contract, strict_prompt)
 
     def test_role_rules_only_describe_real_role_capabilities(self):
         werewolf = build_strict_classic7_speech_rules(
-            _speech_observation("Werewolf")
+            _speech_observation(
+                "Werewolf",
+                game_log=[
+                    _log(
+                        event="werewolf_team_info",
+                        content={"wolf_team": [1, 3]},
+                    ),
+                    _log(event="kill_decision", target=5),
+                ],
+            )
         )
         villager = build_strict_classic7_speech_rules(
             _speech_observation("Villager")
@@ -152,8 +185,10 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             )
         )
 
-        self.assertIn("不能公开狼人队友身份", werewolf)
-        self.assertIn("不得声称拥有查验、解药、毒药或守护能力", werewolf)
+        self.assertIn("真实狼队信息（仅用于内部策略）：player1, player3", werewolf)
+        self.assertIn("真实夜间刀人决策（仅用于内部策略）：player5", werewolf)
+        self.assertIn("不能直接公开狼人队友身份", werewolf)
+        self.assertIn("不能直接公开狼队夜间讨论、狼刀真实决策", werewolf)
         self.assertIn("你没有查验、解药、毒药或守护能力", villager)
         self.assertNotIn("狼人队伍的成员", villager)
         self.assertIn("player6=狼人", seer)

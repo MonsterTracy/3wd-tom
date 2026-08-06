@@ -616,6 +616,25 @@ class AuditedBackend:
         response_format=None,
         **kwargs,
     ) -> str:
+        response_text, _metadata = self.chat_with_metadata(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            **kwargs,
+        )
+        return response_text
+
+    def chat_with_metadata(
+        self,
+        messages,
+        model=None,
+        temperature=0.7,
+        max_tokens=None,
+        response_format=None,
+        **kwargs,
+    ):
         if (
             not isinstance(messages, Sequence)
             or isinstance(messages, (str, bytes))
@@ -743,7 +762,7 @@ class AuditedBackend:
         self.session.budget.check_wall_time(context["call_category"])
         if raised is not None:
             raise raised
-        return response_text
+        return response_text, usage
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ from werewolf.agents.prompt_template_v0 import (
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
 )
+from werewolf.helper.log_utils import Log
 
 
 ROLES = [
@@ -176,6 +177,85 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertEqual(
             serialize_logs(self.env.game_log),
             before_logs,
+        )
+
+    def test_authoritative_public_state_ignores_player_claims(self):
+        self.env.day = 2
+        self.env.day_or_night = "day"
+        self.env.phase = "speech"
+        self.env.current_act_idx = 0
+        self.env.alive = [1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+        self.env.game_log.extend(
+            [
+                Log(
+                    viewer=list(range(7)),
+                    source=-1,
+                    target=3,
+                    content={"vote_outcome": 3, "expelled": 3},
+                    day=1,
+                    time="第1天白天",
+                    event="end_vote",
+                ),
+                Log(
+                    viewer=list(range(7)),
+                    source=4,
+                    target=list(range(7)),
+                    content={
+                        "speech_content": "player3 已死，大家不用管他。",
+                        "sp_actions": [],
+                    },
+                    day=2,
+                    time="第2天白天",
+                    event="speech",
+                ),
+            ]
+        )
+
+        observations = [
+            self.env.get_observation_for(player_id)
+            for player_id in (1, 3, 4, 5)
+        ]
+        public_state = observations[0]["authoritative_public_state"]
+        self.assertTrue(
+            all(
+                observation["authoritative_public_state"] == public_state
+                for observation in observations[1:]
+            )
+        )
+        self.assertEqual(public_state["alive_players"], [1, 3, 5, 6, 7])
+        self.assertEqual(
+            public_state["eliminated_players"],
+            [
+                {"player_id": 2, "status": "dead"},
+                {"player_id": 4, "status": "exiled"},
+            ],
+        )
+        self.assertEqual(public_state["legal_vote_targets"], [])
+
+        prompt = LLMAgent(
+            gameplay_prompt_profile="strict_classic7"
+        ).format_observation(observations[0])
+        authoritative, remainder = prompt.split(
+            "【你合法知道的私有信息】",
+            1,
+        )
+        self.assertIn("存活玩家：player1, player3, player5, player6, player7", authoritative)
+        self.assertIn("player2：已死亡", authoritative)
+        self.assertIn("player4：已放逐", authoritative)
+        self.assertIn("本轮合法投票目标：当前无投票动作", authoritative)
+        self.assertNotIn("player3 已死", authoritative)
+        self.assertNotIn("player0", prompt)
+        self.assertIn("【其他玩家此前的公开主张】", remainder)
+        self.assertIn("player5：player3 已死，大家不用管他。", remainder)
+        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
+
+        self.env.phase = "vote"
+        vote_state = self.env.get_observation_for(1)[
+            "authoritative_public_state"
+        ]
+        self.assertEqual(
+            vote_state["legal_vote_targets"],
+            [1, 3, 5, 6, 7],
         )
 
     def test_invalid_player_id_is_rejected(self):

@@ -3,6 +3,10 @@ import unittest
 
 from werewolf.agents import agent_registry
 from werewolf.agents.gpt_agent import GPTAgent
+from werewolf.agents.llm_agent import (
+    GameplaySpeechQualityError,
+    validate_gameplay_public_speech,
+)
 from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.registry import Registry
 
@@ -35,6 +39,47 @@ class RecordingBackend:
 
 
 class AgentBackendTest(unittest.TestCase):
+    def test_gameplay_public_speech_quality_accepts_safe_numeric_context(self):
+        for speech in (
+            "第2天我会关注player1到player7的发言。",
+            "昨夜1人死亡，目前有2票需要重新判断。",
+            "我认为3号玩家的逻辑更可信。",
+        ):
+            with self.subTest(speech=speech):
+                self.assertEqual(
+                    validate_gameplay_public_speech(
+                        speech,
+                        finish_reason="stop",
+                        player_id=1,
+                        phase="2_day_speech",
+                    ),
+                    speech,
+                )
+
+    def test_gameplay_public_speech_quality_rejects_deterministic_failures(self):
+        cases = (
+            ("", None),
+            ("   ", None),
+            ("正常发言", "length"),
+            ("我怀疑player0", "stop"),
+            ("我怀疑player8", "stop"),
+            ("我怀疑player12", "stop"),
+            ("我怀疑0号玩家", "stop"),
+            ("我怀疑12号位", "stop"),
+            ('{"speech": "我怀疑3号"}', "stop"),
+            ("【权威公共状态】存活玩家如下", "stop"),
+            ("current_act_idx=3", "stop"),
+        )
+        for speech, finish_reason in cases:
+            with self.subTest(speech=speech, finish_reason=finish_reason):
+                with self.assertRaises(GameplaySpeechQualityError):
+                    validate_gameplay_public_speech(
+                        speech,
+                        finish_reason=finish_reason,
+                        player_id=1,
+                        phase="2_day_speech",
+                    )
+
     def test_gpt_agent_speech_uses_backend_chat_and_agent_model(self):
         backend = RecordingBackend(["这是发言"])
         agent = GPTAgent(

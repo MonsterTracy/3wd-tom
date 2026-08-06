@@ -44,6 +44,63 @@ _OBSERVER_OWNED_PRIVATE_EVENTS = {
     "skill_guard",
 }
 
+
+class GameplaySpeechQualityError(ValueError):
+    """A deterministic public-speech response contract violation."""
+
+
+def validate_gameplay_public_speech(
+    content,
+    *,
+    finish_reason=None,
+    player_id=None,
+    phase=None,
+):
+    """Validate only high-confidence gameplay speech failures."""
+
+    context = f"player={player_id}, phase={phase}"
+    if not isinstance(content, str) or not content.strip():
+        raise GameplaySpeechQualityError(
+            f"empty gameplay public speech ({context})"
+        )
+    if finish_reason == "length":
+        raise GameplaySpeechQualityError(
+            f"truncated gameplay public speech ({context})"
+        )
+
+    for match in re.finditer(r"player\s*(\d+)(?!\d)", content, re.IGNORECASE):
+        if not 1 <= int(match.group(1)) <= 7:
+            raise GameplaySpeechQualityError(
+                f"invalid player reference {match.group(0)!r} ({context})"
+            )
+    for match in re.finditer(r"(?<!第)(\d+)\s*号(?:玩家|位)?", content):
+        if not 1 <= int(match.group(1)) <= 7:
+            raise GameplaySpeechQualityError(
+                f"invalid player reference {match.group(0)!r} ({context})"
+            )
+
+    stripped = content.lstrip()
+    if stripped.startswith(("{", "[", "```", "# ")):
+        raise GameplaySpeechQualityError(
+            f"structured gameplay public speech output ({context})"
+        )
+    forbidden_control_text = (
+        "【权威公共状态】",
+        "【你合法知道的私有信息】",
+        "【其他玩家此前的公开主张】",
+        "【公开发言要求】",
+        "system prompt",
+        "系统提示词",
+        "current_act_idx",
+        "valid_action",
+        "game_log",
+    )
+    if any(marker in content for marker in forbidden_control_text):
+        raise GameplaySpeechQualityError(
+            f"internal control text in gameplay public speech ({context})"
+        )
+    return content
+
 class LLMAgent(Agent):
     def __init__(self,
                  backend=None,
@@ -112,6 +169,17 @@ class LLMAgent(Agent):
             model=self.model_name,
             **kwargs,
         )
+
+    def _chat_with_metadata(self, messages, **kwargs):
+        if self.backend is None or not self.model_name:
+            raise BackendError("Agent backend and model_name are required.")
+        if hasattr(self.backend, "chat_with_metadata"):
+            return self.backend.chat_with_metadata(
+                messages=messages,
+                model=self.model_name,
+                **kwargs,
+            )
+        return self._chat(messages, **kwargs), None
 
     def _build_readonly_belief_context(self, observation):
         """Build detached messages from this player's legal observation."""
@@ -241,10 +309,6 @@ class LLMAgent(Agent):
             identity_info = CON.player_identity_info.format(player_idx=observation['current_act_idx'],
                                                             identity=CON.identity_chinese[identity],
                                                             identity_ability=CON.identity_abilities[identity])
-            logs = self.format_log(observation['game_log'])
-
-            prompt = CON.speech_prompt.format(game_description=CON.game_description,
-                                              player_identity_info=identity_info, logs=logs, )
             if self.gameplay_prompt_profile == (
                 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
             ):
@@ -253,11 +317,19 @@ class LLMAgent(Agent):
                         observation
                     )
                 )
-                prompt = prompt.replace(
-                    "** 输出",
-                    strict_rules
-                    + "\n\n** 输出",
-                    1,
+                prompt = (
+                    "** 游戏说明\n"
+                    + CON.game_description
+                    + "\n\n"
+                    + strict_rules
+                    + "\n\n** 输出"
+                )
+            else:
+                logs = self.format_log(observation['game_log'])
+                prompt = CON.speech_prompt.format(
+                    game_description=CON.game_description,
+                    player_identity_info=identity_info,
+                    logs=logs,
                 )
         else:
             raise ValueError

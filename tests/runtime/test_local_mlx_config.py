@@ -87,7 +87,11 @@ def _mock_openai_clients(monkeypatch, handler):
     )
 
 
-def _success_response(request):
+def _success_response(
+    request,
+    *,
+    content='{"suspected_werewolves":[]}',
+):
     payload = json.loads(request.content)
     return httpx.Response(
         200,
@@ -101,7 +105,7 @@ def _success_response(request):
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": '{"suspected_werewolves":[]}',
+                        "content": content,
                     },
                     "finish_reason": "stop",
                 }
@@ -513,7 +517,7 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
 
     def handler(request):
         calls.append((str(request.url), json.loads(request.content)))
-        return _success_response(request)
+        return _success_response(request, content="这是公开发言。")
 
     _mock_openai_clients(monkeypatch, handler)
     normalized = normalize_runtime_config(_server_qwen_config())
@@ -545,6 +549,14 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
             "current_act_idx": 1,
             "game_log": [],
             "valid_action": ("speech", -1),
+            "authoritative_public_state": {
+                "day": 1,
+                "day_or_night": "day",
+                "phase": "speech",
+                "alive_players": [1, 2, 3, 4, 5, 6, 7],
+                "eliminated_players": [],
+                "legal_vote_targets": [],
+            },
         }
     )
 

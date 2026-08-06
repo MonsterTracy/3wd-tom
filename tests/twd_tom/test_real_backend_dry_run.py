@@ -10,7 +10,10 @@ import pytest
 
 import script.twd_tom.real_backend_dry_run as dry_run
 from werewolf.agents.gpt_agent import GPTAgent
-from werewolf.agents.llm_agent import LLMAgent
+from werewolf.agents.llm_agent import (
+    GameplaySpeechQualityError,
+    LLMAgent,
+)
 from werewolf.models import SpeechPerceiver
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
@@ -239,12 +242,24 @@ def test_gameplay_limit_and_finish_reason_are_audited(
         observation=_observation(),
         public_events=_public_events(),
     ):
-        assert agent.act(
-            {
-                **_observation(),
-                "valid_action": ("speech", -1),
-            }
-        ) == ("speech", "public speech")
+        if finish_reason == "length":
+            with pytest.raises(
+                GameplaySpeechQualityError,
+                match="truncated gameplay public speech",
+            ):
+                agent.act(
+                    {
+                        **_observation(),
+                        "valid_action": ("speech", -1),
+                    }
+                )
+        else:
+            assert agent.act(
+                {
+                    **_observation(),
+                    "valid_action": ("speech", -1),
+                }
+            ) == ("speech", "public speech")
     writer.close()
 
     records, _serialized = _records(tmp_path / "audit.jsonl")
@@ -253,6 +268,10 @@ def test_gameplay_limit_and_finish_reason_are_audited(
     assert records[0]["request_max_tokens"] == 512
     assert records[0]["finish_reason"] == finish_reason
     assert records[0]["usage_available"] is True
+    assert records[0]["response_character_count"] == len("public speech")
+    assert records[0]["response_sha256"] == dry_run._sha256_text(
+        "public speech"
+    )
 
 
 def test_bad_request_error_message_is_capped_and_privacy_safe(
