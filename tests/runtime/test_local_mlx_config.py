@@ -26,6 +26,9 @@ QWEN_CONFIG_PATH = (
 SERVER_QWEN_CONFIG_PATH = (
     REPO_ROOT / "configs" / "twd_tom_server_qwen25_7b.yaml"
 )
+SERVER_QWEN35_CONFIG_PATH = (
+    REPO_ROOT / "configs" / "twd_tom_server_qwen35_9b.yaml"
+)
 LOCAL_MODELS = {
     "local_qwen25_7b": (
         "http://127.0.0.1:8080/v1",
@@ -55,6 +58,12 @@ def _qwen_config():
 def _server_qwen_config():
     return yaml.safe_load(
         SERVER_QWEN_CONFIG_PATH.read_text(encoding="utf-8")
+    )
+
+
+def _server_qwen35_config():
+    return yaml.safe_load(
+        SERVER_QWEN35_CONFIG_PATH.read_text(encoding="utf-8")
     )
 
 
@@ -409,6 +418,92 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
     assert captured["max_retries"] == 0
     assert "http_client" in captured
     assert backends[alias].default_model == model
+
+
+def test_server_qwen35_config_validates_five_game_collection_plan(
+    monkeypatch,
+):
+    parsed = _server_qwen35_config()
+    normalized = normalize_runtime_config(parsed)
+    alias = "server_qwen35_9b"
+    base_url = "http://127.0.0.1:8000/v1"
+    model = "qwen3.5-9b"
+
+    assert normalized["backends"] == {
+        alias: {
+            "type": "openai_compatible",
+            "base_url": base_url,
+            "api_key_env": None,
+            "default_model": model,
+            "supports_json_schema": True,
+        }
+    }
+    assert normalized["parser"] == {
+        "backend": alias,
+        "model": model,
+        "model_params": {"temperature": 0.0},
+    }
+    assert normalized["agent_config"]["all_candidates"] == [
+        {
+            "profile_name": alias,
+            "agent_type": "gpt",
+            "backend": alias,
+            "model": model,
+            "model_params": {
+                "temperature": 1.0,
+                "gameplay_prompt_profile": "strict_classic7",
+                "gameplay_max_tokens": 512,
+            },
+            "sample_ratio": 1.0,
+        }
+    ]
+    assert parsed["pipeline"]["public_event_schema_version"] == (
+        "classic7_public_event_sequence_v2"
+    )
+    assert parsed["pipeline"]["collection"] == {
+        "game_count": 3,
+        "seeds": [4101, 4102, 4103],
+        "max_gameplay_calls_per_game": 192,
+        "max_belief_calls_per_game": 448,
+        "max_total_calls_per_game": 640,
+        "max_wall_seconds_per_game": 3600.0,
+    }
+    assert "resolved_run" not in parsed["pipeline"]
+    assert "output_root" not in parsed["pipeline"]
+
+    monkeypatch.setattr(
+        openai_compatible.openai,
+        "OpenAI",
+        lambda **_kwargs: pytest.fail(
+            "validate accessed the network client"
+        ),
+    )
+    run_id = "server-qwen35-a1-v2-s343-347-5g-r1"
+    result = pipeline.run_pipeline_stage(
+        config_path=SERVER_QWEN35_CONFIG_PATH,
+        run_id=run_id,
+        stage="validate",
+        game_count=5,
+        seeds=(343, 344, 345, 346, 347),
+    )
+
+    assert result["game_count"] == 5
+    assert result["seeds"] == [343, 344, 345, 346, 347]
+    assert result["plan"]["versions"][
+        "public_event_schema_version"
+    ] == "classic7_public_event_sequence_v2"
+    assert {
+        group: Path(result["plan"][group]["run_dir"]).resolve()
+        for group in ("data", "logs", "outputs")
+    } == {
+        group: (REPO_ROOT / group / "tom" / run_id).resolve()
+        for group in ("data", "logs", "outputs")
+    }
+    assert all(
+        not path.exists()
+        for group in pipeline._run_paths(run_id).values()
+        for path in group.values()
+    )
 
 
 def test_server_qwen_gameplay_limit_reaches_chat_completions(
