@@ -1,6 +1,10 @@
 from copy import deepcopy
 import unittest
 
+from werewolf.agents.llm_agent import LLMAgent
+from werewolf.agents.prompt_template_v0 import (
+    build_strict_classic7_speech_rules,
+)
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
 )
@@ -186,6 +190,73 @@ class PlayerObservationTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             self.env.get_observation_for(True)
+
+    def test_seer_pass_creates_no_completed_investigation(self):
+        self.env.step(("kill", 5))
+        self.env.step(("kill", 5))
+        self.env.step(("check", 0))
+
+        self.assertEqual(self.env.seer_check_target, {})
+        self.assertFalse(
+            any(
+                log.event == "skill_seer"
+                for log in self.env.game_log
+            )
+        )
+
+        for player_id in range(1, 8):
+            observation = self.env.get_observation_for(player_id)
+            formatted = LLMAgent().format_log(
+                observation["game_log"]
+            )
+            self.assertNotIn("player0", formatted)
+            self.assertNotIn("0号", formatted)
+
+        seer_observation = self.env.get_observation_for(3)
+        self.assertNotIn(
+            "查验了",
+            LLMAgent().format_log(
+                seer_observation["game_log"]
+            ),
+        )
+        strict_rules = build_strict_classic7_speech_rules(
+            seer_observation
+        )
+        self.assertIn("(尚无已完成查验)", strict_rules)
+
+    def test_seer_player3_check_is_unchanged(self):
+        self.env.step(("kill", 5))
+        self.env.step(("kill", 5))
+        self.env.step(("check", 3))
+
+        self.assertEqual(
+            list(self.env.seer_check_target.values()),
+            [2],
+        )
+        seer_observation = self.env.get_observation_for(3)
+        check_logs = [
+            log
+            for log in seer_observation["game_log"]
+            if log.event == "skill_seer"
+        ]
+        self.assertEqual(len(check_logs), 1)
+        self.assertEqual(check_logs[0].target, 3)
+        self.assertEqual(
+            check_logs[0].content["cheked_identity"],
+            "good",
+        )
+        formatted = LLMAgent().format_log(
+            seer_observation["game_log"]
+        )
+        self.assertIn("查验了3号的身份是好人", formatted)
+        self.assertNotIn("player0", formatted)
+        self.assertNotIn("0号", formatted)
+        self.assertIn(
+            "player3=好人",
+            build_strict_classic7_speech_rules(
+                seer_observation
+            ),
+        )
 
 
 if __name__ == "__main__":

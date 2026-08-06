@@ -280,14 +280,13 @@ class WerewolfTextEnvV0(gym.Env):
         elif self.phase == 'skill_seer':
             assert self.current_act_idx == self.SEER_IDX
             assert type(action_content) == int and -1 <= action_content < self.n_player 
-            self.seer_check_target[self.get_phase(self.day, self.day_or_night, self.phase)] = action_content
-            checked_identity = None
             if action_content>=0:
+                self.seer_check_target[self.get_phase(self.day, self.day_or_night, self.phase)] = action_content
                 checked_identity = 'bad' if self.roles[action_content] == 'Werewolf' else 'good'
-            self.game_log.append(
-                Log(viewer=[self.SEER_IDX, ], source=self.current_act_idx, target=action_content,
-                    content={'cheked_identity': checked_identity},
-                    day=self.day, time=self.get_time(), event=self.phase))
+                self.game_log.append(
+                    Log(viewer=[self.SEER_IDX, ], source=self.current_act_idx, target=action_content,
+                        content={'cheked_identity': checked_identity},
+                        day=self.day, time=self.get_time(), event=self.phase))
             if self.GUARD_IDX != -1 and self.alive[self.GUARD_IDX] == 1:
                 self.current_act_idx = self.GUARD_IDX
                 self.phase = 'skill_guard'

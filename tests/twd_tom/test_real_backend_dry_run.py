@@ -681,6 +681,137 @@ def test_exactly_two_scheduler_stops_on_first_failure_and_never_adds_third():
     assert started == [(1, 42)]
 
 
+def test_player_logs_are_isolated_and_closed_between_games(
+    tmp_path,
+    monkeypatch,
+):
+    game_action_counts = {
+        "game_001_seed_343": 2,
+        "game_002_seed_344": 3,
+    }
+    closed_agents = []
+
+    class FakeCollector:
+        def close(self):
+            return None
+
+    def fake_build_runtime(
+        _parsed_yaml,
+        *,
+        log_save_path,
+        **_kwargs,
+    ):
+        agents = [LLMAgent(
+            log_file=str(log_save_path / "Player_1.jsonl")
+        )]
+        closed_agents.extend(agents)
+        return (
+            SimpleNamespace(log_dir=log_save_path),
+            agents,
+            ["Villager"],
+            [],
+        )
+
+    def fake_run_game(env, agents, _roles, **_kwargs):
+        game_id = env.log_dir.name
+        game_log = [
+            {"source": 1, "event": "speech"}
+            for _index in range(game_action_counts[game_id])
+        ]
+        for action_index in range(game_action_counts[game_id]):
+            agents[0].logger.info(
+                "speech",
+                extra={
+                    "game_id": game_id,
+                    "player_id": 1,
+                    "action_index": action_index,
+                },
+            )
+        (env.log_dir / "game_log.json").write_text(
+            json.dumps(game_log),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        dry_run,
+        "normalize_runtime_config",
+        lambda parsed: parsed,
+    )
+    monkeypatch.setattr(
+        dry_run,
+        "load_named_backends",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        dry_run,
+        "build_runtime",
+        fake_build_runtime,
+    )
+    monkeypatch.setattr(
+        dry_run,
+        "build_twd_tom_sample_collector",
+        lambda **_kwargs: FakeCollector(),
+    )
+    monkeypatch.setattr(
+        dry_run,
+        "run_game",
+        fake_run_game,
+    )
+
+    audit_path = tmp_path / "call_audit.jsonl"
+    samples_path = tmp_path / "raw.jsonl"
+
+    def run_mock_game(game_id, seed, writer):
+        game_dir = tmp_path / game_id
+        game_dir.mkdir()
+        dry_run.run_real_backend_game(
+            parsed_yaml={},
+            samples_path=samples_path,
+            log_dir=game_dir,
+            game_id=game_id,
+            seed=seed,
+            budget=dry_run.DryRunBudget(
+                game_id=game_id,
+                max_gameplay_calls=10,
+                max_belief_calls=10,
+                max_total_calls=20,
+                max_wall_seconds=60.0,
+            ),
+            writer=writer,
+        )
+        return game_dir
+
+    with dry_run.PrivacySafeAuditWriter(audit_path) as writer:
+        first_dir = run_mock_game(
+            "game_001_seed_343", 343, writer
+        )
+        first_contents = (
+            first_dir / "Player_1.jsonl"
+        ).read_bytes()
+        second_dir = run_mock_game(
+            "game_002_seed_344", 344, writer
+        )
+
+    assert (first_dir / "Player_1.jsonl").read_bytes() == first_contents
+    assert all(not agent.has_log for agent in closed_agents)
+
+    for game_dir in (first_dir, second_dir):
+        game_log = json.loads(
+            (game_dir / "game_log.json").read_text(encoding="utf-8")
+        )
+        player_records = [
+            json.loads(line)
+            for line in (game_dir / "Player_1.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line
+        ]
+        assert len(player_records) == len(game_log)
+        assert {
+            record["game_id"] for record in player_records
+        } == {game_dir.name}
+
+
 def test_output_dir_and_config_require_explicit_safe_two_game_values(tmp_path):
     safe = tmp_path / "logs" / "belief_dry_run"
     assert dry_run.validate_output_dir(str(safe), cwd=tmp_path) == safe.resolve()

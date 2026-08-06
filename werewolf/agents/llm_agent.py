@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import re
+from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
     CON,
     LEGACY_GAMEPLAY_PROMPT_PROFILE,
@@ -85,12 +86,23 @@ class LLMAgent(Agent):
             self.handler = logging.FileHandler(log_file)
             self.handler.setLevel(logging.INFO)
             self.handler.setFormatter(JsonFormatter())
-            logger = logging.getLogger(log_file.split("/")[-1].replace(".jsonl", ""))
+            logger = logging.getLogger(
+                str(Path(log_file).resolve())
+            )
             logger.setLevel(logging.INFO)
             logger.addHandler(self.handler)
             self.logger = CustomLoggerAdapter(logger, extra={})
         else:
             self.has_log = False
+
+    def close(self):
+        """Detach and close this agent's per-game log handler."""
+
+        if not self.has_log:
+            return
+        self.logger.logger.removeHandler(self.handler)
+        self.handler.close()
+        self.has_log = False
 
     def _chat(self, messages, **kwargs):
         if self.backend is None or not self.model_name:

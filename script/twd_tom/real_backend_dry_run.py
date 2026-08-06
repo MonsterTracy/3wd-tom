@@ -929,6 +929,10 @@ def run_real_backend_game(
     finally:
         session.finish_game()
         collector.close()
+        for agent in agents:
+            close = getattr(agent, "close", None)
+            if callable(close):
+                close()
 
 
 def run_dry_run(config: RealBackendDryRunConfig) -> dict[str, Any]:
