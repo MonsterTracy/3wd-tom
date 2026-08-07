@@ -23,7 +23,11 @@ STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
 )
 
 
-def _render_authoritative_public_state(public_state):
+def _render_authoritative_public_state(
+    public_state,
+    *,
+    suggestible_player_ids=None,
+):
     """Render the sole canonical public-state block for strict speech."""
 
     required_fields = {
@@ -40,7 +44,11 @@ def _render_authoritative_public_state(public_state):
     last_night_result = public_state["last_night_result"]
     prior_exiles = public_state["prior_exiles"]
     alive_players = public_state["alive_players"]
-    suggestible_targets = public_state["suggestible_exile_targets"]
+    suggestible_targets = (
+        public_state["suggestible_exile_targets"]
+        if suggestible_player_ids is None
+        else suggestible_player_ids
+    )
     if (
         (
             last_night_result is not None
@@ -51,7 +59,7 @@ def _render_authoritative_public_state(public_state):
         )
         or not isinstance(prior_exiles, list)
         or not isinstance(alive_players, list)
-        or not isinstance(suggestible_targets, list)
+        or not isinstance(suggestible_targets, (list, tuple))
     ):
         raise TypeError("invalid authoritative public state")
 
@@ -100,9 +108,13 @@ def _render_authoritative_public_state(public_state):
 
 def build_strict_classic7_speech_plan_prompt(
     observation,
+    *,
+    suggestible_player_ids,
 ):
     """Build the private planner prompt from one legally filtered view."""
 
+    if not isinstance(suggestible_player_ids, tuple):
+        raise TypeError("suggestible_player_ids must be a tuple")
     if not isinstance(
         observation,
         dict,
@@ -155,7 +167,10 @@ def build_strict_classic7_speech_plan_prompt(
         raise TypeError(
             "strict speech requires authoritative_public_state"
         )
-    authoritative_state_text = _render_authoritative_public_state(public_state)
+    authoritative_state_text = _render_authoritative_public_state(
+        public_state,
+        suggestible_player_ids=suggestible_player_ids,
+    )
 
     if identity == "Werewolf":
         wolf_team = []

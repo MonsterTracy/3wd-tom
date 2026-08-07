@@ -249,7 +249,10 @@ class PlayerObservationTest(unittest.TestCase):
 
         prompt = LLMAgent(
             gameplay_prompt_profile="strict_classic7"
-        ).format_observation(observations[0])
+        ).format_observation(
+            observations[0],
+            suggestible_player_ids=(1, 5, 6, 7),
+        )
         before_private, remainder = prompt.split(
             "【你合法知道的私有信息】",
             1,
@@ -324,7 +327,12 @@ class PlayerObservationTest(unittest.TestCase):
             ),
         )
         strict_rules = build_strict_classic7_speech_plan_prompt(
-            seer_observation
+            seer_observation,
+            suggestible_player_ids=tuple(
+                seer_observation["authoritative_public_state"][
+                    "suggestible_exile_targets"
+                ]
+            ),
         )
         self.assertIn("(尚无已完成查验)", strict_rules)
 
@@ -358,7 +366,12 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertIn(
             "player3=好人",
             build_strict_classic7_speech_plan_prompt(
-                seer_observation
+                seer_observation,
+                suggestible_player_ids=tuple(
+                    seer_observation["authoritative_public_state"][
+                        "suggestible_exile_targets"
+                    ]
+                ),
             ),
         )
 

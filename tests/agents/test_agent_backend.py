@@ -11,12 +11,45 @@ from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import (
     GameplaySpeechQualityError,
     PublicSpeechPlanValidationError,
+    canonical_suggestible_player_ids,
+    public_speech_plan_json_schema,
     validate_gameplay_public_speech,
     validate_public_speech_plan,
 )
 from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.backends import BackendError
+from werewolf.models.twd_tom.schema import ACTION_NAMES
 from werewolf.registry import Registry
+
+
+def _schema_accepts_plan(schema, payload):
+    if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
+        return False
+    actions = payload["public_actions"]
+    if not isinstance(actions, list):
+        return False
+    branches = schema["properties"]["public_actions"]["items"]["oneOf"]
+    for item in actions:
+        if not isinstance(item, dict) or set(item) != {"action", "target"}:
+            return False
+        matches = 0
+        for branch in branches:
+            properties = branch["properties"]
+            action_rule = properties["action"]
+            action_matches = (
+                item["action"] == action_rule["const"]
+                if "const" in action_rule
+                else item["action"] in action_rule["enum"]
+            )
+            target_matches = (
+                isinstance(item["target"], int)
+                and not isinstance(item["target"], bool)
+                and item["target"] in properties["target"]["enum"]
+            )
+            matches += action_matches and target_matches
+        if matches != 1:
+            return False
+    return True
 
 
 class RecordingBackend:
@@ -99,6 +132,17 @@ class AgentBackendTest(unittest.TestCase):
                 "suggestible_exile_targets": [2, 3, 4, 5, 6, 7],
             },
         }
+
+    @staticmethod
+    def _dead_player_observation():
+        observation = AgentBackendTest._strict_observation()
+        observation["current_act_idx"] = 2
+        observation["authoritative_public_state"].update({
+            "last_night_result": {"day": 0, "dead_players": [3]},
+            "alive_players": [1, 2, 4, 5, 6, 7],
+            "suggestible_exile_targets": [1, 4, 5, 6, 7],
+        })
+        return observation
 
     @staticmethod
     def _player_records(path):
@@ -335,7 +379,9 @@ class AgentBackendTest(unittest.TestCase):
             with self.subTest(valid=actions):
                 plan = validate_public_speech_plan(
                     {"public_actions": actions},
-                    authoritative_public_state=state,
+                    suggestible_player_ids=tuple(
+                        state["suggestible_exile_targets"]
+                    ),
                     player_id=1,
                     phase="1_day_speech",
                 )
@@ -361,10 +407,122 @@ class AgentBackendTest(unittest.TestCase):
             ):
                 validate_public_speech_plan(
                     payload,
-                    authoritative_public_state=state,
+                    suggestible_player_ids=tuple(
+                        state["suggestible_exile_targets"]
+                    ),
                     player_id=1,
                     phase="1_day_speech",
                 )
+
+    def test_dynamic_plan_schema_separates_vote_target_domain(self):
+        candidates = (1, 4, 5, 6, 7)
+        schema = public_speech_plan_json_schema(
+            suggestible_player_ids=candidates
+        )
+        branches = schema["properties"]["public_actions"]["items"]["oneOf"]
+        vote_branch, other_branch = branches
+
+        self.assertEqual(vote_branch["properties"]["action"], {"const": "vote_intent"})
+        self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
+        self.assertEqual(
+            set(other_branch["properties"]["action"]["enum"]),
+            set(ACTION_NAMES) - {"vote_intent"},
+        )
+        self.assertEqual(other_branch["properties"]["target"]["enum"], list(range(1, 8)))
+        self.assertFalse(_schema_accepts_plan(schema, {
+            "public_actions": [{"action": "vote_intent", "target": 3}]
+        }))
+        for action, target in (
+            ("vote_intent", 4),
+            ("check_as_good", 3),
+            ("oppose", 3),
+        ):
+            with self.subTest(action=action, target=target):
+                self.assertTrue(_schema_accepts_plan(schema, {
+                    "public_actions": [{"action": action, "target": target}]
+                }))
+
+    def test_dynamic_plan_schema_omits_vote_branch_for_empty_candidates(self):
+        schema = public_speech_plan_json_schema(suggestible_player_ids=())
+        branches = schema["properties"]["public_actions"]["items"]["oneOf"]
+
+        self.assertEqual(len(branches), 1)
+        self.assertNotIn("vote_intent", branches[0]["properties"]["action"]["enum"])
+        self.assertTrue(_schema_accepts_plan(schema, {"public_actions": []}))
+        self.assertTrue(_schema_accepts_plan(schema, {
+            "public_actions": [{"action": "check_as_good", "target": 3}]
+        }))
+        self.assertFalse(_schema_accepts_plan(schema, {
+            "public_actions": [{"action": "vote_intent", "target": 1}]
+        }))
+
+    def test_strict_flow_shares_candidates_across_prompt_schema_and_validator(self):
+        observation = self._dead_player_observation()
+        candidates = canonical_suggestible_player_ids(
+            observation["authoritative_public_state"]
+        )
+        backend = MetadataBackend([
+            '{"public_actions":[{"action":"check_as_good","target":3},'
+            '{"action":"vote_intent","target":4}]}',
+            "我查验玩家3为好人，这一轮我会投玩家4。",
+        ])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "我查验玩家3为好人，这一轮我会投玩家4。"),
+        )
+        planner_call = backend.calls[0]
+        self.assertIn(
+            "【当前可公开建议放逐】player1, player4, player5, player6, player7",
+            planner_call["messages"][0]["content"],
+        )
+        schema = planner_call["response_format"]["json_schema"]["schema"]
+        vote_branch = schema["properties"]["public_actions"]["items"]["oneOf"][0]
+        self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
+        self.assertEqual(len(backend.calls), 2)
+
+    def test_dead_vote_target_fails_schema_and_post_validator(self):
+        observation = self._dead_player_observation()
+        candidates = canonical_suggestible_player_ids(
+            observation["authoritative_public_state"]
+        )
+        payload = {"public_actions": [
+            {"action": "check_as_good", "target": 3},
+            {"action": "vote_intent", "target": 3},
+        ]}
+        schema = public_speech_plan_json_schema(
+            suggestible_player_ids=candidates
+        )
+        self.assertFalse(_schema_accepts_plan(schema, payload))
+        with self.assertRaisesRegex(
+            PublicSpeechPlanValidationError,
+            "not currently suggestible",
+        ):
+            validate_public_speech_plan(
+                payload,
+                suggestible_player_ids=candidates,
+                player_id=2,
+                phase="1_day_speech",
+            )
+
+        backend = MetadataBackend([json.dumps(payload)])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+        with self.assertRaises(PublicSpeechPlanValidationError):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 1)
 
     def test_final_speech_must_realize_exact_plan_player_scope(self):
         self.assertEqual(

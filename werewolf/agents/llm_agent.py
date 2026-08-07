@@ -72,28 +72,71 @@ class PublicSpeechPlan:
         ]
 
 
-PUBLIC_SPEECH_PLAN_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["public_actions"],
-    "properties": {
-        "public_actions": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["action", "target"],
-                "properties": {
-                    "action": {"type": "string", "enum": list(ACTION_NAMES)},
-                    "target": {"type": "integer", "enum": list(range(1, 8))},
+def canonical_suggestible_player_ids(authoritative_public_state):
+    if not isinstance(authoritative_public_state, dict):
+        raise TypeError("authoritative public state is missing")
+    candidates = authoritative_public_state.get("suggestible_exile_targets")
+    if not isinstance(candidates, list):
+        raise TypeError("authoritative candidate set is missing")
+    canonical = tuple(candidates)
+    if (
+        any(
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or not 1 <= candidate <= 7
+            for candidate in canonical
+        )
+        or len(canonical) != len(set(canonical))
+    ):
+        raise ValueError("authoritative candidate set is invalid")
+    return canonical
+
+
+def public_speech_plan_json_schema(*, suggestible_player_ids):
+    if not isinstance(suggestible_player_ids, tuple):
+        raise TypeError("suggestible_player_ids must be a tuple")
+    non_vote_actions = [
+        action for action in ACTION_NAMES if action != "vote_intent"
+    ]
+    action_branches = []
+    if suggestible_player_ids:
+        action_branches.append({
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["action", "target"],
+            "properties": {
+                "action": {"const": "vote_intent"},
+                "target": {
+                    "type": "integer",
+                    "enum": list(suggestible_player_ids),
                 },
             },
+        })
+    action_branches.append({
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action", "target"],
+        "properties": {
+            "action": {"type": "string", "enum": non_vote_actions},
+            "target": {"type": "integer", "enum": list(range(1, 8))},
         },
-    },
-}
+    })
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["public_actions"],
+        "properties": {
+            "public_actions": {
+                "type": "array",
+                "items": {"oneOf": action_branches},
+            },
+        },
+    }
 
 
-def public_speech_plan_response_format(*, supports_json_schema):
+def public_speech_plan_response_format(
+    *, supports_json_schema, suggestible_player_ids
+):
     if supports_json_schema is not True:
         raise BackendError(
             "strict speech planner requires backend JSON Schema support"
@@ -103,7 +146,9 @@ def public_speech_plan_response_format(*, supports_json_schema):
         "json_schema": {
             "name": "public_speech_plan",
             "strict": True,
-            "schema": deepcopy(PUBLIC_SPEECH_PLAN_JSON_SCHEMA),
+            "schema": public_speech_plan_json_schema(
+                suggestible_player_ids=suggestible_player_ids
+            ),
         },
     }
 
@@ -111,7 +156,7 @@ def public_speech_plan_response_format(*, supports_json_schema):
 def validate_public_speech_plan(
     payload,
     *,
-    authoritative_public_state,
+    suggestible_player_ids,
     player_id,
     phase,
     game_context=None,
@@ -121,17 +166,13 @@ def validate_public_speech_plan(
     def reject(reason):
         raise PublicSpeechPlanValidationError(f"{reason} ({context})")
 
+    if not isinstance(suggestible_player_ids, tuple):
+        reject("suggestible_player_ids must be a tuple")
     if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
         reject("plan must contain only public_actions")
     public_actions = payload["public_actions"]
     if not isinstance(public_actions, list):
         reject("public_actions must be an array")
-    if not isinstance(authoritative_public_state, dict):
-        reject("authoritative public state is missing")
-    candidates = authoritative_public_state.get("suggestible_exile_targets")
-    if not isinstance(candidates, list):
-        reject("authoritative candidate set is missing")
-
     validated = []
     seen = set()
     for item in public_actions:
@@ -157,7 +198,7 @@ def validate_public_speech_plan(
             if (checked, target) in seen and (redundant, target) in seen:
                 reject(f"redundant A1 actions for player{target}")
     for action, target in validated:
-        if action == "vote_intent" and target not in candidates:
+        if action == "vote_intent" and target not in suggestible_player_ids:
             reject(f"vote_intent target player{target} is not currently suggestible")
     return PublicSpeechPlan(tuple(validated))
 
@@ -513,7 +554,12 @@ class LLMAgent(Agent):
             extra_body={"thinking": {"type": "disabled"}},
         )
 
-    def format_observation(self, observation):
+    def format_observation(
+        self,
+        observation,
+        *,
+        suggestible_player_ids=None,
+    ):
         phase = observation['phase']
         if 'skill' in phase or 'vote' in phase:
             valid_actions = observation['valid_action']
@@ -538,7 +584,8 @@ class LLMAgent(Agent):
             ):
                 prompt = (
                     build_strict_classic7_speech_plan_prompt(
-                        observation
+                        observation,
+                        suggestible_player_ids=suggestible_player_ids,
                     )
                 )
             else:

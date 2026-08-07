@@ -5,6 +5,7 @@ import random
 from werewolf.agents.llm_agent import (
     LLMAgent,
     PublicSpeechPlanValidationError,
+    canonical_suggestible_player_ids,
     public_speech_plan_response_format,
     validate_gameplay_public_speech,
     validate_public_speech_plan,
@@ -35,8 +36,22 @@ class GPTAgent(LLMAgent):
         self.temperature = temperature
 
     def act(self, observation):
-        prompt = self.format_observation(observation)
         phase = observation['phase']
+        is_strict_speech = (
+            'speech' in phase
+            and self.gameplay_prompt_profile == (
+                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+            )
+        )
+        suggestible_player_ids = None
+        if is_strict_speech:
+            suggestible_player_ids = canonical_suggestible_player_ids(
+                observation.get("authoritative_public_state")
+            )
+        prompt = self.format_observation(
+            observation,
+            suggestible_player_ids=suggestible_player_ids,
+        )
         valid_action = list(self.nlp_action_to_env_action.keys())  
         time.sleep(self.rate_limit)
         is_o1 = self.model_name is not None and "o1" in self.model_name
@@ -45,14 +60,12 @@ class GPTAgent(LLMAgent):
         if request_max_tokens is None and is_o1:
             request_max_tokens = 32000
         if 'speech' in phase:
-            is_strict_speech = self.gameplay_prompt_profile == (
-                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
-            )
             if is_strict_speech:
                 raw_action, checked_action, prompt = (
                     self._generate_strict_public_speech(
                         observation=observation,
                         planner_prompt=prompt,
+                        suggestible_player_ids=suggestible_player_ids,
                         temperature=request_temperature,
                         max_tokens=request_max_tokens,
                     )
@@ -139,6 +152,7 @@ class GPTAgent(LLMAgent):
         *,
         observation,
         planner_prompt,
+        suggestible_player_ids,
         temperature,
         max_tokens,
     ):
@@ -162,7 +176,8 @@ class GPTAgent(LLMAgent):
                     self.backend,
                     "supports_json_schema",
                     False,
-                )
+                ),
+                suggestible_player_ids=suggestible_player_ids,
             ),
         )
         context = (
@@ -181,9 +196,7 @@ class GPTAgent(LLMAgent):
             ) from exc
         plan = validate_public_speech_plan(
             plan_payload,
-            authoritative_public_state=observation.get(
-                "authoritative_public_state"
-            ),
+            suggestible_player_ids=suggestible_player_ids,
             player_id=player_id,
             phase=phase,
             game_context=game_context,

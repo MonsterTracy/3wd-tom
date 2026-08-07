@@ -90,6 +90,17 @@ def _speech_observation(identity, *, game_log=None):
     }
 
 
+def _plan_prompt(observation):
+    return build_strict_classic7_speech_plan_prompt(
+        observation,
+        suggestible_player_ids=tuple(
+            observation["authoritative_public_state"][
+                "suggestible_exile_targets"
+            ]
+        ),
+    )
+
+
 def _log(*, event, source=3, target=0, content=None):
     return Log(
         viewer=3,
@@ -111,7 +122,10 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         ).format_observation(observation)
         strict_prompt = LLMAgent(
             gameplay_prompt_profile="strict_classic7"
-        ).format_observation(observation)
+        ).format_observation(
+            observation,
+            suggestible_player_ids=(1, 2, 4, 5, 6, 7),
+        )
 
         self.assertEqual(default_prompt, legacy_prompt)
         self.assertNotIn("strict_classic7", legacy_prompt)
@@ -134,7 +148,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             self.assertIn(contract, strict_prompt)
 
     def test_role_rules_only_describe_real_role_capabilities(self):
-        werewolf = build_strict_classic7_speech_plan_prompt(
+        werewolf = _plan_prompt(
             _speech_observation(
                 "Werewolf",
                 game_log=[
@@ -146,10 +160,10 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        villager = build_strict_classic7_speech_plan_prompt(
+        villager = _plan_prompt(
             _speech_observation("Villager")
         )
-        seer = build_strict_classic7_speech_plan_prompt(
+        seer = _plan_prompt(
             _speech_observation(
                 "Seer",
                 game_log=[
@@ -161,7 +175,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        witch = build_strict_classic7_speech_plan_prompt(
+        witch = _plan_prompt(
             _speech_observation(
                 "Witch",
                 game_log=[
@@ -174,7 +188,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 ],
             )
         )
-        guard = build_strict_classic7_speech_plan_prompt(
+        guard = _plan_prompt(
             _speech_observation(
                 "Guard",
                 game_log=[
@@ -219,7 +233,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         observation["authoritative_public_state"]["suggestible_exile_targets"] = [
             1, 2, 3, 4, 5, 7
         ]
-        planner = build_strict_classic7_speech_plan_prompt(observation)
+        planner = _plan_prompt(observation)
         renderer = build_strict_classic7_speech_render_prompt(
             authoritative_public_state=observation["authoritative_public_state"],
             actor=6,
