@@ -377,6 +377,51 @@ def build_strict_classic7_speech_plan_prompt(
 - 只输出符合请求 JSON Schema 的对象。"""
 
 
+_PUBLIC_ACTION_REALIZATION_TEMPLATES = {
+    "point_as_werewolf": "必须明确公开判断 player{target} 是狼人。",
+    "point_as_villager": "必须明确公开判断 player{target} 是村民。",
+    "point_as_seer": "必须明确公开判断 player{target} 是预言家。",
+    "point_as_witch": "必须明确公开判断 player{target} 是女巫。",
+    "point_as_guard": "必须明确公开判断 player{target} 是守卫。",
+    "support": "必须明确表达支持、认可或赞同 player{target}；不得因此自动产生任何角色判断。",
+    "oppose": "必须明确表达质疑、反对、不认可 player{target} 或认为其发言可疑；不得因此自动产生狼人判断或投票意图。",
+    "check_as_good": "必须明确公开声称查验 player{target} 的结果为好人；不得额外产生 point_as_villager(player{target})。",
+    "check_as_werewolf": "必须明确公开声称查验 player{target} 的结果为狼人；不得额外产生 point_as_werewolf(player{target})。",
+    "save": "必须明确公开声称救了 player{target}。",
+    "poison": "必须明确公开声称毒了 player{target}。",
+    "guard": "必须明确公开声称守护了 player{target}。",
+    "vote_intent": "必须明确表达当前准备投票给或放逐 player{target}。",
+}
+
+
+def render_public_action_obligation(action, target, *, speaker_id):
+    """Render one validated public action as an atomic speech obligation."""
+
+    obligation = _PUBLIC_ACTION_REALIZATION_TEMPLATES[action].format(
+        target=target
+    )
+    if target != speaker_id:
+        return obligation
+    if action.startswith("point_as_"):
+        role = {
+            "point_as_werewolf": "狼人",
+            "point_as_villager": "村民",
+            "point_as_seer": "预言家",
+            "point_as_witch": "女巫",
+            "point_as_guard": "守卫",
+        }[action]
+        return (
+            f"必须明确公开声称自己（player{target}/{target}号）是{role}；"
+            f"最终文本必须明确出现 player{target} 或 {target}号，"
+            f"可以自然表达为“我是{target}号{role}”。"
+        )
+    return (
+        obligation
+        + f" 这是对当前发言者自己的命题，可以使用第一人称，"
+        f"但最终文本必须明确出现 player{target} 或 {target}号。"
+    )
+
+
 def build_strict_classic7_speech_render_prompt(
     *,
     phase_text,
@@ -391,41 +436,31 @@ def build_strict_classic7_speech_render_prompt(
         raise TypeError("strict speech renderer requires phase text")
     if not isinstance(public_actions, list):
         raise TypeError("strict speech renderer requires validated public_actions")
-    plan_text = "\n".join(
-        f"- {item['action']}(player{item['target']})"
-        for item in public_actions
-    ) or "- (empty)"
-    empty_plan_rule = (
-        "计划为空：生成简短、非目标化的观望发言；不得点名其他玩家，"
-        "不得生成身份、技能或投票声明。"
-        if not public_actions
-        else "计划非空：每个 target 都必须以 playerN、玩家N 或 N号明确出现。"
-    )
-    vote_targets = [
-        item["target"]
-        for item in public_actions
-        if item["action"] == "vote_intent"
-    ]
-    vote_rule = (
-        "只有计划中的 vote_intent target "
-        + ", ".join(f"player{target}" for target in vote_targets)
-        + " 才可被表达为投票给、票出、放逐、驱逐、归票或今天出。"
-        if vote_targets
-        else "计划没有 vote_intent：不得表达投票给、票出、放逐、驱逐、归票或今天出任何玩家。"
-    )
+    if public_actions:
+        obligations = "\n".join(
+            f"{index}. {item['action']}(player{item['target']})\n"
+            f"   {render_public_action_obligation(item['action'], item['target'], speaker_id=actor)}"
+            for index, item in enumerate(public_actions, start=1)
+        )
+        plan_text = f"""下面共有 {len(public_actions)} 项。
+每一项都是独立且必须表达的原子命题。不得省略任何一项。
+不得把某一项的 predicate 转移给另一项的 target。
+可以将多项自然合并为 2–4 句，但所有原子语义必须保留。
+{obligations}"""
+    else:
+        plan_text = (
+            "当前没有需要公开表达的特定玩家判断或行动计划。"
+            "生成简短、非目标化的观望发言，不点名其他玩家。"
+        )
     return f"""【当前发言者】player{actor}
 【当前阶段】{phase_text}
-【已验证公开计划】{plan_text}
+【必须逐项表达的公开计划】
+{plan_text}
 【输出合同】
 - 只输出 2–4 句中文公开发言正文，建议不超过 200 个汉字。
-- 只将下面的已验证公开计划表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
-- 只能表达已验证计划中的声明、立场、技能声称和投票倾向。
-- point_as_villager(X) 只表达将 X 公开判断为村民，不自动产生 support(X)。
-- oppose(X) 只表达质疑、反对、不认可或认为其发言可疑；oppose(X) 不等于 vote_intent(X)。
-- {vote_rule}
+- 只将上面的公开表达义务表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
 - 不得新增计划外玩家、角色判断、技能结果或投票目标。
-- 不得复述完整历史，不输出 JSON、Markdown、标题或分析。
-- {empty_plan_rule}"""
+- 不输出 JSON、Markdown、标题或分析。"""
 
 CON.game_description = """你现在正在玩一局7人狼人杀游戏。
 

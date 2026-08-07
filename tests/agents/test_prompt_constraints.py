@@ -3,11 +3,14 @@ import unittest
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.prompt_template_v0 import (
     CON,
+    _PUBLIC_ACTION_REALIZATION_TEMPLATES,
     build_strict_classic7_speech_plan_prompt,
     build_strict_classic7_speech_render_prompt,
+    render_public_action_obligation,
 )
 from werewolf.agents.twdm_strategy import TWDMStrategy
 from werewolf.helper.log_utils import Log
+from werewolf.models.twd_tom.schema import ACTION_NAMES
 
 
 VOTE_CONSISTENCY_RULES = (
@@ -252,12 +255,13 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             actor=6,
             public_actions=[],
         )
-        self.assertIn("【已验证公开计划】- (empty)", empty_renderer)
-        self.assertIn("不得点名其他玩家", empty_renderer)
+        self.assertIn("【必须逐项表达的公开计划】", empty_renderer)
+        self.assertIn("当前没有需要公开表达的特定玩家判断或行动计划", empty_renderer)
+        self.assertIn("不点名其他玩家", empty_renderer)
         for player_id in (1, 2, 3, 4, 5, 7):
             self.assertNotIn(f"player{player_id}", empty_renderer)
 
-    def test_renderer_separates_oppose_from_vote_intent(self):
+    def test_renderer_obligations_preserve_a1_non_redundancy(self):
         stance_only = build_strict_classic7_speech_render_prompt(
             phase_text="第1天白天公开发言",
             actor=3,
@@ -278,12 +282,91 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
 
         self.assertIn("point_as_villager(player3)", stance_only)
         self.assertIn("oppose(player4)", stance_only)
-        self.assertIn("不自动产生 support", stance_only)
-        self.assertIn("oppose(X) 不等于 vote_intent(X)", stance_only)
-        self.assertIn("计划没有 vote_intent", stance_only)
-        self.assertIn("不得表达投票给、票出、放逐、驱逐", stance_only)
-        self.assertIn("vote_intent target player4", with_vote)
-        self.assertIn("才可被表达为投票给、票出、放逐、驱逐", with_vote)
+        self.assertNotIn("支持、认可或赞同 player3", stance_only)
+        self.assertIn("不得因此自动产生狼人判断或投票意图", stance_only)
+        self.assertNotIn("当前准备投票给或放逐 player4", stance_only)
+        self.assertIn("当前准备投票给或放逐 player4", with_vote)
+
+        check_good = render_public_action_obligation(
+            "check_as_good", 2, speaker_id=1
+        )
+        check_wolf = render_public_action_obligation(
+            "check_as_werewolf", 2, speaker_id=1
+        )
+        self.assertIn("不得额外产生 point_as_villager(player2)", check_good)
+        self.assertIn("不得额外产生 point_as_werewolf(player2)", check_wolf)
+        self.assertNotIn("必须明确公开判断 player2 是村民", check_good)
+        self.assertNotIn("必须明确公开判断 player2 是狼人", check_wolf)
+
+    def test_renderer_numbers_every_r13_realization_obligation(self):
+        renderer = build_strict_classic7_speech_render_prompt(
+            phase_text="第1天白天公开发言",
+            actor=4,
+            public_actions=[
+                {"action": "point_as_seer", "target": 1},
+                {"action": "oppose", "target": 3},
+                {"action": "oppose", "target": 6},
+                {"action": "vote_intent", "target": 3},
+            ],
+        )
+
+        self.assertIn("下面共有 4 项", renderer)
+        self.assertIn("1. point_as_seer(player1)", renderer)
+        self.assertIn("公开判断 player1 是预言家", renderer)
+        self.assertIn("2. oppose(player3)", renderer)
+        self.assertIn("质疑、反对、不认可 player3", renderer)
+        self.assertIn("3. oppose(player6)", renderer)
+        self.assertIn("质疑、反对、不认可 player6", renderer)
+        self.assertIn("4. vote_intent(player3)", renderer)
+        self.assertIn("当前准备投票给或放逐 player3", renderer)
+
+    def test_renderer_keeps_each_predicate_bound_to_its_target(self):
+        renderer = build_strict_classic7_speech_render_prompt(
+            phase_text="第1天白天公开发言",
+            actor=1,
+            public_actions=[
+                {"action": "point_as_villager", "target": 6},
+                {"action": "support", "target": 4},
+                {"action": "oppose", "target": 2},
+                {"action": "vote_intent", "target": 2},
+            ],
+        )
+
+        self.assertIn("公开判断 player6 是村民", renderer)
+        self.assertIn("支持、认可或赞同 player4", renderer)
+        self.assertIn("质疑、反对、不认可 player2", renderer)
+        self.assertIn("当前准备投票给或放逐 player2", renderer)
+        self.assertNotIn("公开判断 player4 是村民", renderer)
+
+    def test_self_target_obligation_requires_numbered_first_person_claim(self):
+        obligation = render_public_action_obligation(
+            "point_as_villager", 6, speaker_id=6
+        )
+
+        self.assertIn("自己（player6/6号）是村民", obligation)
+        self.assertIn("最终文本必须明确出现 player6 或 6号", obligation)
+        self.assertIn("我是6号村民", obligation)
+        self.assertNotIn("我认为6号是村民", obligation)
+
+    def test_realization_helper_covers_exact_action_vocabulary(self):
+        self.assertEqual(
+            tuple(_PUBLIC_ACTION_REALIZATION_TEMPLATES),
+            ACTION_NAMES,
+        )
+        obligations = []
+        for action in ACTION_NAMES:
+            with self.subTest(action=action):
+                obligation = render_public_action_obligation(
+                    action, 2, speaker_id=1
+                )
+                self.assertTrue(obligation)
+                self.assertIn("player2", obligation)
+                obligations.append(obligation)
+        self.assertEqual(len(set(obligations)), len(ACTION_NAMES))
+        with self.assertRaises(KeyError):
+            render_public_action_obligation(
+                "invented_action", 2, speaker_id=1
+            )
 
     def test_renderer_excludes_authoritative_players_outside_validated_plan(self):
         renderer = build_strict_classic7_speech_render_prompt(
