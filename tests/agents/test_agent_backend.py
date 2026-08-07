@@ -357,8 +357,48 @@ class AgentBackendTest(unittest.TestCase):
         self.assertIsNone(backend.calls[1]["response_format"])
         self.assertEqual([call["max_tokens"] for call in backend.calls], [512, 512])
         renderer = backend.calls[1]["messages"][0]["content"]
-        self.assertIn('"action":"oppose"', renderer)
+        self.assertIn("oppose(player3)", renderer)
         self.assertNotIn("【你合法知道的私有信息】", renderer)
+        self.assertNotIn("【权威公共状态】", renderer)
+        self.assertNotIn("【当前存活】", renderer)
+
+    def test_renderer_does_not_receive_r9_state_players_outside_plan(self):
+        observation = self._strict_observation()
+        observation["current_act_idx"] = 2
+        observation["authoritative_public_state"].update({
+            "last_night_result": {"day": 0, "dead_players": [1, 3]},
+            "alive_players": [2, 4, 5, 6, 7],
+            "suggestible_exile_targets": [4, 5, 6, 7],
+        })
+        backend = MetadataBackend([
+            '{"public_actions":[{"action":"point_as_villager","target":4}]}',
+            "我目前更倾向认为player4是村民。",
+        ])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "我目前更倾向认为player4是村民。"),
+        )
+        renderer = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("player2", renderer)
+        self.assertIn("player4", renderer)
+        self.assertIn("第1天白天公开发言", renderer)
+        for player_id in (1, 3, 5, 6, 7):
+            self.assertNotIn(f"player{player_id}", renderer)
+        for state_label in (
+            "昨夜公开结果",
+            "此前放逐",
+            "当前存活",
+            "当前可公开建议放逐",
+        ):
+            self.assertNotIn(state_label, renderer)
 
     def test_public_speech_plan_validation_contract(self):
         state = self._strict_observation()["authoritative_public_state"]
@@ -487,6 +527,12 @@ class AgentBackendTest(unittest.TestCase):
         vote_branch = schema["properties"]["public_actions"]["items"]["oneOf"][0]
         self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
         self.assertEqual(len(backend.calls), 2)
+        renderer_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("player2", renderer_prompt)
+        self.assertIn("player3", renderer_prompt)
+        self.assertIn("player4", renderer_prompt)
+        for player_id in (1, 5, 6, 7):
+            self.assertNotIn(f"player{player_id}", renderer_prompt)
 
     def test_dead_vote_target_fails_schema_and_post_validator(self):
         observation = self._dead_player_observation()

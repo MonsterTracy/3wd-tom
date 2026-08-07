@@ -13,6 +13,7 @@ from werewolf.agents.llm_agent import (
 from werewolf.agents.prompt_template_v0 import (
     CON,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+    _render_authoritative_public_phase,
     build_strict_classic7_speech_render_prompt,
 )
 from . import agent_registry as AgentRegistry
@@ -202,9 +203,9 @@ class GPTAgent(LLMAgent):
             game_context=game_context,
         )
         renderer_prompt = build_strict_classic7_speech_render_prompt(
-            authoritative_public_state=observation[
-                "authoritative_public_state"
-            ],
+            phase_text=_render_authoritative_public_phase(
+                observation["authoritative_public_state"]
+            ),
             actor=player_id,
             public_actions=plan.as_list(),
         )

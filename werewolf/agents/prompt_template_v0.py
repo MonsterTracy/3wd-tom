@@ -1,5 +1,3 @@
-import json
-
 from werewolf.models.twd_tom.schema import ACTION_NAMES
 
 
@@ -21,6 +19,30 @@ LEGACY_GAMEPLAY_PROMPT_PROFILE = "legacy"
 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
     "strict_classic7"
 )
+
+
+def _render_authoritative_public_phase(public_state):
+    """Render the player-free phase view from authoritative public state."""
+
+    required_fields = {"day", "day_or_night", "phase"}
+    if not isinstance(public_state, dict) or not required_fields <= public_state.keys():
+        raise TypeError("incomplete authoritative public phase")
+    phase_names = {
+        "speech": "公开发言",
+        "speech_pk": "平票公开发言",
+        "vote": "投票",
+        "vote_pk": "平票投票",
+        "skill_wolf": "狼人行动",
+        "skill_seer": "预言家行动",
+        "skill_witch": "女巫行动",
+        "skill_guard": "守卫行动",
+        "end_game": "游戏结束",
+    }
+    return "第{day}天{period}{phase}".format(
+        day=public_state["day"],
+        period="白天" if public_state["day_or_night"] == "day" else "夜晚",
+        phase=phase_names.get(public_state["phase"], str(public_state["phase"])),
+    )
 
 
 def _render_authoritative_public_state(
@@ -77,22 +99,7 @@ def _render_authoritative_public_state(
         f"- player{item['player_id']} 已于第{item['day']}天放逐"
         for item in prior_exiles
     ) or "- 此前无人被放逐"
-    phase_names = {
-        "speech": "公开发言",
-        "speech_pk": "平票公开发言",
-        "vote": "投票",
-        "vote_pk": "平票投票",
-        "skill_wolf": "狼人行动",
-        "skill_seer": "预言家行动",
-        "skill_witch": "女巫行动",
-        "skill_guard": "守卫行动",
-        "end_game": "游戏结束",
-    }
-    phase_text = "第{day}天{period}{phase}".format(
-        day=public_state["day"],
-        period="白天" if public_state["day_or_night"] == "day" else "夜晚",
-        phase=phase_names.get(public_state["phase"], str(public_state["phase"])),
-    )
+    phase_text = _render_authoritative_public_phase(public_state)
     alive_text = ", ".join(f"player{player_id}" for player_id in alive_players) or "(无)"
     targets_text = ", ".join(
         f"player{player_id}" for player_id in suggestible_targets
@@ -372,7 +379,7 @@ def build_strict_classic7_speech_plan_prompt(
 
 def build_strict_classic7_speech_render_prompt(
     *,
-    authoritative_public_state,
+    phase_text,
     actor,
     public_actions,
 ):
@@ -380,14 +387,14 @@ def build_strict_classic7_speech_render_prompt(
 
     if isinstance(actor, bool) or not isinstance(actor, int) or not 1 <= actor <= 7:
         raise ValueError("strict speech renderer requires actor in [1, 7]")
+    if not isinstance(phase_text, str) or not phase_text.strip():
+        raise TypeError("strict speech renderer requires phase text")
     if not isinstance(public_actions, list):
         raise TypeError("strict speech renderer requires validated public_actions")
-    state_text = _render_authoritative_public_state(authoritative_public_state)
-    plan_text = json.dumps(
-        {"public_actions": public_actions},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    plan_text = "\n".join(
+        f"- {item['action']}(player{item['target']})"
+        for item in public_actions
+    ) or "- (empty)"
     empty_plan_rule = (
         "计划为空：生成简短、非目标化的观望发言；不得点名其他玩家，"
         "不得生成身份、技能或投票声明。"
@@ -406,12 +413,12 @@ def build_strict_classic7_speech_render_prompt(
         if vote_targets
         else "计划没有 vote_intent：不得表达投票给、票出、放逐、驱逐、归票或今天出任何玩家。"
     )
-    return f"""{state_text}
-
-【当前发言者】player{actor}
+    return f"""【当前发言者】player{actor}
+【当前阶段】{phase_text}
 【已验证公开计划】{plan_text}
 【输出合同】
 - 只输出 2–4 句中文公开发言正文，建议不超过 200 个汉字。
+- 只将下面的已验证公开计划表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
 - 只能表达已验证计划中的声明、立场、技能声称和投票倾向。
 - point_as_villager(X) 只表达将 X 公开判断为村民，不自动产生 support(X)。
 - oppose(X) 只表达质疑、反对、不认可或认为其发言可疑；oppose(X) 不等于 vote_intent(X)。

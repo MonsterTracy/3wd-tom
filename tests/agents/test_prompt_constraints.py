@@ -220,7 +220,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 (werewolf, villager, seer, witch, guard)
             ))
 
-    def test_renderer_receives_only_authority_actor_and_validated_plan(self):
+    def test_renderer_receives_only_phase_actor_and_validated_plan(self):
         observation = _speech_observation(
             "Werewolf",
             game_log=[
@@ -235,7 +235,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         ]
         planner = _plan_prompt(observation)
         renderer = build_strict_classic7_speech_render_prompt(
-            authoritative_public_state=observation["authoritative_public_state"],
+            phase_text="第1天白天公开发言",
             actor=6,
             public_actions=[{"action": "oppose", "target": 2}],
         )
@@ -243,22 +243,23 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertIn("真实狼队信息（仅用于内部策略）：player1, player6", planner)
         self.assertIn("真实夜间刀人决策（仅用于内部策略）：player3", planner)
         self.assertIn("秘密原文", planner)
-        self.assertIn('"action":"oppose"', renderer)
+        self.assertIn("oppose(player2)", renderer)
         for private_text in ("真实狼队信息", "夜间刀人", "秘密原文", "game_log"):
             self.assertNotIn(private_text, renderer)
 
         empty_renderer = build_strict_classic7_speech_render_prompt(
-            authoritative_public_state=observation["authoritative_public_state"],
+            phase_text="第1天白天公开发言",
             actor=6,
             public_actions=[],
         )
-        self.assertIn('{"public_actions":[]}', empty_renderer)
+        self.assertIn("【已验证公开计划】- (empty)", empty_renderer)
         self.assertIn("不得点名其他玩家", empty_renderer)
+        for player_id in (1, 2, 3, 4, 5, 7):
+            self.assertNotIn(f"player{player_id}", empty_renderer)
 
     def test_renderer_separates_oppose_from_vote_intent(self):
-        observation = _speech_observation("Villager")
         stance_only = build_strict_classic7_speech_render_prompt(
-            authoritative_public_state=observation["authoritative_public_state"],
+            phase_text="第1天白天公开发言",
             actor=3,
             public_actions=[
                 {"action": "point_as_villager", "target": 3},
@@ -266,7 +267,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             ],
         )
         with_vote = build_strict_classic7_speech_render_prompt(
-            authoritative_public_state=observation["authoritative_public_state"],
+            phase_text="第1天白天公开发言",
             actor=3,
             public_actions=[
                 {"action": "point_as_villager", "target": 3},
@@ -275,14 +276,38 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
             ],
         )
 
-        self.assertIn('"action":"point_as_villager","target":3', stance_only)
-        self.assertIn('"action":"oppose","target":4', stance_only)
+        self.assertIn("point_as_villager(player3)", stance_only)
+        self.assertIn("oppose(player4)", stance_only)
         self.assertIn("不自动产生 support", stance_only)
         self.assertIn("oppose(X) 不等于 vote_intent(X)", stance_only)
         self.assertIn("计划没有 vote_intent", stance_only)
         self.assertIn("不得表达投票给、票出、放逐、驱逐", stance_only)
         self.assertIn("vote_intent target player4", with_vote)
         self.assertIn("才可被表达为投票给、票出、放逐、驱逐", with_vote)
+
+    def test_renderer_excludes_authoritative_players_outside_validated_plan(self):
+        renderer = build_strict_classic7_speech_render_prompt(
+            phase_text="第1天白天公开发言",
+            actor=2,
+            public_actions=[
+                {"action": "point_as_villager", "target": 4},
+            ],
+        )
+
+        self.assertIn("player2", renderer)
+        self.assertIn("player4", renderer)
+        self.assertIn("第1天白天公开发言", renderer)
+        self.assertIn("point_as_villager", renderer)
+        for player_id in (1, 3, 5, 6, 7):
+            self.assertNotIn(f"player{player_id}", renderer)
+        for state_label in (
+            "权威公共状态",
+            "昨夜公开结果",
+            "此前放逐",
+            "当前存活",
+            "当前可公开建议放逐",
+        ):
+            self.assertNotIn(state_label, renderer)
 
 
 if __name__ == "__main__":
