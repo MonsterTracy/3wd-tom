@@ -179,6 +179,7 @@ class GPTAgent(LLMAgent):
                     False,
                 ),
                 suggestible_player_ids=suggestible_player_ids,
+                speaker_id=player_id,
             ),
         )
         context = (

@@ -485,28 +485,8 @@ class AgentBackendTest(unittest.TestCase):
                     phase="1_day_speech",
                 )
 
-    def test_public_speech_plan_rejects_r15_internal_conflicts(self):
+    def test_public_speech_plan_rejects_oppose_self(self):
         candidates = (1, 2, 3, 4, 5, 6)
-        for good_action in (
-            "point_as_villager",
-            "point_as_seer",
-            "point_as_witch",
-            "point_as_guard",
-            "check_as_good",
-        ):
-            with self.subTest(good_action=good_action), self.assertRaises(
-                PublicSpeechPlanValidationError
-            ):
-                validate_public_speech_plan(
-                    {"public_actions": [
-                        {"action": good_action, "target": 3},
-                        {"action": "vote_intent", "target": 3},
-                    ]},
-                    suggestible_player_ids=candidates,
-                    player_id=7,
-                    phase="1_day_speech",
-                )
-
         with self.assertRaises(PublicSpeechPlanValidationError):
             validate_public_speech_plan(
                 {"public_actions": [
@@ -517,9 +497,22 @@ class AgentBackendTest(unittest.TestCase):
                 phase="1_day_speech",
             )
 
-    def test_public_speech_plan_keeps_non_conflicting_r15_combinations(self):
+    def test_public_speech_plan_keeps_soft_consistency_combinations(self):
         candidates = (1, 2, 3, 4, 5, 6)
-        allowed_plans = (
+        good_judgment_actions = (
+            "point_as_villager",
+            "point_as_seer",
+            "point_as_witch",
+            "point_as_guard",
+            "check_as_good",
+        )
+        allowed_plans = tuple(
+            [
+                {"action": action, "target": 3},
+                {"action": "vote_intent", "target": 3},
+            ]
+            for action in good_judgment_actions
+        ) + (
             [
                 {"action": "point_as_werewolf", "target": 3},
                 {"action": "vote_intent", "target": 3},
@@ -554,39 +547,67 @@ class AgentBackendTest(unittest.TestCase):
                 self.assertEqual(plan.as_list(), actions)
 
     def test_dynamic_plan_schema_separates_vote_target_domain(self):
-        candidates = (1, 4, 5, 6, 7)
+        candidates = (1, 2, 4, 5)
         schema = public_speech_plan_json_schema(
-            suggestible_player_ids=candidates
+            suggestible_player_ids=candidates,
+            speaker_id=7,
         )
         branches = schema["properties"]["public_actions"]["items"]["oneOf"]
-        vote_branch, other_branch = branches
+        vote_branch, oppose_branch, other_branch = branches
 
         self.assertEqual(vote_branch["properties"]["action"], {"const": "vote_intent"})
         self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
+        self.assertEqual(oppose_branch["properties"]["action"], {"const": "oppose"})
+        self.assertEqual(
+            oppose_branch["properties"]["target"]["enum"],
+            [1, 2, 3, 4, 5, 6],
+        )
         self.assertEqual(
             set(other_branch["properties"]["action"]["enum"]),
-            set(ACTION_NAMES) - {"vote_intent"},
+            set(ACTION_NAMES) - {"vote_intent", "oppose"},
         )
         self.assertEqual(other_branch["properties"]["target"]["enum"], list(range(1, 8)))
         self.assertFalse(_schema_accepts_plan(schema, {
             "public_actions": [{"action": "vote_intent", "target": 3}]
         }))
         for action, target in (
-            ("vote_intent", 4),
+            ("vote_intent", 1),
+            ("oppose", 1),
+            ("oppose", 6),
             ("check_as_good", 3),
-            ("oppose", 3),
+            ("support", 7),
+            ("point_as_villager", 7),
+            ("point_as_seer", 7),
         ):
             with self.subTest(action=action, target=target):
                 self.assertTrue(_schema_accepts_plan(schema, {
                     "public_actions": [{"action": action, "target": target}]
                 }))
+        self.assertFalse(_schema_accepts_plan(schema, {
+            "public_actions": [{"action": "oppose", "target": 7}]
+        }))
+        branch_actions = [
+            {branch["properties"]["action"]["const"]}
+            if "const" in branch["properties"]["action"]
+            else set(branch["properties"]["action"]["enum"])
+            for branch in branches
+        ]
+        self.assertEqual(set().union(*branch_actions), set(ACTION_NAMES))
+        self.assertEqual(
+            sum(len(actions) for actions in branch_actions),
+            len(ACTION_NAMES),
+        )
 
     def test_dynamic_plan_schema_omits_vote_branch_for_empty_candidates(self):
-        schema = public_speech_plan_json_schema(suggestible_player_ids=())
+        schema = public_speech_plan_json_schema(
+            suggestible_player_ids=(),
+            speaker_id=7,
+        )
         branches = schema["properties"]["public_actions"]["items"]["oneOf"]
 
-        self.assertEqual(len(branches), 1)
-        self.assertNotIn("vote_intent", branches[0]["properties"]["action"]["enum"])
+        self.assertEqual(len(branches), 2)
+        self.assertEqual(branches[0]["properties"]["action"], {"const": "oppose"})
+        self.assertNotIn("vote_intent", branches[1]["properties"]["action"]["enum"])
         self.assertTrue(_schema_accepts_plan(schema, {"public_actions": []}))
         self.assertTrue(_schema_accepts_plan(schema, {
             "public_actions": [{"action": "check_as_good", "target": 3}]
@@ -643,7 +664,8 @@ class AgentBackendTest(unittest.TestCase):
             {"action": "vote_intent", "target": 3},
         ]}
         schema = public_speech_plan_json_schema(
-            suggestible_player_ids=candidates
+            suggestible_player_ids=candidates,
+            speaker_id=2,
         )
         self.assertFalse(_schema_accepts_plan(schema, payload))
         with self.assertRaisesRegex(

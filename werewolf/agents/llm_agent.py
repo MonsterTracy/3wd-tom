@@ -55,15 +55,6 @@ class PublicSpeechPlanValidationError(ValueError):
     """A private planner response violates the public-plan contract."""
 
 
-_EXPLICIT_PUBLIC_GOOD_ACTIONS = frozenset({
-    "point_as_villager",
-    "point_as_seer",
-    "point_as_witch",
-    "point_as_guard",
-    "check_as_good",
-})
-
-
 @dataclass(frozen=True)
 class PublicSpeechPlan:
     """Validated public claims represented only by formal speech actions."""
@@ -101,11 +92,15 @@ def canonical_suggestible_player_ids(authoritative_public_state):
     return canonical
 
 
-def public_speech_plan_json_schema(*, suggestible_player_ids):
+def public_speech_plan_json_schema(*, suggestible_player_ids, speaker_id):
     if not isinstance(suggestible_player_ids, tuple):
         raise TypeError("suggestible_player_ids must be a tuple")
-    non_vote_actions = [
-        action for action in ACTION_NAMES if action != "vote_intent"
+    if isinstance(speaker_id, bool) or not isinstance(speaker_id, int) or not 1 <= speaker_id <= 7:
+        raise ValueError("speaker_id must be an integer in [1, 7]")
+    other_actions = [
+        action
+        for action in ACTION_NAMES
+        if action not in {"vote_intent", "oppose"}
     ]
     action_branches = []
     if suggestible_player_ids:
@@ -126,7 +121,23 @@ def public_speech_plan_json_schema(*, suggestible_player_ids):
         "additionalProperties": False,
         "required": ["action", "target"],
         "properties": {
-            "action": {"type": "string", "enum": non_vote_actions},
+            "action": {"const": "oppose"},
+            "target": {
+                "type": "integer",
+                "enum": [
+                    player_id
+                    for player_id in range(1, 8)
+                    if player_id != speaker_id
+                ],
+            },
+        },
+    })
+    action_branches.append({
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action", "target"],
+        "properties": {
+            "action": {"type": "string", "enum": other_actions},
             "target": {"type": "integer", "enum": list(range(1, 8))},
         },
     })
@@ -144,7 +155,7 @@ def public_speech_plan_json_schema(*, suggestible_player_ids):
 
 
 def public_speech_plan_response_format(
-    *, supports_json_schema, suggestible_player_ids
+    *, supports_json_schema, suggestible_player_ids, speaker_id
 ):
     if supports_json_schema is not True:
         raise BackendError(
@@ -156,7 +167,8 @@ def public_speech_plan_response_format(
             "name": "public_speech_plan",
             "strict": True,
             "schema": public_speech_plan_json_schema(
-                suggestible_player_ids=suggestible_player_ids
+                suggestible_player_ids=suggestible_player_ids,
+                speaker_id=speaker_id,
             ),
         },
     }
@@ -209,15 +221,6 @@ def validate_public_speech_plan(
     for action, target in validated:
         if action == "vote_intent" and target not in suggestible_player_ids:
             reject(f"vote_intent target player{target} is not currently suggestible")
-    for target in range(1, 8):
-        if (
-            ("vote_intent", target) in seen
-            and any(
-                (action, target) in seen
-                for action in _EXPLICIT_PUBLIC_GOOD_ACTIONS
-            )
-        ):
-            reject(f"explicit good judgment conflicts with vote_intent for player{target}")
     if ("oppose", player_id) in seen:
         reject(f"oppose cannot target the current speaker player{player_id}")
     return PublicSpeechPlan(tuple(validated))
