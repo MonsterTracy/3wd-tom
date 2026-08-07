@@ -215,7 +215,7 @@ class GPTAgent(LLMAgent):
                 "stage": "speech_render",
                 "observation": observation,
             },
-            temperature=temperature,
+            temperature=0.0,
             max_tokens=max_tokens,
         )
         validate_gameplay_public_speech(

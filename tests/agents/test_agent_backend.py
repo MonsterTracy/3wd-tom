@@ -209,6 +209,10 @@ class AgentBackendTest(unittest.TestCase):
                 self.assertEqual(len(backend.calls), expected_count)
                 self.assertEqual(len(records), expected_count)
                 self.assertEqual(
+                    [call["temperature"] for call in backend.calls],
+                    [1.0, 0.0][:expected_count],
+                )
+                self.assertEqual(
                     [record["response"] for record in records],
                     responses[:expected_count],
                 )
@@ -355,12 +359,39 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(len(backend.calls), 2)
         self.assertEqual(backend.calls[0]["response_format"]["type"], "json_schema")
         self.assertIsNone(backend.calls[1]["response_format"])
+        self.assertEqual(
+            [call["temperature"] for call in backend.calls],
+            [1.0, 0.0],
+        )
         self.assertEqual([call["max_tokens"] for call in backend.calls], [512, 512])
         renderer = backend.calls[1]["messages"][0]["content"]
         self.assertIn("oppose(player3)", renderer)
         self.assertNotIn("【你合法知道的私有信息】", renderer)
         self.assertNotIn("【权威公共状态】", renderer)
         self.assertNotIn("【当前存活】", renderer)
+
+    def test_strict_renderer_temperature_is_independent_of_gameplay_temperature(self):
+        backend = MetadataBackend([
+            '{"public_actions":[{"action":"oppose","target":3}]}',
+            "我不认可3号的说法。",
+        ])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            temperature=0.7,
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(self._strict_observation()),
+            ("speech", "我不认可3号的说法。"),
+        )
+        self.assertEqual(
+            [call["temperature"] for call in backend.calls],
+            [0.7, 0.0],
+        )
 
     def test_renderer_does_not_receive_r9_state_players_outside_plan(self):
         observation = self._strict_observation()
