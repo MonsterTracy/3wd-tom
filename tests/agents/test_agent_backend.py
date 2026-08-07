@@ -445,6 +445,19 @@ class AgentBackendTest(unittest.TestCase):
                 {"action": "oppose", "target": 3},
                 {"action": "vote_intent", "target": 3},
             ],
+            [
+                {"action": "check_as_werewolf", "target": 1},
+                {"action": "point_as_werewolf", "target": 1},
+            ],
+            [
+                {"action": "check_as_good", "target": 1},
+                {"action": "point_as_villager", "target": 1},
+            ],
+            [
+                {"action": "point_as_villager", "target": 1},
+                {"action": "check_as_good", "target": 1},
+                {"action": "vote_intent", "target": 7},
+            ],
         )
         for actions in valid_cases:
             with self.subTest(valid=actions):
@@ -466,10 +479,6 @@ class AgentBackendTest(unittest.TestCase):
             {"public_actions": [
                 {"action": "oppose", "target": 3},
                 {"action": "oppose", "target": 3},
-            ]},
-            {"public_actions": [
-                {"action": "check_as_werewolf", "target": 3},
-                {"action": "point_as_werewolf", "target": 3},
             ]},
         )
         for payload in invalid_cases:

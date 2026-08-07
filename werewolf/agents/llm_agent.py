@@ -211,13 +211,6 @@ def validate_public_speech_plan(
         seen.add(pair)
         validated.append(pair)
 
-    for checked, redundant in (
-        ("check_as_werewolf", "point_as_werewolf"),
-        ("check_as_good", "point_as_villager"),
-    ):
-        for target in range(1, 8):
-            if (checked, target) in seen and (redundant, target) in seen:
-                reject(f"redundant A1 actions for player{target}")
     for action, target in validated:
         if action == "vote_intent" and target not in suggestible_player_ids:
             reject(f"vote_intent target player{target} is not currently suggestible")
