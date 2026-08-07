@@ -485,6 +485,74 @@ class AgentBackendTest(unittest.TestCase):
                     phase="1_day_speech",
                 )
 
+    def test_public_speech_plan_rejects_r15_internal_conflicts(self):
+        candidates = (1, 2, 3, 4, 5, 6)
+        for good_action in (
+            "point_as_villager",
+            "point_as_seer",
+            "point_as_witch",
+            "point_as_guard",
+            "check_as_good",
+        ):
+            with self.subTest(good_action=good_action), self.assertRaises(
+                PublicSpeechPlanValidationError
+            ):
+                validate_public_speech_plan(
+                    {"public_actions": [
+                        {"action": good_action, "target": 3},
+                        {"action": "vote_intent", "target": 3},
+                    ]},
+                    suggestible_player_ids=candidates,
+                    player_id=7,
+                    phase="1_day_speech",
+                )
+
+        with self.assertRaises(PublicSpeechPlanValidationError):
+            validate_public_speech_plan(
+                {"public_actions": [
+                    {"action": "oppose", "target": 7},
+                ]},
+                suggestible_player_ids=candidates,
+                player_id=7,
+                phase="1_day_speech",
+            )
+
+    def test_public_speech_plan_keeps_non_conflicting_r15_combinations(self):
+        candidates = (1, 2, 3, 4, 5, 6)
+        allowed_plans = (
+            [
+                {"action": "point_as_werewolf", "target": 3},
+                {"action": "vote_intent", "target": 3},
+            ],
+            [
+                {"action": "check_as_werewolf", "target": 3},
+                {"action": "vote_intent", "target": 3},
+            ],
+            [
+                {"action": "oppose", "target": 3},
+                {"action": "vote_intent", "target": 3},
+            ],
+            [
+                {"action": "support", "target": 3},
+                {"action": "vote_intent", "target": 3},
+            ],
+            [
+                {"action": "point_as_villager", "target": 3},
+                {"action": "vote_intent", "target": 4},
+            ],
+            [{"action": "oppose", "target": 3}],
+            [{"action": "support", "target": 7}],
+        )
+        for actions in allowed_plans:
+            with self.subTest(actions=actions):
+                plan = validate_public_speech_plan(
+                    {"public_actions": actions},
+                    suggestible_player_ids=candidates,
+                    player_id=7,
+                    phase="1_day_speech",
+                )
+                self.assertEqual(plan.as_list(), actions)
+
     def test_dynamic_plan_schema_separates_vote_target_domain(self):
         candidates = (1, 4, 5, 6, 7)
         schema = public_speech_plan_json_schema(
