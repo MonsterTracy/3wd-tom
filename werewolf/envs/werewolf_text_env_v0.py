@@ -213,6 +213,12 @@ class WerewolfTextEnvV0(gym.Env):
         reward = [0 for _ in range(self.n_player)]
         info = {}
 
+        if (
+            self.phase == 'vote'
+            and action not in self._get_valid_action_for_current_actor()
+        ):
+            raise ValueError("invalid normal vote action")
+
         action = self.trans_action_agt_to_env(action)
         action_type = action[0]
         action_content = action[1]
@@ -642,6 +648,16 @@ class WerewolfTextEnvV0(gym.Env):
 
         return player_id - 1
 
+    def _suggestible_exile_target_ids(self):
+        """Return alive public player IDs excluding the current actor."""
+
+        current_player_id = self.current_act_idx + 1
+        return [
+            index + 1
+            for index, is_alive in enumerate(self.alive)
+            if is_alive == 1 and index + 1 != current_player_id
+        ]
+
     def _get_valid_action_for_current_actor(self):
         """Return valid actions for the actual current actor."""
 
@@ -731,9 +747,8 @@ class WerewolfTextEnvV0(gym.Env):
 
         elif self.phase == 'vote':
             valid_action = [('vote', -1)] + [
-                ('vote', idx)
-                for idx, is_live in enumerate(self.alive)
-                if is_live == 1
+                ('vote', player_id - 1)
+                for player_id in self._suggestible_exile_target_ids()
             ]
 
         elif self.phase == 'vote_pk':
@@ -851,12 +866,7 @@ class WerewolfTextEnvV0(gym.Env):
             for index, is_alive in enumerate(self.alive)
             if is_alive == 1
         ]
-        current_speaker = self.current_act_idx + 1
-        suggestible_exile_targets = [
-            player_id
-            for player_id in alive_players
-            if player_id != current_speaker
-        ]
+        suggestible_exile_targets = self._suggestible_exile_target_ids()
 
         return {
             "day": self.day,

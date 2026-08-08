@@ -95,6 +95,60 @@ class PlayerObservationTest(unittest.TestCase):
             0,
         )
 
+    def test_normal_vote_candidates_are_alive_and_non_self(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.current_act_idx = 1
+        self.env.alive = [1, 1, 1, 1, 0, 0, 0]
+
+        observation = self.env.get_observation_for(2)
+
+        self.assertEqual(
+            observation["valid_action"],
+            [("vote", 0), ("vote", 1), ("vote", 3), ("vote", 4)],
+        )
+        self.assertEqual(
+            observation["authoritative_public_state"][
+                "suggestible_exile_targets"
+            ],
+            [1, 3, 4],
+        )
+
+    def test_normal_vote_parser_and_environment_reject_self_vote(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.current_act_idx = 1
+        self.env.alive = [1, 1, 1, 1, 0, 0, 0]
+        observation = self.env.get_observation_for(2)
+        agent = LLMAgent()
+        agent.get_valid_actions_str(observation["valid_action"])
+        valid_actions = list(agent.nlp_action_to_env_action)
+
+        self.assertIsNone(
+            agent.parse_vote_action(
+                "{'投票': '2'}",
+                observation,
+                valid_actions,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "invalid normal vote action"):
+            self.env.step(("vote", 2))
+
+    def test_vote_pk_candidates_keep_existing_tied_player_contract(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.current_act_idx = 1
+        self.env.alive = [1, 1, 0, 1, 0, 0, 0]
+        self.env.vote_pk_players = [1, 3]
+
+        self.assertEqual(
+            self.env.get_observation_for(2)["valid_action"],
+            [("vote_pk", 0), ("vote_pk", 2), ("vote_pk", 4)],
+        )
+
     def test_private_visibility_is_player_specific(self):
         wolf_observation = (
             self.env.get_observation_for(1)
