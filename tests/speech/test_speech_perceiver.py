@@ -516,7 +516,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertEqual(
             perceiver.parse(
                 speaker=1,
-                speech="我是1号村民，我查验自己确认为好人。",
+                speech="我是 1 号村民，我查验自己确认为好人。",
                 day=1,
                 phase="speech",
             ),
@@ -525,6 +525,37 @@ class SpeechPerceiverTest(unittest.TestCase):
                 ["player1", "check_as_good", "player1"],
             ],
         )
+
+    def test_protected_self_role_accepts_seat_spacing_variants(
+        self,
+    ):
+        for speech in (
+            "我是2号村民",
+            "我是 2号村民",
+            "我是2号 村民",
+            "我是 2 号村民",
+        ):
+            with self.subTest(speech=speech):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend("NONE"),
+                    model_name="test-model",
+                )
+
+                self.assertEqual(
+                    perceiver.parse(
+                        speaker=2,
+                        speech=speech,
+                        day=1,
+                        phase="speech",
+                    ),
+                    [
+                        [
+                            "player2",
+                            "point_as_villager",
+                            "player2",
+                        ]
+                    ],
+                )
 
     def test_deduplicates_self_claim_returned_by_backend(
         self,

@@ -252,6 +252,14 @@ class SpeechPerceiverPilotCasesTest(
                     "不得只输出对应的 point_as_*",
                     prompt,
                 )
+                self.assertIn(
+                    "我查验自己为好人",
+                    prompt,
+                )
+                self.assertIn(
+                    "经查验，1号、2号、3号都是好人",
+                    prompt,
+                )
 
     def test_real_multi_vote_text_keeps_all_targets(
         self,
@@ -285,6 +293,21 @@ class SpeechPerceiverPilotCasesTest(
             "只有 action 和 target 都相同才是重复",
             prompt,
         )
+        self.assertIn(
+            "我准备投1号，也准备投2号",
+            prompt,
+        )
+        self.assertIn(
+            "记录的是公开声称，不是环境最终执行的游戏动作",
+            prompt,
+        )
+        for literal_contract in (
+            "不判断这些声称是否真实、合法、合理",
+            "一次查验多个目标",
+            "一次表达多个投票目标",
+            "不得根据游戏常识修正、降级、挑选或丢弃",
+        ):
+            self.assertIn(literal_contract, prompt)
 
     def test_identity_judgement_and_support_can_coexist(
         self,

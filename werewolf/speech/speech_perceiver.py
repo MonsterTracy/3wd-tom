@@ -56,7 +56,7 @@ _A1_SPECIFIC_TO_BROAD_ACTION = {
 _SELF_ROLE_CLAIM_PATTERN = re.compile(
     r"(?:^|[。！？；;\n])\s*"
     r"(?:"
-    r"我是(?:[1-7]号(?:玩家)?)?\s*[，,\s]*"
+    r"我是\s*(?:[1-7]\s*号(?:\s*玩家)?)?\s*[，,\s]*"
     r"(?:身份(?:是|为|：|:)\s*)?"
     r"|我的身份(?:是|为|：|:)\s*"
     r"|我身份(?:是|为|：|:)\s*"
@@ -347,7 +347,9 @@ class SpeechPerceiver:
 
         return f"""你是狼人杀公开发言的结构化动作解析器。
 
-你只解析下面这一段公开发言中由当前发言者明确表达的原子命题。你不判断发言真假，不依据游戏规则补全结论，不读取隐藏身份，也不推测玩家没有说出的私下想法。
+你只抽取下面这一段公开发言中由当前发言者明确声称了什么，不判断这些声称是否真实、合法、合理、符合角色能力或能在一局游戏中执行，不读取隐藏身份，也不推测玩家没有说出的私下想法。
+
+即使明确声明针对发言者自己、一次查验多个目标、一次表达多个投票目标、彼此矛盾或按正常狼人杀规则不能同时执行，也要逐项忠实抽取。不得根据游戏常识修正、降级、挑选或丢弃明确公开命题。
 
 当前发言者：player{speaker}
 当前天数：Day {day}
@@ -399,7 +401,7 @@ ACTION_INTENT（当前行动意图）：
 - 技能 action 只表示公开发言中的主观声明，不表示真实游戏事实，也不重复输出其宽泛结论。
 - save、poison 和 guard 只表示当前发言者声称自己已经完成的技能行为。建议、猜测、转述、未来计划、条件或否定表达不得使用。
 - vote_intent 只表示当前发言者对当前这一轮待执行投票的无条件自身承诺，不表示怀疑或反对，也不自动产生 oppose。允许“今天我投3号”“我的票挂3号”“这一轮我会投3号”。条件承诺、可能性表达、未来其他轮次的计划、请求他人投票、转述他人投票意图、已完成的投票或实际投票系统事件不得使用，例如“如果3号不解释，我就投他”“我可能投3号”“明天再考虑投3号”“大家投3号”“2号说他会投3号”“我已经投了3号”。
-- 同一种 action 可以针对多个不同 target；只有 action 和 target 都相同才是重复。例如“我考虑投1号，也考虑投3号”应输出两个 vote_intent。
+- 同一种 action 可以针对多个不同 target；只有 action 和 target 都相同才是重复。这里记录的是公开声称，不是环境最终执行的游戏动作。
 - 单纯转述、复述或引用别人的查验、身份声明或立场，不视为当前发言者自己的立场。
 - 如果当前发言者明确表示认同某人的发言，可以输出对该玩家的 support；只有当前发言者本人也明确接受某个具体身份结论时，才输出相应 point_as_*。
 - “我是好人”不是具体身份声明，不输出 point_as_villager。
@@ -435,6 +437,16 @@ player{speaker} | support | player7
 player{speaker} | point_as_seer | player{speaker}
 player{speaker} | check_as_good | player2
 
+输入：我查验自己为好人。
+输出：
+player{speaker} | check_as_good | player{speaker}
+
+输入：经查验，1号、2号、3号都是好人。
+输出：
+player{speaker} | check_as_good | player1
+player{speaker} | check_as_good | player2
+player{speaker} | check_as_good | player3
+
 输入：我是预言家，昨晚验了3号，是查杀。
 输出：
 player{speaker} | point_as_seer | player{speaker}
@@ -463,10 +475,10 @@ player{speaker} | guard | player4
 输出：
 player{speaker} | vote_intent | player3
 
-输入：我考虑投1号，也考虑投3号。
+输入：我准备投1号，也准备投2号。
 输出：
 player{speaker} | vote_intent | player1
-player{speaker} | vote_intent | player3
+player{speaker} | vote_intent | player2
 
 输入：这一轮我倾向投4号。
 输出：
