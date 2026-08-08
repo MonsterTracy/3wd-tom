@@ -45,6 +45,11 @@ _SELF_ROLE_ACTIONS = {
     "守卫": "point_as_guard",
 }
 
+_A1_SPECIFIC_TO_BROAD_ACTION = {
+    "check_as_good": "point_as_villager",
+    "check_as_werewolf": "point_as_werewolf",
+}
+
 # This intentionally covers only literal first-person role declarations.
 # It does not infer roles from "好人", negations, conditions, quotations,
 # other-player reports, or hidden game state.
@@ -302,6 +307,11 @@ class SpeechPerceiver:
                 speaker=speaker,
                 strict=strict,
             )
+            llm_actions = (
+                self._canonicalize_a1_actions(
+                    llm_actions
+                )
+            )
         except SpeechActionValidationError as exc:
             raise SpeechActionValidationError(
                 exc.failures,
@@ -355,7 +365,7 @@ object 必须是 player1 到 player7。
 动作语义按四个语义模块组织。模块只用于理解语义，输出仍是上述平坦三元组。
 
 ROLE_ESTIMATE（角色与阵营判断）：
-1. point_as_werewolf：当前发言者明确判断某玩家是狼人。
+1. point_as_werewolf：只有当前发言者明确公开判断某玩家是狼人时使用，例如“X 是狼人”“我认为 X 就是狼人”“我认定 X 为狼人”。
 2. point_as_villager：当前发言者明确判断某玩家是村民、平民或非狼好人阵营。
 3. point_as_seer：当前发言者明确判断某玩家是预言家。
 4. point_as_witch：当前发言者明确判断某玩家是女巫。
@@ -363,7 +373,7 @@ ROLE_ESTIMATE（角色与阵营判断）：
 
 SOCIAL_STANCE（社会与论述立场）：
 6. support：当前发言者明确认可、同意或支持 target 的发言、逻辑、主张或可信度。
-7. oppose：当前发言者明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度。
+7. oppose：当前发言者明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度，包括质疑、认为发言可疑或逻辑有问题、对 target 保留意见。
 
 CLAIMED_SKILL_REPORT（公开声称的技能信息）：
 8. check_as_good：当前发言者声称自己获得 target 为非狼阵营的查验结果。
@@ -383,11 +393,13 @@ ACTION_INTENT（当前行动意图）：
 - 第一人称明确自报具体身份属于受保护动作，必须优先且稳定抽取。例如“我是6号玩家，身份是村民”必须输出当前发言者对自己的 point_as_villager。
 - 发言前半段已经明确自报具体身份时，即使后文表示“暂时没有怀疑对象”“继续观察”“信息不足”或保持中立，也不能省略已经出现的自报身份动作。
 - 修饰明确社会或论述立场的“暂时”“比较”等措辞不转换成数值强度。但“倾向投”“可能投”等不确定投票表达不是 vote_intent，投票偏好本身也不等于 support 或 oppose。
+- “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级成 point_as_werewolf；只有明确判断“X 是狼人”才使用 point_as_werewolf。
 - 角色或阵营判断使用 point_as_*；普通判断不能替代技能查验结果，也不自动追加 support 或 oppose。
-- 只有当前发言者明确声称自己的查验结果时，才使用 check_as_good 或 check_as_werewolf。普通认好、普通怀疑、转述他人查验、推测、否定或条件查验不得使用这两个动作。
+- 只有当前发言者明确声称自己的“查验/check/inspection”结果时，才使用 check_as_good 或 check_as_werewolf，且不得只输出对应的 point_as_*。普通认好、普通怀疑、转述他人查验、推测、否定或条件查验不得使用 check_as_*；普通认好或认狼使用 point_as_*。
 - 技能 action 只表示公开发言中的主观声明，不表示真实游戏事实，也不重复输出其宽泛结论。
 - save、poison 和 guard 只表示当前发言者声称自己已经完成的技能行为。建议、猜测、转述、未来计划、条件或否定表达不得使用。
 - vote_intent 只表示当前发言者对当前这一轮待执行投票的无条件自身承诺，不表示怀疑或反对，也不自动产生 oppose。允许“今天我投3号”“我的票挂3号”“这一轮我会投3号”。条件承诺、可能性表达、未来其他轮次的计划、请求他人投票、转述他人投票意图、已完成的投票或实际投票系统事件不得使用，例如“如果3号不解释，我就投他”“我可能投3号”“明天再考虑投3号”“大家投3号”“2号说他会投3号”“我已经投了3号”。
+- 同一种 action 可以针对多个不同 target；只有 action 和 target 都相同才是重复。例如“我考虑投1号，也考虑投3号”应输出两个 vote_intent。
 - 单纯转述、复述或引用别人的查验、身份声明或立场，不视为当前发言者自己的立场。
 - 如果当前发言者明确表示认同某人的发言，可以输出对该玩家的 support；只有当前发言者本人也明确接受某个具体身份结论时，才输出相应 point_as_*。
 - “我是好人”不是具体身份声明，不输出 point_as_villager。
@@ -449,6 +461,11 @@ player{speaker} | guard | player4
 
 输入：今天我投3号。
 输出：
+player{speaker} | vote_intent | player3
+
+输入：我考虑投1号，也考虑投3号。
+输出：
+player{speaker} | vote_intent | player1
 player{speaker} | vote_intent | player3
 
 输入：这一轮我倾向投4号。
@@ -580,6 +597,30 @@ player{speaker}: {speech}"""
                 merged.append(normalized)
 
         return merged
+
+    @staticmethod
+    def _canonicalize_a1_actions(
+        actions: Sequence[Sequence[str]],
+    ) -> list[list[str]]:
+        """Remove only broad actions superseded by same-target checks."""
+
+        superseded = {
+            (
+                action[0],
+                _A1_SPECIFIC_TO_BROAD_ACTION[
+                    action[1]
+                ],
+                action[2],
+            )
+            for action in actions
+            if action[1]
+            in _A1_SPECIFIC_TO_BROAD_ACTION
+        }
+        return [
+            list(action)
+            for action in actions
+            if tuple(action) not in superseded
+        ]
 
     @classmethod
     def _extract_response_actions(

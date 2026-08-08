@@ -86,6 +86,28 @@ class SpeechPerceiverPilotCasesTest(
             prompt,
         )
 
+    def test_real_suspicion_text_stays_oppose_only(
+        self,
+    ):
+        actions, prompt = self.parse_with_response(
+            speaker=1,
+            speech="同时质疑 player3 的发言。",
+            response="player1 | oppose | player3",
+        )
+
+        self.assertEqual(
+            actions,
+            [["player1", "oppose", "player3"]],
+        )
+        self.assertIn(
+            "不得自动升级成 point_as_werewolf",
+            prompt,
+        )
+        self.assertIn(
+            "只有明确判断“X 是狼人”",
+            prompt,
+        )
+
     def test_endorsing_a_claim_supports_the_speaker(
         self,
     ):
@@ -178,6 +200,89 @@ class SpeechPerceiverPilotCasesTest(
         )
         self.assertIn(
             "普通认好、普通怀疑、转述他人查验",
+            prompt,
+        )
+
+    def test_real_check_provenance_regressions(
+        self,
+    ):
+        cases = (
+            (
+                1,
+                "我是1号，查验自己确认为好人。",
+                "player1 | check_as_good | player1",
+                [["player1", "check_as_good", "player1"]],
+            ),
+            (
+                6,
+                (
+                    "经查验，1号、4号、7号、2号、5号"
+                    "以及我自己6号均为好人。"
+                ),
+                "\n".join(
+                    f"player6 | check_as_good | player{target}"
+                    for target in (1, 4, 7, 2, 5, 6)
+                ),
+                [
+                    ["player6", "check_as_good", f"player{target}"]
+                    for target in (1, 4, 7, 2, 5, 6)
+                ],
+            ),
+            (
+                7,
+                "经过查验，我确认1号是狼人。",
+                "player7 | check_as_werewolf | player1",
+                [["player7", "check_as_werewolf", "player1"]],
+            ),
+        )
+
+        for speaker, speech, response, expected in cases:
+            with self.subTest(speech=speech):
+                actions, prompt = self.parse_with_response(
+                    speaker=speaker,
+                    speech=speech,
+                    response=response,
+                )
+                self.assertEqual(actions, expected)
+                self.assertIn(
+                    "明确声称自己的“查验/check/inspection”结果",
+                    prompt,
+                )
+                self.assertIn(
+                    "不得只输出对应的 point_as_*",
+                    prompt,
+                )
+
+    def test_real_multi_vote_text_keeps_all_targets(
+        self,
+    ):
+        actions, prompt = self.parse_with_response(
+            speaker=5,
+            speech=(
+                "我当前准备投票给或放逐 player1。"
+                "我当前准备投票给或放逐 player2。"
+                "我当前准备投票给或放逐 player4。"
+                "我当前准备投票给或放逐 player6。"
+            ),
+            response="\n".join(
+                f"player5 | vote_intent | player{target}"
+                for target in (1, 2, 4, 6)
+            ),
+        )
+
+        self.assertEqual(
+            actions,
+            [
+                ["player5", "vote_intent", f"player{target}"]
+                for target in (1, 2, 4, 6)
+            ],
+        )
+        self.assertIn(
+            "同一种 action 可以针对多个不同 target",
+            prompt,
+        )
+        self.assertIn(
+            "只有 action 和 target 都相同才是重复",
             prompt,
         )
 

@@ -285,6 +285,64 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
+    def test_canonicalizes_only_a1_check_expansions(
+        self,
+    ):
+        actions = SpeechPerceiver._canonicalize_a1_actions(
+            [
+                ["player2", "point_as_villager", "player3"],
+                ["player2", "check_as_good", "player3"],
+                ["player2", "point_as_werewolf", "player4"],
+                ["player2", "check_as_werewolf", "player4"],
+                ["player2", "oppose", "player4"],
+                ["player2", "vote_intent", "player4"],
+            ]
+        )
+
+        self.assertEqual(
+            actions,
+            [
+                ["player2", "check_as_good", "player3"],
+                ["player2", "check_as_werewolf", "player4"],
+                ["player2", "oppose", "player4"],
+                ["player2", "vote_intent", "player4"],
+            ],
+        )
+
+    def test_parse_canonicalizes_redundant_a1_backend_output(
+        self,
+    ):
+        backend = FakeBackend(
+            "\n".join(
+                [
+                    "player2 | check_as_good | player3",
+                    "player2 | point_as_villager | player3",
+                    "player2 | check_as_werewolf | player4",
+                    "player2 | point_as_werewolf | player4",
+                ]
+            )
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(
+                speaker=2,
+                speech=(
+                    "我查验3号为好人；经过查验，"
+                    "我确认4号是狼人。"
+                ),
+                day=1,
+                phase="speech",
+            ),
+            [
+                ["player2", "check_as_good", "player3"],
+                ["player2", "check_as_werewolf", "player4"],
+            ],
+        )
+
     def test_preserves_literal_self_claim_when_backend_returns_none(
         self,
     ):
@@ -436,6 +494,35 @@ class SpeechPerceiverTest(unittest.TestCase):
                     "support",
                     "player3",
                 ],
+            ],
+        )
+
+    def test_protected_self_role_survives_a1_canonicalization(
+        self,
+    ):
+        backend = FakeBackend(
+            "\n".join(
+                [
+                    "player1 | check_as_good | player1",
+                    "player1 | point_as_villager | player1",
+                ]
+            )
+        )
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(
+                speaker=1,
+                speech="我是1号村民，我查验自己确认为好人。",
+                day=1,
+                phase="speech",
+            ),
+            [
+                ["player1", "point_as_villager", "player1"],
+                ["player1", "check_as_good", "player1"],
             ],
         )
 
