@@ -257,8 +257,14 @@ class PlayingAgentBeliefReporter:
             raise ValueError("public snapshot requires public_action_count")
         canonical_identifiers = list(PLAYER_NAMES)
         canonical_list = ", ".join(canonical_identifiers)
-        known_wolf_list = ", ".join(known_werewolves) or "(empty)"
-        known_non_wolf_list = ", ".join(known_non_werewolves) or "(empty)"
+        known_wolf_list = json.dumps(
+            known_werewolves,
+            separators=(",", ":"),
+        )
+        known_non_wolf_list = json.dumps(
+            known_non_werewolves,
+            separators=(",", ":"),
+        )
         known_non_wolf_set = set(known_non_werewolves)
         legal_candidates = [
             player
@@ -287,17 +293,19 @@ Canonical player IDs (complete ordered list):
 Canonical pre-speech public_events:
 {public_history}
 
-`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。只列出当前相对更可疑、也就是相对更值得怀疑的玩家；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入，也不要列出全部 legal_candidates 来表示“不确定”或“没有相对偏好”。
+`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。它等于全部 known_werewolves 加上当前相对更可疑的额外软怀疑；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入。若你确实相对怀疑全部 legal_candidates，允许全部列出，也允许列出 0、1、2 或更多人。
 
-必须包含全部 known_werewolves，必须排除全部 known_non_werewolves。没有额外软怀疑时，精确输出 known_werewolves；若 known_werewolves 为空，此时输出空数组。若 hard knowledge 已经确定完整狼队，输出该完整 known_werewolves 集合是合法的。只允许上面的 canonical player IDs，不得重复。
+HARD CONSTRAINTS
+MUST INCLUDE: {known_wolf_list}
+MUST EXCLUDE: {known_non_wolf_list}
+Your output is invalid if it omits any MUST INCLUDE player or contains any MUST EXCLUDE player.
+
+没有额外软怀疑时，精确输出 MUST INCLUDE；若 MUST INCLUDE 为空，此时输出空数组。只允许上面的 canonical player IDs，不得重复。
 
 Before answering, silently verify this checklist:
 - 这是我的内部真实怀疑，而不是公开发言策略吗？
-- 是否遗漏 known_werewolves？
-- 是否包含 known_non_werewolves？
+- 是否满足 HARD CONSTRAINTS？
 - 是否把“仍可能”误当成“当前值得怀疑”？
-- 是否错误地用全部 legal_candidates 表示“不确定”？
-- 没有额外软怀疑时，是否精确输出 known_werewolves？
 - 是否错误地强行补足两人？
 - 是否只输出允许的 JSON？
 

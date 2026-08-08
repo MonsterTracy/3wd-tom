@@ -103,7 +103,7 @@ def test_projector_supports_empty_single_two_three_and_known_wolves(
         assert sum(target) == pytest.approx(1.0)
 
 
-def test_projector_rejects_prompt_v1_and_noncanonical_full_candidates(
+def test_projector_rejects_prompt_v1_and_projects_full_candidates(
     suspicion_sample_factory,
 ):
     old_prompt = suspicion_sample_factory()
@@ -122,8 +122,11 @@ def test_projector_rejects_prompt_v1_and_noncanonical_full_candidates(
         "player6",
         "player7",
     ]
-    with pytest.raises(ValueError, match="cannot equal all legal candidates"):
-        project_suspicion_sample(full_candidates)
+    projected = project_suspicion_sample(full_candidates)
+    target = projected["pair_targets"]["player3"]
+    assert len(target) == 21
+    assert all(probability >= 0.0 for probability in target)
+    assert sum(target) == pytest.approx(1.0)
 
 
 def test_no_extra_hard_knowledge_and_wolf_reports_project_canonically(

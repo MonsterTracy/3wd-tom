@@ -201,11 +201,11 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
         for suspicion in sample["suspected_werewolves"].values()
         if suspicion is not None
     } >= {0, 1, 3}
-    assert sample["belief_status"]["player4"] == "semantic_error"
-    assert sample["suspected_werewolves"]["player4"] is None
-    assert "cannot equal all legal candidates" in (
-        sample["belief_errors"]["player4"]
-    )
+    assert sample["belief_status"]["player4"] == "ok"
+    assert sample["suspected_werewolves"]["player4"] == [
+        "player1", "player2", "player3", "player5", "player6", "player7"
+    ]
+    assert sample["belief_errors"]["player4"] is None
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
     with pytest.raises(ValueError, match="field set mismatch"):

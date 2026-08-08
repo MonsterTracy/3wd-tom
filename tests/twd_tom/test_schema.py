@@ -135,6 +135,18 @@ def test_extended_actions_use_canonical_validation(action_name):
             ["player2", "player6", "player7"],
             ["player3", "player5"],
         ),
+        (
+            ["player2", "player3", "player4", "player5", "player6", "player7"],
+            [],
+            ["player1"],
+            ["player2", "player3", "player4", "player5", "player6", "player7"],
+        ),
+        (
+            ["player1", "player3", "player4", "player5"],
+            ["player3"],
+            ["player2", "player6", "player7"],
+            ["player1", "player3", "player4", "player5"],
+        ),
     ],
 )
 def test_player_suspicion_canonical_no_extra_forms_are_valid(
@@ -153,18 +165,6 @@ def test_player_suspicion_canonical_no_extra_forms_are_valid(
 @pytest.mark.parametrize(
     ("suspected", "known_wolves", "known_non_wolves", "match"),
     [
-        (
-            ["player2", "player3", "player4", "player5", "player6", "player7"],
-            [],
-            ["player1"],
-            "cannot equal all legal candidates",
-        ),
-        (
-            ["player1", "player3", "player4", "player5"],
-            ["player3"],
-            ["player2", "player6", "player7"],
-            "cannot equal all legal candidates",
-        ),
         ([], ["player3"], ["player1"], "contain all known"),
         (["player1"], [], ["player1"], "known_non_werewolves"),
         (["player2", "player2"], [], ["player1"], "duplicate"),

@@ -128,12 +128,15 @@ def test_prompt_defines_player_suspicion_without_pair_support_semantics():
         "不要求恰好两人",
         "仍有可能",
         "输出空数组",
-        "不要列出全部 legal_candidates",
-        "没有额外软怀疑时，精确输出 known_werewolves",
-        "hard knowledge 已经确定完整狼队",
+        "允许全部列出",
+        "HARD CONSTRAINTS",
+        'MUST INCLUDE: ["player1"]',
+        'MUST EXCLUDE: ["player3","player6"]',
+        "Your output is invalid if it omits any MUST INCLUDE player",
+        "没有额外软怀疑时，精确输出 MUST INCLUDE",
         "Your observer identity is exactly: player3",
-        "known_werewolves: player1",
-        "known_non_werewolves: player3, player6",
+        'known_werewolves: ["player1"]',
+        'known_non_werewolves: ["player3","player6"]',
         "Current legal_candidates: player1, player2, player4, player5, player7",
         "player1, player2, player3, player4, player5, player6, player7",
         '"raw_text":"earlier public speech"',
@@ -247,8 +250,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Villager",
             [],
             ["player1"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            ["player2", "player3", "player4", "player5", "player6", "player7"],
         ),
         (
             '{"suspected_werewolves":'
@@ -257,8 +260,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             ["player3"],
             ["player2", "player6", "player7"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            ["player1", "player3", "player4", "player5"],
         ),
         (
             '{"suspected_werewolves":[]}',
@@ -277,6 +280,15 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             ["player3"],
             STATUS_OK,
             ["player2"],
+        ),
+        (
+            '{"suspected_werewolves":["player2"]}',
+            3,
+            "Seer",
+            [],
+            ["player2", "player3"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":["player3"]}',
@@ -304,6 +316,15 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             ["player1", "player3", "player4", "player6", "player7"],
             STATUS_OK,
             ["player2", "player5"],
+        ),
+        (
+            '{"suspected_werewolves":["player2"]}',
+            2,
+            "Werewolf",
+            ["player2", "player5"],
+            ["player1", "player3", "player4", "player6", "player7"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
     ],
 )
@@ -590,14 +611,16 @@ def test_reporter_keeps_only_observer_role_private_knowledge(
     assert forbidden not in messages
 
 
-def test_noncanonical_full_candidate_report_fails_once_without_retry():
+def test_full_candidate_report_succeeds_once_without_retry():
     result, backend, _ = _report(
         '{"suspected_werewolves":'
         '["player2","player3","player4","player5","player6","player7"]}',
     )
-    assert result["status"] == STATUS_SEMANTIC_ERROR
-    assert result["suspected_werewolves"] is None
-    assert "cannot equal all legal candidates" in result["error"]
+    assert result["status"] == STATUS_OK
+    assert result["suspected_werewolves"] == [
+        "player2", "player3", "player4", "player5", "player6", "player7"
+    ]
+    assert result["error"] is None
     assert len(backend.calls) == 1
 
 

@@ -103,7 +103,7 @@ def test_sample_requires_exact_observer_reports():
         make_twd_tom_sample(public_snapshot=snapshot, reports={})
 
 
-def test_sample_persists_full_candidate_semantic_error_without_repair():
+def test_sample_persists_hard_fact_semantic_error_without_repair():
     snapshot = freeze_public_snapshot(
         game_id="game_001",
         step_idx=1,
@@ -113,10 +113,7 @@ def test_sample_persists_full_candidate_semantic_error_without_repair():
         observer_ids=[1],
         public_events=_events(speaker="player1"),
     )
-    error = (
-        "suspected_werewolves cannot equal all legal candidates unless "
-        "hard knowledge already determines the full candidate set"
-    )
+    error = "suspected_werewolves cannot contain known_non_werewolves"
     sample = make_twd_tom_sample(
         public_snapshot=snapshot,
         reports={

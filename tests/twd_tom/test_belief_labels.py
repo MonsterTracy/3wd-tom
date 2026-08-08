@@ -95,11 +95,11 @@ def test_three_suspects_are_weighted_only_by_pair_hit_count():
     _assert_distribution(target)
 
 
-def test_full_legal_candidate_suspicion_is_rejected_before_projection():
-    with pytest.raises(ValueError, match="cannot equal all legal candidates"):
-        suspicion_set_to_pair_target(
-            [f"player{i}" for i in range(1, 7)], [], ["player7"]
-        )
+def test_full_legal_candidate_suspicion_projects_to_a_distribution():
+    target = suspicion_set_to_pair_target(
+        [f"player{i}" for i in range(1, 7)], [], ["player7"]
+    )
+    _assert_distribution(target)
 
 
 def test_known_wolf_is_hard_and_not_double_weighted():

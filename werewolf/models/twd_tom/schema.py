@@ -194,16 +194,6 @@ def validate_player_suspicion(
         raise ValueError(
             "suspected_werewolves cannot contain known_non_werewolves"
         )
-    legal_candidates = [
-        player
-        for player in PLAYER_NAMES
-        if player not in known_non_wolf_set
-    ]
-    if suspected == legal_candidates and legal_candidates != known_wolves:
-        raise ValueError(
-            "suspected_werewolves cannot equal all legal candidates unless "
-            "hard knowledge already determines the full candidate set"
-        )
     return suspected
 
 ACTION_TO_ID: dict[str, int] = {
