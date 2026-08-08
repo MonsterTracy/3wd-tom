@@ -158,6 +158,7 @@ class GPTAgent(LLMAgent):
         max_tokens,
     ):
         player_id = observation.get("current_act_idx")
+        speaker_role = observation.get("identity")
         phase = observation.get("phase")
         game_context = getattr(
             getattr(self.backend, "session", None),
@@ -180,6 +181,7 @@ class GPTAgent(LLMAgent):
                 ),
                 suggestible_player_ids=suggestible_player_ids,
                 speaker_id=player_id,
+                speaker_role=speaker_role,
             ),
         )
         context = (
@@ -200,6 +202,7 @@ class GPTAgent(LLMAgent):
             plan_payload,
             suggestible_player_ids=suggestible_player_ids,
             player_id=player_id,
+            speaker_role=speaker_role,
             phase=phase,
             game_context=game_context,
         )

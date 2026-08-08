@@ -55,6 +55,12 @@ class PublicSpeechPlanValidationError(ValueError):
     """A private planner response violates the public-plan contract."""
 
 
+_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS = frozenset({
+    "point_as_werewolf",
+    "check_as_werewolf",
+})
+
+
 @dataclass(frozen=True)
 class PublicSpeechPlan:
     """Validated public claims represented only by formal speech actions."""
@@ -92,7 +98,19 @@ def canonical_suggestible_player_ids(authoritative_public_state):
     return canonical
 
 
-def public_speech_plan_json_schema(*, suggestible_player_ids, speaker_id):
+def _is_true_wolf_self_identity_disclosure(
+    *, action, target, speaker_id, speaker_role
+):
+    return (
+        speaker_role == "Werewolf"
+        and action in _SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS
+        and target == speaker_id
+    )
+
+
+def public_speech_plan_json_schema(
+    *, suggestible_player_ids, speaker_id, speaker_role
+):
     if not isinstance(suggestible_player_ids, tuple):
         raise TypeError("suggestible_player_ids must be a tuple")
     if isinstance(speaker_id, bool) or not isinstance(speaker_id, int) or not 1 <= speaker_id <= 7:
@@ -100,8 +118,14 @@ def public_speech_plan_json_schema(*, suggestible_player_ids, speaker_id):
     other_actions = [
         action
         for action in ACTION_NAMES
-        if action not in {"vote_intent", "oppose"}
+        if action not in {
+            "vote_intent",
+            "oppose",
+            *_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS,
+        }
     ]
+    if speaker_role not in _PRIVATE_ROLE_EVENTS:
+        raise ValueError(f"unsupported speaker_role: {speaker_role!r}")
     action_branches = []
     if suggestible_player_ids:
         action_branches.append({
@@ -137,6 +161,30 @@ def public_speech_plan_json_schema(*, suggestible_player_ids, speaker_id):
         "additionalProperties": False,
         "required": ["action", "target"],
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": sorted(_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS),
+            },
+            "target": {
+                "type": "integer",
+                "enum": [
+                    player_id
+                    for player_id in range(1, 8)
+                    if not _is_true_wolf_self_identity_disclosure(
+                        action="point_as_werewolf",
+                        target=player_id,
+                        speaker_id=speaker_id,
+                        speaker_role=speaker_role,
+                    )
+                ],
+            },
+        },
+    })
+    action_branches.append({
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["action", "target"],
+        "properties": {
             "action": {"type": "string", "enum": other_actions},
             "target": {"type": "integer", "enum": list(range(1, 8))},
         },
@@ -155,7 +203,7 @@ def public_speech_plan_json_schema(*, suggestible_player_ids, speaker_id):
 
 
 def public_speech_plan_response_format(
-    *, supports_json_schema, suggestible_player_ids, speaker_id
+    *, supports_json_schema, suggestible_player_ids, speaker_id, speaker_role
 ):
     if supports_json_schema is not True:
         raise BackendError(
@@ -169,6 +217,7 @@ def public_speech_plan_response_format(
             "schema": public_speech_plan_json_schema(
                 suggestible_player_ids=suggestible_player_ids,
                 speaker_id=speaker_id,
+                speaker_role=speaker_role,
             ),
         },
     }
@@ -179,6 +228,7 @@ def validate_public_speech_plan(
     *,
     suggestible_player_ids,
     player_id,
+    speaker_role,
     phase,
     game_context=None,
 ):
@@ -189,6 +239,8 @@ def validate_public_speech_plan(
 
     if not isinstance(suggestible_player_ids, tuple):
         reject("suggestible_player_ids must be a tuple")
+    if speaker_role not in _PRIVATE_ROLE_EVENTS:
+        reject(f"unsupported speaker_role: {speaker_role!r}")
     if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
         reject("plan must contain only public_actions")
     public_actions = payload["public_actions"]
@@ -216,6 +268,14 @@ def validate_public_speech_plan(
             reject(f"vote_intent target player{target} is not currently suggestible")
     if ("oppose", player_id) in seen:
         reject(f"oppose cannot target the current speaker player{player_id}")
+    for action, target in validated:
+        if _is_true_wolf_self_identity_disclosure(
+            action=action,
+            target=target,
+            speaker_id=player_id,
+            speaker_role=speaker_role,
+        ):
+            reject(f"{action} cannot disclose the true Werewolf speaker's identity")
     return PublicSpeechPlan(tuple(validated))
 
 

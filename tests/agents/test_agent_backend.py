@@ -467,6 +467,7 @@ class AgentBackendTest(unittest.TestCase):
                         state["suggestible_exile_targets"]
                     ),
                     player_id=1,
+                    speaker_role="Villager",
                     phase="1_day_speech",
                 )
                 self.assertEqual(plan.as_list(), actions)
@@ -491,6 +492,7 @@ class AgentBackendTest(unittest.TestCase):
                         state["suggestible_exile_targets"]
                     ),
                     player_id=1,
+                    speaker_role="Villager",
                     phase="1_day_speech",
                 )
 
@@ -503,6 +505,7 @@ class AgentBackendTest(unittest.TestCase):
                 ]},
                 suggestible_player_ids=candidates,
                 player_id=7,
+                speaker_role="Villager",
                 phase="1_day_speech",
             )
 
@@ -551,6 +554,7 @@ class AgentBackendTest(unittest.TestCase):
                     {"public_actions": actions},
                     suggestible_player_ids=candidates,
                     player_id=7,
+                    speaker_role="Villager",
                     phase="1_day_speech",
                 )
                 self.assertEqual(plan.as_list(), actions)
@@ -560,9 +564,10 @@ class AgentBackendTest(unittest.TestCase):
         schema = public_speech_plan_json_schema(
             suggestible_player_ids=candidates,
             speaker_id=7,
+            speaker_role="Villager",
         )
         branches = schema["properties"]["public_actions"]["items"]["oneOf"]
-        vote_branch, oppose_branch, other_branch = branches
+        vote_branch, oppose_branch, self_wolf_claim_branch, other_branch = branches
 
         self.assertEqual(vote_branch["properties"]["action"], {"const": "vote_intent"})
         self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
@@ -572,8 +577,21 @@ class AgentBackendTest(unittest.TestCase):
             [1, 2, 3, 4, 5, 6],
         )
         self.assertEqual(
+            set(self_wolf_claim_branch["properties"]["action"]["enum"]),
+            {"point_as_werewolf", "check_as_werewolf"},
+        )
+        self.assertEqual(
+            self_wolf_claim_branch["properties"]["target"]["enum"],
+            list(range(1, 8)),
+        )
+        self.assertEqual(
             set(other_branch["properties"]["action"]["enum"]),
-            set(ACTION_NAMES) - {"vote_intent", "oppose"},
+            set(ACTION_NAMES) - {
+                "vote_intent",
+                "oppose",
+                "point_as_werewolf",
+                "check_as_werewolf",
+            },
         )
         self.assertEqual(other_branch["properties"]["target"]["enum"], list(range(1, 8)))
         self.assertFalse(_schema_accepts_plan(schema, {
@@ -611,12 +629,13 @@ class AgentBackendTest(unittest.TestCase):
         schema = public_speech_plan_json_schema(
             suggestible_player_ids=(),
             speaker_id=7,
+            speaker_role="Villager",
         )
         branches = schema["properties"]["public_actions"]["items"]["oneOf"]
 
-        self.assertEqual(len(branches), 2)
+        self.assertEqual(len(branches), 3)
         self.assertEqual(branches[0]["properties"]["action"], {"const": "oppose"})
-        self.assertNotIn("vote_intent", branches[1]["properties"]["action"]["enum"])
+        self.assertNotIn("vote_intent", branches[2]["properties"]["action"]["enum"])
         self.assertTrue(_schema_accepts_plan(schema, {"public_actions": []}))
         self.assertTrue(_schema_accepts_plan(schema, {
             "public_actions": [{"action": "check_as_good", "target": 3}]
@@ -624,6 +643,75 @@ class AgentBackendTest(unittest.TestCase):
         self.assertFalse(_schema_accepts_plan(schema, {
             "public_actions": [{"action": "vote_intent", "target": 1}]
         }))
+
+    def test_true_werewolf_self_identity_disclosure_is_not_representable(self):
+        observation = self._strict_observation()
+        observation["identity"] = "Werewolf"
+        observation["current_act_idx"] = 6
+        observation["authoritative_public_state"][
+            "suggestible_exile_targets"
+        ] = [1, 2, 3, 4, 5, 7]
+        candidates = canonical_suggestible_player_ids(
+            observation["authoritative_public_state"]
+        )
+        backend = MetadataBackend([
+            '{"public_actions":['
+            '{"action":"point_as_werewolf","target":6}]}'
+        ])
+        backend.supports_json_schema = True
+        backend.session = SimpleNamespace(game_id="game_010_seed_464")
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+        with self.assertRaises(PublicSpeechPlanValidationError):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 1)
+        schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
+
+        for action in ("point_as_werewolf", "check_as_werewolf"):
+            self.assertFalse(_schema_accepts_plan(schema, {
+                "public_actions": [{"action": action, "target": 6}],
+            }))
+            with self.assertRaises(PublicSpeechPlanValidationError):
+                validate_public_speech_plan(
+                    {"public_actions": [{"action": action, "target": 6}]},
+                    suggestible_player_ids=candidates,
+                    player_id=6,
+                    speaker_role="Werewolf",
+                    phase="1_day_speech",
+                    game_context="game_010_seed_464",
+                )
+            for target in candidates:
+                with self.subTest(action=action, target=target):
+                    self.assertTrue(_schema_accepts_plan(schema, {
+                        "public_actions": [{"action": action, "target": target}],
+                    }))
+
+        for role in ("Villager", "Seer", "Witch"):
+            role_schema = public_speech_plan_json_schema(
+                suggestible_player_ids=candidates,
+                speaker_id=6,
+                speaker_role=role,
+            )
+            for action in ("point_as_werewolf", "check_as_werewolf"):
+                with self.subTest(role=role, action=action):
+                    payload = {
+                        "public_actions": [{"action": action, "target": 6}],
+                    }
+                    self.assertTrue(_schema_accepts_plan(role_schema, payload))
+                    self.assertEqual(
+                        validate_public_speech_plan(
+                            payload,
+                            suggestible_player_ids=candidates,
+                            player_id=6,
+                            speaker_role=role,
+                            phase="1_day_speech",
+                        ).as_list(),
+                        payload["public_actions"],
+                    )
 
     def test_strict_flow_shares_candidates_across_prompt_schema_and_validator(self):
         observation = self._dead_player_observation()
@@ -675,6 +763,7 @@ class AgentBackendTest(unittest.TestCase):
         schema = public_speech_plan_json_schema(
             suggestible_player_ids=candidates,
             speaker_id=2,
+            speaker_role="Villager",
         )
         self.assertFalse(_schema_accepts_plan(schema, payload))
         with self.assertRaisesRegex(
@@ -685,6 +774,7 @@ class AgentBackendTest(unittest.TestCase):
                 payload,
                 suggestible_player_ids=candidates,
                 player_id=2,
+                speaker_role="Villager",
                 phase="1_day_speech",
             )
 
