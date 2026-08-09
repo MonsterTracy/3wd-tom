@@ -51,6 +51,10 @@ class GameplaySpeechQualityError(ValueError):
     """A deterministic public-speech response contract violation."""
 
 
+class GameplayActionValidationError(ValueError):
+    """A gameplay action response is not an authoritative candidate."""
+
+
 class PublicSpeechPlanValidationError(ValueError):
     """A private planner response violates the public-plan contract."""
 
@@ -809,6 +813,22 @@ class LLMAgent(Agent):
                 return ast.literal_eval(text)
             except (ValueError, SyntaxError):
                 return None
+
+    def match_authoritative_action_response(
+        self,
+        raw_response,
+        authoritative_action_strings,
+    ):
+        parsed_response = self._extract_json_like(raw_response)
+        if not isinstance(parsed_response, dict):
+            return None
+
+        matches = [
+            candidate
+            for candidate in authoritative_action_strings
+            if self._extract_json_like(candidate) == parsed_response
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def parse_vote_target(self, raw_action):
         if raw_action is None:

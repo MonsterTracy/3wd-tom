@@ -9,6 +9,7 @@ from run_random import eval as run_game
 from werewolf.agents import agent_registry
 from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import (
+    GameplayActionValidationError,
     GameplaySpeechQualityError,
     PublicSpeechPlanValidationError,
     canonical_suggestible_player_ids,
@@ -1129,6 +1130,186 @@ class AgentBackendTest(unittest.TestCase):
                     backend.calls[0]["max_tokens"],
                     512,
                 )
+
+    def test_gpt_agent_structurally_matches_authoritative_night_action(self):
+        cases = (
+            (
+                "seer whitespace",
+                "{'查验': '7'}",
+                "1_night_skill_seer",
+                [("check", 3), ("check", 7)],
+                ("check", 7),
+            ),
+            (
+                "werewolf json quotes",
+                '{"杀害": "3"}',
+                "0_night_skill_wolf",
+                [("kill", 3), ("kill", 7)],
+                ("kill", 3),
+            ),
+            (
+                "werewolf smoke target four",
+                "{'杀害': '4'}",
+                "1_night_skill_wolf",
+                [("kill", 2), ("kill", 4)],
+                ("kill", 4),
+            ),
+            (
+                "seer smoke target six",
+                "{'查验': '6'}",
+                "0_night_skill_seer",
+                [("check", 4), ("check", 6)],
+                ("check", 6),
+            ),
+            (
+                "seer code fence",
+                '```json\n{"查验":"7"}\n```',
+                "1_night_skill_seer",
+                [("check", 3), ("check", 7)],
+                ("check", 7),
+            ),
+            (
+                "witch key order",
+                "{'毒药': '4', '解药': '否'}",
+                "0_night_skill_witch",
+                [("witch_pass", 0), ("witch_poison", 4)],
+                ("witch_poison", 4),
+            ),
+        )
+
+        for name, response, phase, valid_action, expected in cases:
+            with self.subTest(name=name):
+                backend = RecordingBackend([response])
+                agent = GPTAgent(
+                    backend=backend,
+                    model_name="agent-model",
+                )
+                agent.rate_limit = 0
+
+                action = agent.act({
+                    "phase": phase,
+                    "identity": "Villager",
+                    "current_act_idx": 1,
+                    "game_log": [],
+                    "valid_action": valid_action,
+                })
+
+                self.assertEqual(action, expected)
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_gpt_agent_logs_matched_night_action_without_regeneration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "Player_5.jsonl"
+            backend = RecordingBackend(["{'查验': '7'}"])
+            agent = GPTAgent(
+                backend=backend,
+                model_name="agent-model",
+                log_file=str(log_path),
+            )
+            agent.rate_limit = 0
+            try:
+                self.assertEqual(
+                    agent.act({
+                        "phase": "1_night_skill_seer",
+                        "identity": "Seer",
+                        "current_act_idx": 5,
+                        "game_log": [],
+                        "valid_action": [("check", 3), ("check", 7)],
+                    }),
+                    ("check", 7),
+                )
+            finally:
+                agent.close()
+
+            records = self._player_records(log_path)
+            self.assertEqual(len(backend.calls), 1)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["response"], "{'查验': '7'}")
+            self.assertEqual(records[0]["action"], "{'查验':'7'}")
+            self.assertEqual(records[0]["gen_times"], 0)
+
+    def test_gpt_agent_rejects_non_authoritative_night_action_once(self):
+        invalid_responses = (
+            "{'解药': '是', '毒药': '否'}",
+            "{'解药': '否', '毒药': '7'}",
+            "{'解药': '否'}",
+            "{'解药': '否', '毒药': '否', '额外': '值'}",
+            "{'未知': '否'}",
+            "not an action",
+        )
+
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                backend = RecordingBackend([response])
+                agent = GPTAgent(
+                    backend=backend,
+                    model_name="agent-model",
+                )
+                agent.rate_limit = 0
+                with self.assertRaisesRegex(
+                    GameplayActionValidationError,
+                    "phase=.*response=.*authoritative_candidates=",
+                ):
+                    agent.act({
+                        "phase": "0_night_skill_witch",
+                        "identity": "Witch",
+                        "current_act_idx": 7,
+                        "game_log": [],
+                        "valid_action": [
+                            ("witch_pass", 0),
+                            ("witch_heal", 3),
+                            ("witch_poison", 4),
+                        ],
+                    })
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_gpt_agent_night_action_matching_keeps_value_types_strict(self):
+        backend = RecordingBackend(['{"查验": 7}'])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+        )
+        agent.rate_limit = 0
+
+        with self.assertRaises(GameplayActionValidationError):
+            agent.act({
+                "phase": "1_night_skill_seer",
+                "identity": "Seer",
+                "current_act_idx": 5,
+                "game_log": [],
+                "valid_action": [("check", 7)],
+            })
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_gpt_agent_night_action_requires_backend_and_model(self):
+        cases = (
+            (None, "agent-model"),
+            (RecordingBackend(["{'查验':'7'}"]), None),
+        )
+
+        for backend, model_name in cases:
+            with self.subTest(
+                has_backend=backend is not None,
+                model_name=model_name,
+            ):
+                agent = GPTAgent(
+                    backend=backend,
+                    model_name=model_name,
+                )
+                agent.rate_limit = 0
+                with self.assertRaisesRegex(
+                    BackendError,
+                    "backend and model_name are required",
+                ):
+                    agent.act({
+                        "phase": "1_night_skill_seer",
+                        "identity": "Seer",
+                        "current_act_idx": 5,
+                        "game_log": [],
+                        "valid_action": [("check", 7)],
+                    })
+                if backend is not None:
+                    self.assertEqual(backend.calls, [])
 
     def test_gpt_agent_preserves_legacy_o1_limit_when_unconfigured(self):
         backend = MetadataBackend(["公开发言"])

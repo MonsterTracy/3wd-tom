@@ -1,8 +1,8 @@
 import json
 import time
 import re
-import random
 from werewolf.agents.llm_agent import (
+    GameplayActionValidationError,
     LLMAgent,
     PublicSpeechPlanValidationError,
     canonical_suggestible_player_ids,
@@ -10,6 +10,7 @@ from werewolf.agents.llm_agent import (
     validate_gameplay_public_speech,
     validate_public_speech_plan,
 )
+from werewolf.backends import BackendError
 from werewolf.agents.prompt_template_v0 import (
     CON,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
@@ -109,7 +110,9 @@ class GPTAgent(LLMAgent):
                         if "vote" in phase:
                             raw_action = self.choose_fallback_vote_action(observation, valid_action)
                         else:
-                            raw_action = valid_action[random.randint(0, len(valid_action) - 1)]
+                            raise GameplayActionValidationError(
+                                "night action response was not resolved"
+                            )
                         action = raw_action
                         break
                     messages = [{'role': 'user', 'content': prompt}]
@@ -123,17 +126,23 @@ class GPTAgent(LLMAgent):
                         if parsed_vote_action is not None:
                             action = parsed_vote_action
                     else:
-                        try:
-                            assert raw_action in valid_action
-                            action = raw_action
-                        except:
-                            action = valid_action[random.randint(0, len(valid_action) - 1)]
+                        action = self.match_authoritative_action_response(
+                            raw_action,
+                            valid_action,
+                        )
+                        if action is None:
+                            raise GameplayActionValidationError(
+                                "invalid gameplay action response "
+                                f"(phase={phase!r}, response={raw_action!r}, "
+                                f"authoritative_candidates={valid_action!r})"
+                            )
             else:
                 if "vote" in phase:
                     action = self.choose_fallback_vote_action(observation, valid_action)
                 else:
-                    action = valid_action[random.randint(0, len(valid_action) - 1)]
-                print("random choose a valid action, action: {} valid_action: {}".format(action, valid_action))
+                    raise BackendError(
+                        "Agent backend and model_name are required."
+                    )
             env_action = self.nlp_action_to_env_action[action]
             if raw_action is None:
                 raw_action = action
