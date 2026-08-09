@@ -1,251 +1,305 @@
-This is the implementation of paper [Multi-agent KTO: Reinforcing Strategic Interactions of Large Language Model in Language Game](https://arxiv.org/abs/2501.14225)
+# 3WD-ToM
 
+**Multi-Agent Theory-of-Mind Reasoning in Werewolf**
 
-## Dataset
+3WD-ToM is a research codebase for collecting, modeling, and evaluating
+observer-specific beliefs in a fixed seven-player Werewolf game. The project
+combines a controlled language-game environment, private planning and public
+speech generation, structured speech perception, belief self-reporting, and
+first- and second-order Theory-of-Mind (ToM) training.
 
-All the dataset can be downloaded at https://huggingface.co/datasets/ReneeYe/werewolf_game_reasoning.
+The current collection generator is frozen as **Collection V2.7** at commit
+`844784d7232af7e40633b62c450f72e4c35edb8e`. See
+[the freeze provenance](docs/collection_freeze_v2.7.md) for the experimental
+record.
 
-The following is how to prepare SFT data from the raw game record.
+## Research question
 
-### SFT Dataset preparation
-Public SFT sample data is not bundled in this deployment repository. When
-needed, obtain the raw game records from the external dataset source listed
-above and prepare the SFT data separately.
+Werewolf requires agents to reason under hidden identities, asymmetric private
+knowledge, strategic speech, and changing public evidence. 3WD-ToM studies
+whether a model can represent how different players update their beliefs over
+the two hidden Werewolves at the same public-history cutoff.
 
-### SFT
-After prepared SFT dataset in json format, you can train SFT model based on Base model like [Qwen2.5-14B-Instruct](https://huggingface.co/Qwen/Qwen2.5-14B-Instruct).
+The canonical setup contains:
 
-For SFT training, you may follow the instructions in [TRL](https://huggingface.co/docs/trl/en/sft_trainer) or use [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) code base.
+- seven players;
+- two Werewolves;
+- one Seer;
+- one Witch;
+- three Villagers;
+- multi-day public speech, voting, and night actions.
 
-## Repository layout
+## Theory-of-Mind task
 
-- `configs/`: stable, reusable experiment and runtime configuration.
-- `docs/`: deployment, model, and research-contract documentation.
-- `script/`: command-line and pipeline entry points.
-- `tests/`: automated tests, grouped by subsystem.
-- `werewolf/`: core game, agent, backend, environment, and model source code.
-- `run_battle.py`, `run_random.py`, and `run_batch.sh`: game and batch entry
-  points.
-- `setup.py`: Python package definition.
-- `.env.example`: secret-free environment variable template.
+Each sample is tied to one append-only public-event prefix.
 
-The following paths contain runtime artifacts and are not tracked by Git.
-Deployments may map them to external large-volume storage:
+- **First-order ToM** predicts the current observer's belief from public
+  history plus that observer's legal private knowledge.
+- **Second-order ToM** predicts observer-specific beliefs from public history
+  alone. At the formal boundary, all label-valid rows other than the current
+  reasoning player's own row are supervised. This scope is named
+  `all_valid_other_observers`.
 
-- `data/tom/`
-- `logs/tom/`
-- `outputs/tom/`
+The formal second-order boundary is
+`post_completed_public_speech_pre_next_action_v1`: a complete public speech,
+including its structured speech actions, has been committed and the next
+reasoning player has not yet generated an action. Vote-, phase-, exile-,
+death-, and other system-only boundaries are not formal supervision points.
 
-## How to run Werewolf Game
+The complete research contract is documented in
+[docs/twd_tom_contract.md](docs/twd_tom_contract.md).
 
-Current TWDM runs all large language model generation through APIs.
+## 21-class target
 
-TWDM Agent is not a local LLM backend. TWDM Agent is a strategy-guided agent structure: it builds role-aware and phase-aware strategy hints locally, injects those hints into the prompt, and still calls the configured API backend for generation.
+With seven players and exactly two Werewolves, there are
+`C(7, 2) = 21` unordered Werewolf pairs. A belief report contains the
+observer's `suspected_werewolves` together with supervision-side hard
+knowledge. The explicit projection assigns deterministic weights to the
+hard-legal pairs and normalizes them into a 21-class probability target.
 
-Which players use TWDM is decided by config `model_type`, not by role hardcoding. In the default experiment, werewolf players use `twdm_agent` and villagers use a normal `deepseek` or `gpt` agent, but any role group can be configured as `twdm_agent`.
+Raw reports, deterministic projection, model inputs, and supervision masks
+remain separate contracts. The projection never changes the public-history
+cutoff or injects future information into model inputs.
 
-### 0. Installation
+## Architecture
 
-We recommend do it in a virtual env. Take `conda` for example:
-```Bash
-conda create -n werewolf python=3.10
-conda activate werewolf
-pip install -e .
+```mermaid
+flowchart LR
+    E["Werewolf environment"] --> O["Private observation"]
+    O --> P["Private Planner"]
+    P --> PP["PublicSpeechPlan"]
+    PP --> R["Renderer"]
+    R --> V["Final speech validator"]
+    V --> S["Public speech"]
+    S --> SP["SpeechPerceiver"]
+    SP --> PE["Structured public event"]
+
+    O --> BR["Observer belief reporter"]
+    PE --> BR
+    BR --> SW["suspected_werewolves"]
+    SW --> PR["Deterministic pair projection"]
+    PR --> T["21-class target"]
+    PE --> D["ToM Dataset"]
+    T --> D
+    D --> M["ToM backbone"]
+    M --> L["Masked soft-target loss / evaluation"]
 ```
-The commands will create and activate an env called `werewolf`. And the dependencies and packages will be correctly installed.
 
-For server deployment, follow the
-[server deployment checklist](docs/server_deployment_checklist.md).
+See [docs/architecture.md](docs/architecture.md) for the gameplay, speech,
+belief, and training flows.
 
-### 1. Configure API credentials
+## Repository structure
 
-Supported `model_type` values include:
-- `twdm_agent`: TWDM strategy-guided agent structure.
-- `deepseek`: normal API agent using an OpenAI-compatible backend.
-- `gpt`, `gpt4`, `gpt4o`, `o1`: normal API agents using the same backend interface.
+| Path | Purpose |
+|---|---|
+| `werewolf/` | Core environment, agents, backends, speech components, and ToM implementation |
+| `script/twd_tom/` | Collection, processing, audit, training, and evaluation CLIs |
+| `tests/` | Deterministic regression tests grouped by subsystem |
+| `configs/` | Reusable gameplay and collection profiles |
+| `docs/` | Research contract, architecture, provenance, and deployment guidance |
+| `run_battle.py` | One configured game |
+| `run_random.py` | Randomized profile assignment and optional shadow inference |
+| `run_batch.sh` | Simple repeated-game wrapper |
 
-The online entry points use `werewolf.backends.OpenAICompatibleBackend`.
-`run_battle.py` and `run_random.py` load `.env` automatically, then apply the
-top-level `backend` block from YAML. Explicit YAML values override environment
-values.
+A more detailed map and the source/runtime boundary are in
+[docs/repository_structure.md](docs/repository_structure.md).
 
-Create a local environment file from the tracked, secret-free template, then
-fill only the variables required by the selected config:
+## Installation
+
+Python 3.10 or newer is required. Use an isolated environment; do not copy a
+local or server Conda environment into the repository.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+Install the ToM training stack and test tools when needed:
+
+```bash
+python -m pip install -e ".[tom,dev]"
+```
+
+Create a local secret file only for backends that require credentials:
 
 ```bash
 cp .env.example .env
 ```
 
-Example values:
+The tracked YAML files contain backend aliases, endpoint profiles, and model
+IDs, but no API keys. See [configs/README.md](configs/README.md).
 
-```dotenv
-OPENAI_API_KEY=replace-with-your-api-key
-OPENAI_API_BASE=https://api.deepseek.com
-DEFAULT_LLM_MODEL=deepseek-chat
-AGENT_MODEL=deepseek-chat
-PARSER_MODEL=deepseek-chat
-```
+## Data policy
 
-`AGENT_MODEL` and `PARSER_MODEL` may be different. Both fall back to
-`DEFAULT_LLM_MODEL` when omitted. A YAML `base_url`, `agent_model`, or
-`parser_model` takes precedence over the matching `.env` value.
+The Git repository intentionally excludes:
 
-### 2. Define Config Yaml
+- raw and processed datasets;
+- game and backend-call logs;
+- model weights and checkpoints;
+- evaluation/review archives;
+- resolved run artifacts;
+- local Python or Conda environments;
+- provider caches.
 
-Current TWDM runs only support 7-player Werewolf:
-- `7p_seer_witch`: 2 Werewolf, 1 Seer, 1 Witch, 3 Villager.
-- `7p_seer_guard`: 2 Werewolf, 1 Seer, 1 Guard, 3 Villager.
+Store these artifacts on external runtime storage. The logical repository
+roots `data/`, `datasets/`, `logs/`, `outputs/`, `review/`, `checkpoints/`,
+and root-level `models/` are ignored. Source code under `werewolf/models/` is
+not ignored.
 
-Terminology:
-- Villager is the canonical role name for ordinary villagers.
-- ordinary_villager means only players whose role is Villager.
-- village_team means non-werewolf players: Villager, Seer, Witch, Guard.
-- agent_config.village_team is required for village-team agents.
+Public SFT data is not bundled. The upstream raw game data referenced by the
+base project is available from the
+[Werewolf Game Reasoning dataset](https://huggingface.co/datasets/ReneeYe/werewolf_game_reasoning).
 
-Use the current examples in `configs/deepseek_vs_twdm.yaml`, `configs/gpt_vs_twdm.yaml`, or `configs/random_models.yaml`.
+## Collection
 
-Example:
-```yaml
-backend:
-    type: openai_compatible
-    base_url: https://api.deepseek.com
-    agent_model: deepseek-chat
-    parser_model: deepseek-chat
+The canonical collection interface is the explicit-stage pipeline. Validate
+the configuration before using a new run ID:
 
-env_config:
-    n_player: 7
-    n_role: 4
-    n_werewolf: 2
-    n_seer: 1
-    n_guard: 0
-    n_witch: 1
-    n_hunter: 0
-    n_villager: 3
-
-agent_config:
-    werewolf:
-        model_type: twdm_agent
-        model_params:
-            temperature: 1.0
-            twdm_config:
-                enable_strategy: true
-                enable_suspicion: false
-                enable_mcts: false
-    village_team:
-        model_type: deepseek
-        model_params:
-            temperature: 1.0
-```
-
-At runtime the entry point creates one backend, injects `agent_model` into all
-agents, creates `SpeechPerceiver(backend, parser_model)`, and constructs
-`WerewolfTextEnvV0(speech_perceiver=speech_perceiver)`. The environment does
-not read API keys and does not know model names.
-
-### 3. Run battles
-
-Run battles using the example scripts:
-
-#### Run a single head-to-head game:
 ```bash
-game_path=./trial_logs
-python run_battle.py \
-  --config configs/deepseek_vs_twdm.yaml \
-  --log_save_path logs/test_run_001
+python -m script.twd_tom.pipeline \
+  --config configs/twd_tom_server_qwen35_9b.yaml \
+  --run-id <UNIQUE_RUN_ID> \
+  --stage validate \
+  --game-count 5 \
+  --seeds <SEED_1> <SEED_2> <SEED_3> <SEED_4> <SEED_5>
+
+python -m script.twd_tom.pipeline \
+  --config configs/twd_tom_server_qwen35_9b.yaml \
+  --run-id <UNIQUE_RUN_ID> \
+  --stage collect \
+  --game-count 5 \
+  --seeds <SEED_1> <SEED_2> <SEED_3> <SEED_4> <SEED_5>
 ```
 
-The API key must be available through `.env` or the process environment. The
-completed game is written to:
+Each stage is explicit; collection does not automatically run projection,
+split, training, or evaluation.
 
-```text
-logs/test_run_001/game_log.json
+Other maintained entry points have narrower roles:
+
+- `python -m script.twd_tom.collect` collects one subjective-ToM game to an
+  explicitly selected JSONL path.
+- `python -m script.twd_tom.formal_batch_collection` runs a monitored,
+  request-bounded ten-game batch utility.
+- `python -m script.twd_tom.real_backend_dry_run` is a two-game,
+  privacy-safe audit harness; the pipeline also reuses its audited per-game
+  collection core.
+- `python -m script.twd_tom.reparse_speeches` reparses existing public
+  speeches for offline comparison and does not rerun gameplay.
+
+These utilities are not fallback paths and are not invoked automatically by
+the canonical pipeline.
+
+## Projection and split
+
+Projection and split are separate explicit stages:
+
+```bash
+python -m script.twd_tom.pipeline \
+  --config configs/twd_tom_server_qwen35_9b.yaml \
+  --run-id <RUN_ID> \
+  --stage project
+
+python -m script.twd_tom.pipeline \
+  --config configs/twd_tom_server_qwen35_9b.yaml \
+  --run-id <RUN_ID> \
+  --stage split
 ```
 
-Every `speech` and `speech_pk` entry contains both the original speech and the
-online parser output:
+The order-specific formal training splitter is
+`python -m script.twd_tom.split_training_data`; its exact contract is
+documented in [docs/twd_tom_contract.md](docs/twd_tom_contract.md).
 
-```json
-{
-  "event": "speech",
-  "content": {
-    "speech_content": "3号的逻辑有问题，我会投3号。",
-    "parsed_claims": [
-      {
-        "speaker": 2,
-        "predicate": "vote_intention",
-        "target": 3,
-        "role": null,
-        "polarity": "negative",
-        "certainty": "explicit",
-        "condition": null,
-        "source_text": "我会投3号"
-      }
-    ]
-  }
-}
+## Training
+
+Train first- and second-order models independently with explicit train and
+validation JSONL files. The default backbone is `qwen2_model`; the CLI also
+retains the directly constructed `gpt2_block` experimental backbone.
+
+```bash
+python -m script.twd_tom.train \
+  --dataset data/qwen25/tom1/train.jsonl \
+  --validation-dataset data/qwen25/tom1/val.jsonl \
+  --tom-order 1 \
+  --backbone qwen2_model \
+  --output-dir outputs/tom/formal_tom1 \
+  --device auto \
+  --seed 42
+
+python -m script.twd_tom.train \
+  --dataset data/qwen25/tom2/train.jsonl \
+  --validation-dataset data/qwen25/tom2/val.jsonl \
+  --tom-order 2 \
+  --backbone qwen2_model \
+  --output-dir outputs/tom/formal_tom2 \
+  --device auto \
+  --seed 42
 ```
 
-If parser generation or JSON decoding fails, `parsed_claims` is still present
-and equals `[]`; the game continues.
+Training records the source commit, clean-worktree assertion, data hashes,
+environment versions, device, and seed in its run provenance.
 
-#### Run multiple games:
-```Bash
-game_path=./trial_logs
-Bash run_batch.sh configs/gpt_vs_twdm.yaml ${game_path} 10
+## Evaluation
+
+Evaluate validation or test data with an explicit checkpoint and dataset:
+
+```bash
+python -m script.twd_tom.eval \
+  --checkpoint outputs/tom/formal_tom2/tom_order_2/best.pt \
+  --dataset data/qwen25/tom2/val.jsonl \
+  --training-dataset data/qwen25/tom2/train.jsonl \
+  --output outputs/tom/formal_tom2/tom_order_2/val_metrics.json \
+  --device auto
 ```
 
-Then, you will get logs under `./trial_logs/game_1/`:
-```angular2html
-./trial_logs/game_1
-├── config.yaml
-├── game_log.json
-├── Player_1.jsonl
-├── Player_2.jsonl
-├── Player_3.jsonl
-├── Player_4.jsonl
-├── Player_5.jsonl
-├── Player_6.jsonl
-└── Player_7.jsonl
-```
-For each line in `Player_${i}.jsonl`, it is a json object with the following fields:
-```angular2html
-{
-    "message": "<phase>",
-    "prompt": "<prompt>",
-    "response": "<response>",
-    "phase": "<phase>",
-    "gen_times": "<gen_times>"
-}
+Validation is used before final model selection. Test data should be evaluated
+only after the model and hyperparameters are fixed.
+
+## Testing
+
+The ordinary suite uses mocks and small fixtures; it does not require a model
+server, GPU, API key, or formal dataset.
+
+```bash
+python -m compileall script werewolf tests
+python -m pytest -q
 ```
 
-#### Run random competition:
+Formal-data smoke tests are opt-in and read-only:
 
-The configuration file is `configs/random_models.yaml`.
-
-```Bash
-game_path=./random_competition_logs
-python run_random.py --config configs/random_models.yaml --log_save_path ${game_path}/game_1
+```bash
+RUN_TWD_TOM_REAL_DATA_TESTS=1 python -m pytest -q tests/twd_tom
 ```
 
-### 5. View Battle Results
-1. Use `script/stats_winning.py` to summarize the winning rate:
-```Bash
-python3 script/stats_winning.py --game_dir {game_path}
-```
+## Collection Freeze V2.7
 
-This repository does not currently provide a game-visualizer CLI.
+- Freeze commit: `844784d7232af7e40633b62c450f72e4c35edb8e`
+- Freeze pilot: seeds 555–574
+- Independent runs: four runs of five games
+- Completion: 20 / 20 games
+- Final audit: PASS
 
-## MaKTO training
-After accumulated enough behavior data of SFT model, you can apply Multi-agent KTO to train a Makto agent. The training process includes data preparation and KTO training.
+The repository does not contain the corresponding game logs, data, audit
+archives, or model weights. Reproducibility depends on the source commit, run
+manifest, resolved config, and seed range recorded with external artifacts.
 
-### 1. Training data preparation
-The original MaKTO data-extraction utilities are not included in this
-repository. Prepare preference data with separately maintained tooling before
-using an external KTO trainer.
+## Upstream / project origin
 
-### 2. MaKTO training
-After prepared data, you can train MaKTO agent. You may apply [TRL](https://huggingface.co/docs/trl/main/en/kto_trainer) or [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) to do KTO training.
+3WD-ToM is derived from the implementation accompanying
+[Multi-agent KTO: Reinforcing Strategic Interactions of Large Language Model in Language Game](https://arxiv.org/abs/2501.14225).
+This attribution records the project origin; the current repository's primary
+research focus is the 3WD-ToM collection and modeling pipeline described
+above.
 
-## Models
-Due to the anonymous policy, we will release `MaKTO-14b` and `MaKTO-72b` model upon acceptance for re-production.
-The models follow <b>CC BY-NA-SA 4.0</b> license.
+## Citation
+
+Formal citation metadata has not yet been approved for this derived project.
+The project owner should provide the final title, author order, affiliations,
+and paper identifier before a `CITATION.cff` is added.
+
+## License
+
+This repository does not currently contain a repository-level license file.
+The project owner and supervising team must decide the code and artifact
+license before public distribution.

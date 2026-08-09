@@ -1,74 +1,77 @@
-# macOS
+# OS / IDE / local tooling
 .DS_Store
+.vscode/
+.idea/
+.codegraph/
 
-# Secrets / local env
-.env
-.env.*
-.envrc
-
-# Node / frontend
-node_modules/
-dist/
-build/
-
-# Python caches
+# Python / test caches
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
 
 # Python packaging
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
+/dist/
+/build/
+
+# Secrets / local environments
+.env
+.env.*
+!.env.example
+.envrc
+.venv/
+venv/
+env/
 
 # Jupyter
 .ipynb_checkpoints/
 
-# IDE / local tooling
-.codegraph/
-.vscode/
+# External runtime storage
+/data/
+/datasets/
+/logs/
+/outputs/
+/review/
+/checkpoints/
+/models/
 
-# Generated logs and runtime outputs
-logs/
-/logs/tom/
-/data/tom/
-/outputs/tom/
-*.log
-runs/
-outputs/
-artifacts/
+# Experiment services and generated artifacts
+wandb/
 mlruns/
 tensorboard/
 lightning_logs/
-wandb/
-data/
-datasets/
+runs/
+artifacts/
 
-
-# Model checkpoints and large artifacts
-checkpoints/
-archive/
+# Model weights
 *.pt
 *.pth
 *.ckpt
 *.safetensors
-*.bin
 *.onnx
 
+# Archives
+/archive/
+*.tar.gz
+*.bundle
+twd_tom_legacy_projection_source.zip
+
 # Temporary files
-tmp/
-temp/
+/tmp/
+/temp/
 *.tmp
 *.bak
 *.swp
-# Keep a sanitized environment template trackable
-!.env.example
 
-# Local conversion source archive
-twd_tom_legacy_projection_source.zip
+# Presentation working files
+/docs/ppt_assets/
+
+# Unused frontend build roots, if created locally
+/node_modules/
