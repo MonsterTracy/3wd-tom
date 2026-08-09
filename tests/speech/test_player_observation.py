@@ -136,18 +136,69 @@ class PlayerObservationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid normal vote action"):
             self.env.step(("vote", 2))
 
-    def test_vote_pk_candidates_keep_existing_tied_player_contract(self):
+    def test_vote_pk_candidates_exclude_each_current_voter(self):
         self.env.phase = "vote_pk"
         self.env.day = 1
         self.env.day_or_night = "day"
-        self.env.current_act_idx = 1
-        self.env.alive = [1, 1, 0, 1, 0, 0, 0]
-        self.env.vote_pk_players = [1, 3]
+        self.env.alive = [1, 0, 1, 0, 0, 1, 1]
+        self.env.vote_pk_players = [5, 6, 0, 2]
 
-        self.assertEqual(
-            self.env.get_observation_for(2)["valid_action"],
-            [("vote_pk", 0), ("vote_pk", 2), ("vote_pk", 4)],
+        expected_targets = {
+            3: [6, 7, 1],
+            1: [6, 7, 3],
+            6: [7, 1, 3],
+            7: [6, 1, 3],
+        }
+        for voter, targets in expected_targets.items():
+            with self.subTest(voter=voter):
+                self.env.current_act_idx = voter - 1
+                valid_actions = self.env.get_observation_for(voter)[
+                    "valid_action"
+                ]
+                self.assertEqual(
+                    valid_actions,
+                    [("vote_pk", 0)] + [
+                        ("vote_pk", target)
+                        for target in targets
+                    ],
+                )
+                self.assertEqual(self.env.vote_pk_players, [5, 6, 0, 2])
+
+    def test_vote_pk_parser_and_environment_reject_self_vote(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.current_act_idx = 2
+        self.env.alive = [1, 0, 1, 0, 0, 1, 1]
+        self.env.vote_pk_players = [5, 6, 0, 2]
+        observation = self.env.get_observation_for(3)
+        agent = LLMAgent()
+        agent.get_valid_actions_str(observation["valid_action"])
+        valid_actions = list(agent.nlp_action_to_env_action)
+
+        self.assertIsNone(
+            agent.parse_vote_action(
+                "{'投票': '3'}",
+                observation,
+                valid_actions,
+            )
         )
+        self.assertEqual(
+            agent.parse_vote_action(
+                "{'投票': '6'}",
+                observation,
+                valid_actions,
+            ),
+            "{'投票': '6'}",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid PK vote action"):
+            self.env.step(("vote_pk", 3))
+
+        self.env.vote_queue = [0]
+        self.env.step(("vote_pk", 6))
+        self.assertEqual(self.env.game_log[-1].event, "vote_pk")
+        self.assertEqual(self.env.game_log[-1].source, 2)
+        self.assertEqual(self.env.game_log[-1].target, 5)
 
     def test_private_visibility_is_player_specific(self):
         wolf_observation = (

@@ -214,10 +214,11 @@ class WerewolfTextEnvV0(gym.Env):
         info = {}
 
         if (
-            self.phase == 'vote'
+            self.phase in {'vote', 'vote_pk'}
             and action not in self._get_valid_action_for_current_actor()
         ):
-            raise ValueError("invalid normal vote action")
+            vote_phase = "normal" if self.phase == 'vote' else "PK"
+            raise ValueError(f"invalid {vote_phase} vote action")
 
         action = self.trans_action_agt_to_env(action)
         action_type = action[0]
@@ -757,6 +758,7 @@ class WerewolfTextEnvV0(gym.Env):
             valid_action = [('vote_pk', -1)] + [
                 ('vote_pk', idx)
                 for idx in self.vote_pk_players
+                if idx != self.current_act_idx
             ]
 
         elif self.phase == 'end_game':
