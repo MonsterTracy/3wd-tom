@@ -12,6 +12,7 @@ from werewolf.agents.llm_agent import (
     GameplayActionValidationError,
     GameplaySpeechQualityError,
     PublicSpeechPlanValidationError,
+    _extract_explicit_player_references,
     canonical_suggestible_player_ids,
     public_speech_plan_json_schema,
     validate_gameplay_public_speech,
@@ -911,6 +912,77 @@ class AgentBackendTest(unittest.TestCase):
                         planned_player_ids={3},
                     ),
                     f"我关注{reference}。",
+                )
+
+    def test_seed_539_self_and_grouped_player_references_cover_plan(self):
+        speech = (
+            "我认为1号是预言家，同时支持7号。"
+            "但我对3、4、5号的发言均存疑，认为他们可疑。"
+            "经查验，我确认自己是好人。"
+            "基于以上判断，我准备投票放逐4号。"
+        )
+        self.assertEqual(
+            _extract_explicit_player_references(
+                speech,
+                speaker_id=2,
+                context="player=2, phase=1_day_speech",
+            ),
+            {1, 2, 3, 4, 5, 7},
+        )
+        self.assertEqual(
+            validate_gameplay_public_speech(
+                speech,
+                finish_reason="stop",
+                player_id=2,
+                phase="1_day_speech",
+                planned_player_ids={1, 2, 3, 4, 5, 7},
+            ),
+            speech,
+        )
+
+    def test_grouped_player_references_require_explicit_player_suffix(self):
+        for separator in ("、", "，", ","):
+            with self.subTest(separator=separator):
+                content = f"我质疑3{separator}4{separator}5号。"
+                self.assertEqual(
+                    _extract_explicit_player_references(
+                        content,
+                        speaker_id=2,
+                        context="player=2, phase=1_day_speech",
+                    ),
+                    {2, 3, 4, 5},
+                )
+        for content in ("2025年", "3票", "3人", "第3项", "3、4、5人"):
+            with self.subTest(content=content):
+                self.assertEqual(
+                    _extract_explicit_player_references(
+                        content,
+                        speaker_id=2,
+                        context="player=2, phase=1_day_speech",
+                    ),
+                    set(),
+                )
+
+    def test_self_reference_maps_only_to_current_speaker(self):
+        for content in ("我会说明。", "我自己会说明。", "自己会说明。"):
+            with self.subTest(content=content):
+                self.assertEqual(
+                    _extract_explicit_player_references(
+                        content,
+                        speaker_id=2,
+                        context="player=2, phase=1_day_speech",
+                    ),
+                    {2},
+                )
+        for content in ("他自己会说明。", "他们自己会说明。", "他会说明。"):
+            with self.subTest(content=content):
+                self.assertEqual(
+                    _extract_explicit_player_references(
+                        content,
+                        speaker_id=2,
+                        context="player=2, phase=1_day_speech",
+                    ),
+                    set(),
                 )
 
     def test_non_player_numbers_are_not_player_references(self):

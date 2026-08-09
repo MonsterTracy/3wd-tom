@@ -331,10 +331,33 @@ _EXPLICIT_PLAYER_REFERENCE = re.compile(
     r"|(?<!第)(?P<suffix>\d+|[零一二三四五六七八九])\s*号(?:玩家|位)?",
     re.IGNORECASE,
 )
+_GROUPED_PLAYER_REFERENCE = re.compile(
+    r"(?P<players>(?:\d+|[零一二三四五六七八九])"
+    r"(?:\s*[、，,]\s*(?:\d+|[零一二三四五六七八九]))+)"
+    r"\s*号(?:玩家|位)?"
+)
+_GROUPED_PLAYER_NUMBER = re.compile(r"\d+|[零一二三四五六七八九]")
+_SPEAKER_SELF_REFERENCE = re.compile(
+    r"我(?:自己)?"
+    r"|(?<!他)(?<!她)(?<!它)(?<!你)(?<!您)"
+    r"(?<!他们)(?<!她们)(?<!它们)(?<!你们)(?<!您们)自己"
+)
 
 
-def _extract_explicit_player_references(content, *, context):
+def _extract_explicit_player_references(content, *, speaker_id, context):
     referenced_players = set()
+    for match in _GROUPED_PLAYER_REFERENCE.finditer(content):
+        for value in _GROUPED_PLAYER_NUMBER.findall(match.group("players")):
+            player_number = (
+                int(value)
+                if value.isdigit()
+                else _CHINESE_PLAYER_NUMBERS[value]
+            )
+            if not 1 <= player_number <= 7:
+                raise GameplaySpeechQualityError(
+                    f"invalid player reference {value!r} ({context})"
+                )
+            referenced_players.add(player_number)
     for match in _EXPLICIT_PLAYER_REFERENCE.finditer(content):
         value = next(group for group in match.groups() if group is not None)
         player_number = (
@@ -347,6 +370,13 @@ def _extract_explicit_player_references(content, *, context):
                 f"invalid player reference {match.group(0)!r} ({context})"
             )
         referenced_players.add(player_number)
+    if (
+        isinstance(speaker_id, int)
+        and not isinstance(speaker_id, bool)
+        and 1 <= speaker_id <= 7
+        and _SPEAKER_SELF_REFERENCE.search(content)
+    ):
+        referenced_players.add(speaker_id)
     return referenced_players
 
 
@@ -372,6 +402,7 @@ def validate_gameplay_public_speech(
 
     referenced_players = _extract_explicit_player_references(
         content,
+        speaker_id=player_id,
         context=context,
     )
 
