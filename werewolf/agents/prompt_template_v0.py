@@ -615,6 +615,24 @@ CON.skill_prompt = """
 ** 输出
 """
 
+CON.constrained_night_skill_prompt = """
+** 游戏说明
+{game_description}
+{player_identity_info}
+
+** 游戏日志
+{logs}
+
+请根据游戏日志，从下列编号动作中选择一个你要执行的动作。
+{valid_actions}
+
+只选择一个候选编号。只输出严格JSON：
+{{"action_index": <编号>}}
+不得输出其他字段或列表外编号。
+
+** 输出
+"""
+
 CON.speech_prompt = """
 ** 游戏说明
 {game_description}

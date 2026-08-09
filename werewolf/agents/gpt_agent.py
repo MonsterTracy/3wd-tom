@@ -6,6 +6,7 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     PublicSpeechPlanValidationError,
     canonical_suggestible_player_ids,
+    night_action_response_format,
     public_speech_plan_response_format,
     validate_gameplay_public_speech,
     validate_public_speech_plan,
@@ -18,6 +19,13 @@ from werewolf.agents.prompt_template_v0 import (
     build_strict_classic7_speech_render_prompt,
 )
 from . import agent_registry as AgentRegistry
+
+
+_CONSTRAINED_NIGHT_PHASES = (
+    "skill_wolf",
+    "skill_seer",
+    "skill_witch",
+)
 
 
 @AgentRegistry.register(["gpt", "gpt-4", "GPT-4", "gpt4", "o1", "gpt4o", "gpt4o-mini", 'deepseek'])
@@ -39,6 +47,10 @@ class GPTAgent(LLMAgent):
 
     def act(self, observation):
         phase = observation['phase']
+        is_constrained_night_action = any(
+            night_phase in phase
+            for night_phase in _CONSTRAINED_NIGHT_PHASES
+        )
         is_strict_speech = (
             'speech' in phase
             and self.gameplay_prompt_profile == (
@@ -50,9 +62,17 @@ class GPTAgent(LLMAgent):
             suggestible_player_ids = canonical_suggestible_player_ids(
                 observation.get("authoritative_public_state")
             )
+        night_candidate_snapshot = None
+        if is_constrained_night_action:
+            night_candidate_snapshot = (
+                self.freeze_authoritative_action_candidates(
+                    observation["valid_action"]
+                )
+            )
         prompt = self.format_observation(
             observation,
             suggestible_player_ids=suggestible_player_ids,
+            action_candidates=night_candidate_snapshot,
         )
         valid_action = list(self.nlp_action_to_env_action.keys())  
         time.sleep(self.rate_limit)
@@ -102,6 +122,7 @@ class GPTAgent(LLMAgent):
         else: 
             retry_count = 0
             raw_action = None
+            selected_env_action = None
             if self.backend is not None and self.model_name:
                 action = ''
                 while action not in valid_action:
@@ -116,26 +137,56 @@ class GPTAgent(LLMAgent):
                         action = raw_action
                         break
                     messages = [{'role': 'user', 'content': prompt}]
-                    raw_action = self._chat(
-                        messages,
-                        temperature=request_temperature,
-                        max_tokens=request_max_tokens,
-                    ).strip().strip("- ")
+                    if is_constrained_night_action:
+                        raw_action, metadata = self._chat_with_metadata(
+                            messages,
+                            temperature=request_temperature,
+                            max_tokens=request_max_tokens,
+                            response_format=night_action_response_format(
+                                supports_json_schema=getattr(
+                                    self.backend,
+                                    "supports_json_schema",
+                                    False,
+                                ),
+                                candidate_snapshot=night_candidate_snapshot,
+                            ),
+                        )
+                        if metadata["finish_reason"] == "length":
+                            raise GameplayActionValidationError(
+                                "night action response was truncated "
+                                f"(phase={phase!r}, finish_reason='length')"
+                            )
+                        raw_action = raw_action.strip().strip("- ")
+                    else:
+                        raw_action = self._chat(
+                            messages,
+                            temperature=request_temperature,
+                            max_tokens=request_max_tokens,
+                        ).strip().strip("- ")
                     if "vote" in phase:
                         parsed_vote_action = self.parse_vote_action(raw_action, observation, valid_action)
                         if parsed_vote_action is not None:
                             action = parsed_vote_action
                     else:
-                        action = self.match_authoritative_action_response(
-                            raw_action,
-                            valid_action,
-                        )
-                        if action is None:
-                            raise GameplayActionValidationError(
-                                "invalid gameplay action response "
-                                f"(phase={phase!r}, response={raw_action!r}, "
-                                f"authoritative_candidates={valid_action!r})"
+                        if is_constrained_night_action:
+                            action, selected_env_action = (
+                                self.parse_night_action_selection(
+                                    raw_action,
+                                    night_candidate_snapshot,
+                                    phase=phase,
+                                )
                             )
+                        else:
+                            action = self.match_authoritative_action_response(
+                                raw_action,
+                                valid_action,
+                            )
+                            if action is None:
+                                raise GameplayActionValidationError(
+                                    "invalid gameplay action response "
+                                    f"(phase={phase!r}, response={raw_action!r}, "
+                                    f"authoritative_candidates={valid_action!r})"
+                                )
             else:
                 if "vote" in phase:
                     action = self.choose_fallback_vote_action(observation, valid_action)
@@ -143,7 +194,11 @@ class GPTAgent(LLMAgent):
                     raise BackendError(
                         "Agent backend and model_name are required."
                     )
-            env_action = self.nlp_action_to_env_action[action]
+            env_action = (
+                selected_env_action
+                if selected_env_action is not None
+                else self.nlp_action_to_env_action[action]
+            )
             if raw_action is None:
                 raw_action = action
             if self.has_log:

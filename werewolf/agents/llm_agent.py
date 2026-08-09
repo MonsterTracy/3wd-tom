@@ -238,6 +238,35 @@ def public_speech_plan_response_format(
     }
 
 
+def night_action_response_format(
+    *, supports_json_schema, candidate_snapshot
+):
+    if supports_json_schema is not True:
+        raise BackendError(
+            "constrained night actions require backend JSON Schema support"
+        )
+    if not isinstance(candidate_snapshot, tuple) or not candidate_snapshot:
+        raise ValueError("candidate_snapshot must be a non-empty tuple")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "night_action_selection",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action_index"],
+                "properties": {
+                    "action_index": {
+                        "type": "integer",
+                        "enum": list(range(len(candidate_snapshot))),
+                    },
+                },
+            },
+        },
+    }
+
+
 def validate_public_speech_plan(
     payload,
     *,
@@ -648,20 +677,31 @@ class LLMAgent(Agent):
         observation,
         *,
         suggestible_player_ids=None,
+        action_candidates=None,
     ):
         phase = observation['phase']
         if 'skill' in phase or 'vote' in phase:
             valid_actions = observation['valid_action']
-            valid_actions_str = self.get_valid_actions_str(valid_actions)
+            if action_candidates is None:
+                valid_actions_str = self.get_valid_actions_str(valid_actions)
+            else:
+                valid_actions_str = self.format_authoritative_action_candidates(
+                    action_candidates,
+                )
             identity = observation['identity']
             identity_info = CON.player_identity_info.format(player_idx=observation['current_act_idx'],
                                                             identity=CON.identity_chinese[identity],
                                                             identity_ability=CON.identity_abilities[identity])
             logs = self.format_log(observation['game_log'])
             if 'skill' in phase:
-                prompt = CON.skill_prompt.format(game_description=CON.game_description,
-                                                 player_identity_info=identity_info, logs=logs,
-                                                 valid_actions=valid_actions_str)
+                template = (
+                    CON.constrained_night_skill_prompt
+                    if action_candidates is not None
+                    else CON.skill_prompt
+                )
+                prompt = template.format(game_description=CON.game_description,
+                                         player_identity_info=identity_info, logs=logs,
+                                         valid_actions=valid_actions_str)
             else:
                 prompt = CON.vote_prompt.format(game_description=CON.game_description,
                                                 player_identity_info=identity_info, logs=logs,
@@ -830,6 +870,42 @@ class LLMAgent(Agent):
         ]
         return matches[0] if len(matches) == 1 else None
 
+    def parse_night_action_selection(
+        self,
+        raw_response,
+        candidate_snapshot,
+        *,
+        phase,
+    ):
+        def reject(reason):
+            raise GameplayActionValidationError(
+                f"invalid night action selection: {reason} "
+                f"(phase={phase!r}, response={raw_response!r})"
+            )
+
+        payload = self._extract_json_like(raw_response)
+        if not isinstance(payload, dict):
+            reject("root must be an object")
+        if set(payload) != {"action_index"}:
+            reject("keys must be exactly {'action_index'}")
+        action_index = payload["action_index"]
+        if isinstance(action_index, bool) or not isinstance(action_index, int):
+            reject("action_index must be an integer")
+        if not 0 <= action_index < len(candidate_snapshot):
+            reject("action_index is outside the authoritative candidates")
+
+        selected_action, env_action = candidate_snapshot[action_index]
+        authoritative_actions = tuple(
+            action for action, _env_action in candidate_snapshot
+        )
+        matched_action = self.match_authoritative_action_response(
+            selected_action,
+            authoritative_actions,
+        )
+        if matched_action != selected_action:
+            reject("selected action failed authoritative membership")
+        return matched_action, env_action
+
     def parse_vote_target(self, raw_action):
         if raw_action is None:
             return None
@@ -908,6 +984,19 @@ class LLMAgent(Agent):
         if vote_target == 0:
             return self.choose_fallback_vote_action(observation, valid_action)
         return None
+
+    def freeze_authoritative_action_candidates(self, valid_actions):
+        self.get_valid_actions_str(valid_actions)
+        return tuple(self.nlp_action_to_env_action.items())
+
+    def format_authoritative_action_candidates(self, candidate_snapshot):
+        self.nlp_action_to_env_action = dict(candidate_snapshot)
+        return "".join(
+            f"{index}: {action_text}\n"
+            for index, (action_text, _env_action) in enumerate(
+                candidate_snapshot
+            )
+        )
 
     def get_valid_actions_str(self, valid_actions):
         valid_actions_str = ""
