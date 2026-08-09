@@ -78,6 +78,17 @@ class PublicSpeechPlan:
         ]
 
 
+def _stable_unique_public_action_pairs(action_pairs):
+    unique_pairs = []
+    seen = set()
+    for pair in action_pairs:
+        if pair in seen:
+            continue
+        seen.add(pair)
+        unique_pairs.append(pair)
+    return tuple(unique_pairs)
+
+
 def canonical_suggestible_player_ids(authoritative_public_state):
     if not isinstance(authoritative_public_state, dict):
         raise TypeError("authoritative public state is missing")
@@ -247,7 +258,6 @@ def validate_public_speech_plan(
     if not isinstance(public_actions, list):
         reject("public_actions must be an array")
     validated = []
-    seen = set()
     for item in public_actions:
         if not isinstance(item, dict) or set(item) != {"action", "target"}:
             reject("every public action must contain only action and target")
@@ -257,11 +267,10 @@ def validate_public_speech_plan(
             reject(f"unsupported public action: {action!r}")
         if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 7:
             reject(f"invalid public action target: {target!r}")
-        pair = (action, target)
-        if pair in seen:
-            reject(f"duplicate public action: {action}/player{target}")
-        seen.add(pair)
-        validated.append(pair)
+        validated.append((action, target))
+
+    validated = _stable_unique_public_action_pairs(validated)
+    seen = set(validated)
 
     for action, target in validated:
         if action == "vote_intent" and target not in suggestible_player_ids:
@@ -276,7 +285,7 @@ def validate_public_speech_plan(
             speaker_role=speaker_role,
         ):
             reject(f"{action} cannot disclose the true Werewolf speaker's identity")
-    return PublicSpeechPlan(tuple(validated))
+    return PublicSpeechPlan(validated)
 
 
 _CHINESE_PLAYER_NUMBERS = {

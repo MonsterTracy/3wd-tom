@@ -475,12 +475,9 @@ class AgentBackendTest(unittest.TestCase):
         invalid_cases = (
             {"public_actions": [], "notes": "free text"},
             {"public_actions": [{"action": "invented", "target": 3}]},
+            {"public_actions": [{"action": ["bad"], "target": 1}]},
             {"public_actions": [{"action": "oppose", "target": 3, "why": "x"}]},
             {"public_actions": [{"action": "vote_intent", "target": 1}]},
-            {"public_actions": [
-                {"action": "oppose", "target": 3},
-                {"action": "oppose", "target": 3},
-            ]},
         )
         for payload in invalid_cases:
             with self.subTest(invalid=payload), self.assertRaises(
@@ -495,6 +492,78 @@ class AgentBackendTest(unittest.TestCase):
                     speaker_role="Villager",
                     phase="1_day_speech",
                 )
+
+    def test_public_speech_plan_stably_deduplicates_exact_pairs(self):
+        actions = [
+            {"action": "support", "target": 2},
+            {"action": "check_as_good", "target": 1},
+            {"action": "oppose", "target": 5},
+            {"action": "check_as_good", "target": 1},
+            {"action": "vote_intent", "target": 7},
+        ]
+        plan = validate_public_speech_plan(
+            {"public_actions": actions},
+            suggestible_player_ids=(2, 3, 4, 5, 6, 7),
+            player_id=1,
+            speaker_role="Villager",
+            phase="1_day_speech",
+        )
+        self.assertEqual(plan.as_list(), [
+            {"action": "support", "target": 2},
+            {"action": "check_as_good", "target": 1},
+            {"action": "oppose", "target": 5},
+            {"action": "vote_intent", "target": 7},
+        ])
+
+        distinct_pairs = [
+            {"action": "check_as_good", "target": 1},
+            {"action": "point_as_villager", "target": 1},
+            {"action": "check_as_werewolf", "target": 1},
+            {"action": "support", "target": 1},
+            {"action": "support", "target": 2},
+            {"action": "vote_intent", "target": 2},
+            {"action": "vote_intent", "target": 3},
+        ]
+        plan = validate_public_speech_plan(
+            {"public_actions": distinct_pairs},
+            suggestible_player_ids=(2, 3, 4, 5, 6, 7),
+            player_id=1,
+            speaker_role="Villager",
+            phase="1_day_speech",
+        )
+        self.assertEqual(plan.as_list(), distinct_pairs)
+
+    def test_seed_510_duplicate_plan_reaches_renderer_once(self):
+        observation = self._strict_observation()
+        observation["phase"] = "2_day_speech_pk"
+        observation["current_act_idx"] = 2
+        observation["authoritative_public_state"].update({
+            "day": 2,
+            "phase": "speech_pk",
+            "suggestible_exile_targets": [1, 3, 4, 5, 6, 7],
+        })
+        backend = MetadataBackend([
+            '{"public_actions":['
+            '{"action":"check_as_good","target":1},'
+            '{"action":"check_as_good","target":1}]}',
+            "我查验1号是好人。",
+        ])
+        backend.supports_json_schema = True
+        backend.session = SimpleNamespace(game_id="game_006_seed_510")
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "我查验1号是好人。"),
+        )
+        self.assertEqual(len(backend.calls), 2)
+        renderer_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertEqual(renderer_prompt.count("check_as_good(player1)"), 1)
 
     def test_public_speech_plan_rejects_oppose_self(self):
         candidates = (1, 2, 3, 4, 5, 6)
