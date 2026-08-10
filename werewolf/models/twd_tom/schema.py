@@ -52,6 +52,19 @@ REPORT_TIMING = "pre_public_speech"
 TRUTH_BASED_OBSERVER_SELECTION = False
 OBSERVER_SELECTION = "publicly_alive_players"
 LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v2"
+FORMAL_ANNOTATION_SCHEMA_VERSION = (
+    "classic7_pre_speech_v27_valid_only_no_guess_v1"
+)
+FORMAL_LABEL_PROVENANCE = (
+    "v27_valid_source_report_and_deterministic_hard_knowledge_v1"
+)
+FORMALIZATION_POLICY_VERSION = "v27_valid_only_no_guess_supervision_v1"
+SOURCE_REPORT_OBSERVER_PROVENANCE = "original_self_report"
+SOURCE_REPORT_ANNOTATION_CONFIDENCE = "source"
+DETERMINISTIC_HARD_KNOWLEDGE_OBSERVER_PROVENANCE = (
+    "deterministic_unique_hard_knowledge_pair_v1"
+)
+DETERMINISTIC_HARD_KNOWLEDGE_ANNOTATION_CONFIDENCE = "exact"
 MARGINAL_SEMANTICS = "two_wolf_membership_probability_v1"
 PAIR_ORDERING = "global_lexicographic_two_player_combinations"
 MODEL_OUTPUT = "observer_pair_logits"
@@ -383,6 +396,13 @@ __all__ = [
     "TRUTH_BASED_OBSERVER_SELECTION",
     "OBSERVER_SELECTION",
     "LABEL_PROMPT_VERSION",
+    "FORMAL_ANNOTATION_SCHEMA_VERSION",
+    "FORMAL_LABEL_PROVENANCE",
+    "FORMALIZATION_POLICY_VERSION",
+    "SOURCE_REPORT_OBSERVER_PROVENANCE",
+    "SOURCE_REPORT_ANNOTATION_CONFIDENCE",
+    "DETERMINISTIC_HARD_KNOWLEDGE_OBSERVER_PROVENANCE",
+    "DETERMINISTIC_HARD_KNOWLEDGE_ANNOTATION_CONFIDENCE",
     "MARGINAL_SEMANTICS",
     "PAIR_ORDERING",
     "MODEL_OUTPUT",

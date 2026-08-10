@@ -30,6 +30,8 @@ from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.schema import (
+    FORMAL_ANNOTATION_SCHEMA_VERSION,
+    FORMAL_LABEL_PROVENANCE,
     LABEL_PROMPT_VERSION,
     NUM_PLAYERS,
     NUM_WOLF_PAIR_CLASSES,
@@ -54,10 +56,8 @@ PRIVATE_FIELDS_USAGE = {
     1: "first_order_model_input_and_label",
     2: "label_construction_and_audit_only",
 }
-ANNOTATION_SCHEMA_VERSION = "classic7_pre_speech_expert_completion_v1"
-ANNOTATED_LABEL_PROVENANCE = (
-    "mixed_original_self_report_and_expert_pre_speech_completion_v1"
-)
+ANNOTATION_SCHEMA_VERSION = FORMAL_ANNOTATION_SCHEMA_VERSION
+ANNOTATED_LABEL_PROVENANCE = FORMAL_LABEL_PROVENANCE
 SOURCE_LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
 CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
 

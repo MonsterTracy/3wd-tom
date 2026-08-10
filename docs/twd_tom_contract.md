@@ -140,6 +140,16 @@ Projection and split utilities continue to validate that stored targets match
 the declared projection. They are not the formal model-training input and do
 not define the second-order output space.
 
+V2.7 formal materialization uses
+`v27_valid_only_no_guess_supervision_v1`. A source `ok` report is retained
+unchanged. A semantic-error observer is retained only when that observer's
+current legal hard knowledge uniquely determines one of the 21 wolf pairs;
+otherwise the observer is unavailable supervision. There is no carry-forward,
+empty-suspicion fallback, uniform semantic repair, expert guess, model repair,
+or regeneration. An unavailable current speaker removes the ToM1 snapshot;
+an unavailable ToM2 observer is removed atomically from every observer-keyed
+mapping. The source raw file remains unchanged and supplies the audit record.
+
 The formal Dataset reads the current annotated split files directly. With
 `--tom-order 1` it requires one current speaker observer, exposes only that
 observer's two seven-player private-knowledge vectors, and projects the report
@@ -177,6 +187,20 @@ order-specific Qwen2 trainer does not consume them.
 not the formal training-data splitter or a training entry point.
 
 ## Formal training operations
+
+From V2.7 onward, directory responsibilities are fixed as follows: `data/`
+contains collection run-level raw data; `logs/` contains collection logs,
+game logs, call audit, manifests, and resolved configuration; `datasets/`
+contains identified dataset packages and all derived formal training data;
+`outputs/` contains experiment checkpoints and metrics; `models/` contains
+external model weights or caches; and `review/` contains data audits and human
+review artifacts. V2.7 training-ready data must remain under
+`datasets/<dataset-id>/` and must not be written back to `data/`.
+
+Pre-V2.7 local Qwen2.5 and Qwen3.5 experiments retain their historical
+`data/qwen25/` and `data/qwen35/` layouts. Those artifacts are not migrated,
+renamed, or rebuilt by the V2.7 tools. The commands below document that legacy
+Formal300 layout only.
 
 Formal first- and second-order data reuse one in-memory, seed-42 game split.
 Generate the six order-specific files without overwriting existing outputs:
