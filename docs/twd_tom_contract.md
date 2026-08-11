@@ -159,17 +159,22 @@ second-order observer's report is projected to the same canonical 21 pair
 classes using that observer's `known_werewolves` and
 `known_non_werewolves`. Those fields are supervision-side target-construction
 and audit data only: they do not appear in a second-order batch's model inputs,
-do not enter `forward`, and do not mask logits. A second-order target row is
-included in loss and formal metrics only when it is valid under the existing
-`subject_mask` and that observer is an actor in the latest completed public
-action block. The Dataset scans backward from the final current-speaker
-`turn_start`. A `public_speech` block contains its speaker and all nested
-speech-action subjects; action objects are not actors. A `vote_result` block
-contains its voters; vote targets are not actors. Earlier action blocks do not
-accumulate. Turn starts, phase changes, exile and death announcements, and the
-pending current speech do not count. Snapshots whose effective mask is empty
-are excluded by deterministic Dataset indices in train, validation, and eval.
-Target rows remain unchanged. First-order masking is unchanged.
+do not enter `forward`, and do not mask logits.
+
+The sole formal second-order supervision boundary is
+`post_completed_public_speech_pre_next_action_v1`. The final two public events
+must be one complete `public_speech`, including its stored `sp_actions`, and
+the next reasoning player's `turn_start`; that reasoning player is the
+sample's canonical `speaker_id`. Vote, phase, exile, death, and other
+system-only boundaries are excluded.
+
+The supervision scope is `all_valid_other_observers`: the effective mask is
+the existing label-valid `subject_mask` intersected with canonical observer
+IDs other than the reasoning player. The latest speech actor and nested
+speech-action subjects do not select the supervised rows. Snapshots whose
+effective mask is empty are excluded by the same deterministic Dataset indices
+in train, validation, and eval. Target rows remain unchanged, and first-order
+masking is unchanged.
 
 ## Audit-only projected dataset split
 
@@ -181,7 +186,7 @@ games deterministically; snapshots from one game never cross partitions, and
 their input-relative order is preserved. Fixed twelve-game and 8/2/2 rules
 are not built into the splitter; formal experiment counts must be supplied
 explicitly. These projected splits remain available for audit; the
-order-specific Qwen2 trainer does not consume them.
+order-specific trainer does not consume them.
 
 `script/twd_tom/split_formal_dataset.py` implements this audit split. It is
 not the formal training-data splitter or a training entry point.
@@ -357,9 +362,11 @@ versions above. Earlier three-game artifacts remain audit-only and are not
 training input. Whether future models should encode `raw_text` is deferred to
 a later structured-input collision study.
 
-The model input is the structured `public_events` projection. Its sole
+The model input is the structured `public_events` projection. The default
 backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
-`inputs_embeds`; it never loads pretrained weights or uses a tokenizer. The
+`inputs_embeds`; the training CLI also retains a direct stack of Hugging Face
+`GPT2Block` layers. Neither option loads pretrained weights or uses a
+tokenizer. The
 first-order readout adds the last non-padding event state to each observer
 embedding; rows also add one linear projection of that observer's private
 knowledge. The second-order readout instead conditions every event token on

@@ -3,11 +3,13 @@ from setuptools import setup, find_packages
 setup(
     name="werewolf",
     version="0.1",
-    description="A project for werewolf game.",
-    keywords="werewolf, gym",
+    description="Multi-agent Theory-of-Mind reasoning in Werewolf.",
+    keywords="werewolf, multi-agent, theory-of-mind",
     packages=find_packages(),
+    python_requires=">=3.10",
     install_requires=[
-        "gym==0.26.2",
+        "gymnasium",
+        "httpx",
         "numpy>=1.24,<3.0",
         "openai>=1.59.3",
         "pydantic>=2.10.4",
@@ -23,6 +25,13 @@ setup(
         "local_model": [
             "torch>=2.0.0",
             "transformers>=4.47.1",
+        ],
+        "tom": [
+            "torch>=2.0.0",
+            "transformers>=4.47.1",
+        ],
+        "dev": [
+            "pytest",
         ],
         "vllm_server": [
             "vllm>=0.6.3",
