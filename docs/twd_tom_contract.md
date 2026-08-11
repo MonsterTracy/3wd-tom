@@ -197,10 +197,34 @@ external model weights or caches; and `review/` contains data audits and human
 review artifacts. V2.7 training-ready data must remain under
 `datasets/<dataset-id>/` and must not be written back to `data/`.
 
+For a V2.7 dataset whose projected split has already been frozen, first
+materialize both formal orders from the unchanged raw source, then apply the
+existing projected `split_manifest.json` assignment to both orders:
+
+```bash
+python -m script.twd_tom.materialize_training_data \
+  --raw datasets/<dataset-id>/raw.jsonl \
+  --tom1-output datasets/<dataset-id>/raw_tom.jsonl \
+  --tom2-output datasets/<dataset-id>/raw_tom2.jsonl
+
+python -m script.twd_tom.split_training_data \
+  --tom1 datasets/<dataset-id>/raw_tom.jsonl \
+  --tom2 datasets/<dataset-id>/raw_tom2.jsonl \
+  --split-manifest datasets/<dataset-id>/projected_split/split_manifest.json \
+  --output-dir datasets/<dataset-id>/formal
+```
+
+This path does not shuffle games again. The manifest's `train`, `validation`,
+and `test` `game_ids` are the shared assignment for both ToM orders. Valid-only
+filtering may produce different order-specific row counts, including no row for
+one order in an otherwise assigned game. Any materialized row whose `game_id`
+is absent from the manifest fails before outputs are written. The CLI summary
+explicitly reports valid-only assigned games that have zero rows per order.
+
 Pre-V2.7 local Qwen2.5 and Qwen3.5 experiments retain their historical
 `data/qwen25/` and `data/qwen35/` layouts. Those artifacts are not migrated,
-renamed, or rebuilt by the V2.7 tools. The commands below document that legacy
-Formal300 layout only.
+renamed, or rebuilt by the V2.7 tools. The seed-based command below documents
+that legacy Formal300 layout only.
 
 Formal first- and second-order data reuse one in-memory, seed-42 game split.
 Generate the six order-specific files without overwriting existing outputs:

@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from script.twd_tom.split_training_data import SPLIT_GAME_COUNTS, split_training_data
+from script.twd_tom.materialize_training_data import materialize_training_records
+from script.twd_tom.split_training_data import (
+    SPLIT_GAME_COUNTS,
+    split_training_data,
+    split_training_data_from_manifest,
+)
+from werewolf.models.twd_tom.dataset import TWDToMDataset
+from werewolf.models.twd_tom.schema import (
+    PROJECTED_SCHEMA_VERSION,
+    PROJECTION_VERSION,
+)
 
 
 def _records(*, tom_order: int) -> list[dict]:
@@ -33,6 +44,62 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
         "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
         encoding="utf-8",
     )
+
+
+def _write_split_manifest(path: Path, splits: dict[str, list[str]]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": PROJECTED_SCHEMA_VERSION,
+                "projection_version": PROJECTION_VERSION,
+                "train_game_count": len(splits["train"]),
+                "validation_game_count": len(splits["validation"]),
+                "test_game_count": len(splits["test"]),
+                "total_game_count": sum(len(values) for values in splits.values()),
+                "splits": {
+                    name: {
+                        "game_ids": game_ids,
+                        "game_count": len(game_ids),
+                    }
+                    for name, game_ids in splits.items()
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _all_ok(sample: dict) -> dict:
+    sample = deepcopy(sample)
+    for subject in sample["belief_status"]:
+        sample["belief_status"][subject] = "ok"
+        sample["belief_errors"][subject] = None
+        sample["suspected_werewolves"][subject] = []
+    return sample
+
+
+def _formal_inputs(tmp_path: Path, suspicion_sample_factory):
+    raw_records = [
+        _all_ok(
+            suspicion_sample_factory(
+                game_id=f"game_{game_index:03d}",
+                observers=(1, 2, 3),
+            )
+        )
+        for game_index in range(1, 5)
+    ]
+    unresolved_speaker = raw_records[3]
+    unresolved_speaker["belief_status"]["player2"] = "semantic_error"
+    unresolved_speaker["belief_errors"]["player2"] = "synthetic invalid report"
+    unresolved_speaker["suspected_werewolves"]["player2"] = None
+    materialized = materialize_training_records(raw_records)
+    tom1 = tmp_path / "formal_tom1.jsonl"
+    tom2 = tmp_path / "formal_tom2.jsonl"
+    _write_jsonl(tom1, materialized["tom1_records"])
+    _write_jsonl(tom2, materialized["tom2_records"])
+    return tom1, tom2, materialized
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path, list[dict], list[dict]]:
@@ -183,3 +250,155 @@ def test_input_files_are_not_modified(tmp_path):
         if record["game_id"] in _output_game_ids(output, "tom1", "train")
     ]
     assert [record["game_id"] for record in _read(output / "tom1" / "train.jsonl")] == expected_order
+
+
+def test_manifest_split_reuses_assignment_and_allows_order_row_difference(
+    tmp_path,
+    suspicion_sample_factory,
+):
+    tom1, tom2, materialized = _formal_inputs(
+        tmp_path,
+        suspicion_sample_factory,
+    )
+    manifest = tmp_path / "split_manifest.json"
+    assignments = {
+        "train": ["game_004", "game_001"],
+        "validation": ["game_002"],
+        "test": ["game_003"],
+    }
+    _write_split_manifest(manifest, assignments)
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    result = split_training_data_from_manifest(
+        tom1_path=tom1,
+        tom2_path=tom2,
+        split_manifest_path=manifest,
+        output_dir=first,
+    )
+    split_training_data_from_manifest(
+        tom1_path=tom1,
+        tom2_path=tom2,
+        split_manifest_path=manifest,
+        output_dir=second,
+    )
+
+    assert len(materialized["tom1_records"]) == 3
+    assert len(materialized["tom2_records"]) == 4
+    assert result["order_split_stats"]["tom1"] == {
+        "train": {
+            "assigned_game_count": 2,
+            "represented_game_count": 1,
+            "zero_row_game_ids": ["game_004"],
+            "record_count": 1,
+        },
+        "validation": {
+            "assigned_game_count": 1,
+            "represented_game_count": 1,
+            "zero_row_game_ids": [],
+            "record_count": 1,
+        },
+        "test": {
+            "assigned_game_count": 1,
+            "represented_game_count": 1,
+            "zero_row_game_ids": [],
+            "record_count": 1,
+        },
+    }
+    assert result["order_split_stats"]["tom2"]["train"] == {
+        "assigned_game_count": 2,
+        "represented_game_count": 2,
+        "zero_row_game_ids": [],
+        "record_count": 2,
+    }
+    seen = set()
+    for tom_order in (1, 2):
+        for split_name, assigned_game_ids in assignments.items():
+            path = first / f"tom{tom_order}" / f"{split_name}.jsonl"
+            dataset = TWDToMDataset.from_jsonl(path, tom_order=tom_order)
+            actual_game_ids = {sample["game_id"] for sample in dataset.samples}
+            assert actual_game_ids <= set(assigned_game_ids)
+            if tom_order == 2:
+                assert actual_game_ids == set(assigned_game_ids)
+                assert seen.isdisjoint(actual_game_ids)
+                seen.update(actual_game_ids)
+            relative = path.relative_to(first)
+            assert path.read_bytes() == (second / relative).read_bytes()
+    assert seen == set().union(*map(set, assignments.values()))
+
+
+def test_manifest_split_rejects_unknown_games_before_writing(
+    tmp_path,
+    suspicion_sample_factory,
+):
+    tom1, tom2, _materialized = _formal_inputs(
+        tmp_path,
+        suspicion_sample_factory,
+    )
+    records = _read(tom2)
+    records[0]["game_id"] = "unknown_game"
+    _write_jsonl(tom2, records)
+    manifest = tmp_path / "split_manifest.json"
+    _write_split_manifest(
+        manifest,
+        {
+            "train": ["game_001", "game_004"],
+            "validation": ["game_002"],
+            "test": ["game_003"],
+        },
+    )
+    output = tmp_path / "output"
+
+    with pytest.raises(ValueError, match="absent from the split manifest"):
+        split_training_data_from_manifest(
+            tom1_path=tom1,
+            tom2_path=tom2,
+            split_manifest_path=manifest,
+            output_dir=output,
+        )
+    assert not output.exists()
+
+
+def test_manifest_split_rejects_malformed_manifest_and_formal_rows(
+    tmp_path,
+    suspicion_sample_factory,
+):
+    tom1, tom2, _materialized = _formal_inputs(
+        tmp_path,
+        suspicion_sample_factory,
+    )
+    manifest = tmp_path / "split_manifest.json"
+    _write_split_manifest(
+        manifest,
+        {
+            "train": ["game_001", "game_002"],
+            "validation": ["game_002"],
+            "test": ["game_003"],
+        },
+    )
+    with pytest.raises(ValueError, match="assignments overlap"):
+        split_training_data_from_manifest(
+            tom1_path=tom1,
+            tom2_path=tom2,
+            split_manifest_path=manifest,
+            output_dir=tmp_path / "overlap",
+        )
+
+    _write_split_manifest(
+        manifest,
+        {
+            "train": ["game_001", "game_004"],
+            "validation": ["game_002"],
+            "test": ["game_003"],
+        },
+    )
+    malformed = _read(tom1)
+    malformed[0]["unexpected"] = True
+    _write_jsonl(tom1, malformed)
+    with pytest.raises(ValueError, match="sample field set mismatch"):
+        split_training_data_from_manifest(
+            tom1_path=tom1,
+            tom2_path=tom2,
+            split_manifest_path=manifest,
+            output_dir=tmp_path / "malformed",
+        )

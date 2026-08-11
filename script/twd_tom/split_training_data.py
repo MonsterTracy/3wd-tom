@@ -1,4 +1,4 @@
-"""Split aligned first- and second-order ToM data by game ID."""
+"""Split first- and second-order ToM data by one shared game assignment."""
 
 from __future__ import annotations
 
@@ -10,12 +10,23 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from werewolf.models.twd_tom.dataset import TWDToMDataset
+from werewolf.models.twd_tom.schema import (
+    PROJECTED_SCHEMA_VERSION,
+    PROJECTION_VERSION,
+)
+
 
 SPLIT_GAME_COUNTS = {
     "train": 210,
     "val": 45,
     "test": 45,
 }
+MANIFEST_SPLIT_NAMES = (
+    "train",
+    "validation",
+    "test",
+)
 SNAPSHOT_KEY_FIELDS = (
     "game_id",
     "step_idx",
@@ -144,14 +155,105 @@ def _build_game_splits(game_ids: Sequence[str], seed: int) -> dict[str, set[str]
     }
 
 
-def _output_paths(output_dir: Path) -> dict[str, dict[str, Path]]:
+def _output_paths(
+    output_dir: Path,
+    *,
+    split_names: Sequence[str] = tuple(SPLIT_GAME_COUNTS),
+) -> dict[str, dict[str, Path]]:
     return {
         tom_order: {
             split_name: output_dir / tom_order / f"{split_name}.jsonl"
-            for split_name in SPLIT_GAME_COUNTS
+            for split_name in split_names
         }
         for tom_order in ("tom1", "tom2")
     }
+
+
+def _load_manifest_game_splits(path: Path) -> dict[str, set[str]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"split manifest not found: {path}")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid split manifest JSON: {exc}") from exc
+    if not isinstance(manifest, Mapping):
+        raise TypeError("split manifest must contain a JSON object")
+    if manifest.get("schema_version") != PROJECTED_SCHEMA_VERSION:
+        raise ValueError("split manifest schema_version mismatch")
+    if manifest.get("projection_version") != PROJECTION_VERSION:
+        raise ValueError("split manifest projection_version mismatch")
+
+    split_values = manifest.get("splits")
+    if not isinstance(split_values, Mapping):
+        raise TypeError("split manifest splits must be a mapping")
+    if set(split_values) != set(MANIFEST_SPLIT_NAMES):
+        raise ValueError(
+            "split manifest names must be train, validation, and test"
+        )
+
+    game_splits: dict[str, set[str]] = {}
+    for split_name in MANIFEST_SPLIT_NAMES:
+        summary = split_values[split_name]
+        if not isinstance(summary, Mapping):
+            raise TypeError(f"split manifest {split_name} must be a mapping")
+        game_ids = summary.get("game_ids")
+        if isinstance(game_ids, (str, bytes)) or not isinstance(
+            game_ids, Sequence
+        ):
+            raise TypeError(
+                f"split manifest {split_name}.game_ids must be a sequence"
+            )
+        if any(
+            not isinstance(game_id, str) or not game_id.strip()
+            for game_id in game_ids
+        ):
+            raise ValueError(
+                f"split manifest {split_name}.game_ids contains an invalid ID"
+            )
+        assigned = set(game_ids)
+        if not assigned:
+            raise ValueError(
+                f"split manifest {split_name}.game_ids cannot be empty"
+            )
+        if len(assigned) != len(game_ids):
+            raise ValueError(
+                f"split manifest {split_name}.game_ids contains duplicates"
+            )
+        declared_count = summary.get("game_count")
+        if (
+            isinstance(declared_count, bool)
+            or not isinstance(declared_count, int)
+            or declared_count != len(assigned)
+        ):
+            raise ValueError(
+                f"split manifest {split_name}.game_count mismatch"
+            )
+        top_level_count = manifest.get(f"{split_name}_game_count")
+        if (
+            isinstance(top_level_count, bool)
+            or not isinstance(top_level_count, int)
+            or top_level_count != len(assigned)
+        ):
+            raise ValueError(
+                f"split manifest {split_name}_game_count mismatch"
+            )
+        game_splits[split_name] = assigned
+
+    if any(
+        game_splits[left] & game_splits[right]
+        for index, left in enumerate(MANIFEST_SPLIT_NAMES)
+        for right in MANIFEST_SPLIT_NAMES[index + 1 :]
+    ):
+        raise ValueError("split manifest game_id assignments overlap")
+    assigned_games = set().union(*game_splits.values())
+    total_game_count = manifest.get("total_game_count")
+    if (
+        isinstance(total_game_count, bool)
+        or not isinstance(total_game_count, int)
+        or total_game_count != len(assigned_games)
+    ):
+        raise ValueError("split manifest total_game_count mismatch")
+    return game_splits
 
 
 def _write_splits(
@@ -250,25 +352,112 @@ def split_training_data(
     }
 
 
+def split_training_data_from_manifest(
+    *,
+    tom1_path: str | Path,
+    tom2_path: str | Path,
+    split_manifest_path: str | Path,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Partition formal rows using an existing projected game assignment."""
+
+    tom1_source = Path(tom1_path)
+    tom2_source = Path(tom2_path)
+    game_splits = _load_manifest_game_splits(Path(split_manifest_path))
+    destinations = _output_paths(
+        Path(output_dir),
+        split_names=MANIFEST_SPLIT_NAMES,
+    )
+    existing = [
+        str(path)
+        for order_paths in destinations.values()
+        for path in order_paths.values()
+        if path.exists()
+    ]
+    if existing:
+        raise FileExistsError(f"output files already exist: {existing}")
+
+    tom1_records = _load_jsonl(tom1_source)
+    tom2_records = _load_jsonl(tom2_source)
+    TWDToMDataset([record for record, _line in tom1_records], tom_order=1)
+    TWDToMDataset([record for record, _line in tom2_records], tom_order=2)
+
+    assigned_games = set().union(*game_splits.values())
+    input_games = {
+        "tom1": {record["game_id"] for record, _line in tom1_records},
+        "tom2": {record["game_id"] for record, _line in tom2_records},
+    }
+    for tom_order, game_ids in input_games.items():
+        unknown = sorted(game_ids - assigned_games)
+        if unknown:
+            raise ValueError(
+                f"{tom_order} contains game_id values absent from the split "
+                f"manifest: {unknown[:10]}"
+            )
+
+    record_counts = _write_splits(
+        records_by_order={"tom1": tom1_records, "tom2": tom2_records},
+        game_splits=game_splits,
+        output_paths=destinations,
+    )
+    order_split_stats = {
+        tom_order: {
+            split_name: {
+                "assigned_game_count": len(split_games),
+                "represented_game_count": len(
+                    split_games & input_games[tom_order]
+                ),
+                "zero_row_game_ids": sorted(
+                    split_games - input_games[tom_order]
+                ),
+                "record_count": record_counts[tom_order][split_name],
+            }
+            for split_name, split_games in game_splits.items()
+        }
+        for tom_order in ("tom1", "tom2")
+    }
+    return {
+        "split_source": "projected_split_manifest",
+        "total_assigned_games": len(assigned_games),
+        "order_split_stats": order_split_stats,
+    }
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Split aligned first- and second-order ToM JSONL by game ID."
+        description=(
+            "Split first- and second-order ToM JSONL by one shared game "
+            "assignment."
+        )
     )
     parser.add_argument("--tom1", required=True)
     parser.add_argument("--tom2", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--seed", required=True, type=int)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--seed", type=int, help="Legacy 300-game split seed.")
+    source.add_argument(
+        "--split-manifest",
+        help="Existing projected split_manifest.json; does not reshuffle games.",
+    )
     return parser
 
 
 def main() -> int:
     args = build_argument_parser().parse_args()
-    result = split_training_data(
-        tom1_path=args.tom1,
-        tom2_path=args.tom2,
-        output_dir=args.output_dir,
-        seed=args.seed,
-    )
+    if args.split_manifest is not None:
+        result = split_training_data_from_manifest(
+            tom1_path=args.tom1,
+            tom2_path=args.tom2,
+            split_manifest_path=args.split_manifest,
+            output_dir=args.output_dir,
+        )
+    else:
+        result = split_training_data(
+            tom1_path=args.tom1,
+            tom2_path=args.tom2,
+            output_dir=args.output_dir,
+            seed=args.seed,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
