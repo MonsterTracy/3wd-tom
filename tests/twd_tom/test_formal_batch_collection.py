@@ -395,3 +395,40 @@ def test_quality_monitor_classifies_by_status_not_legacy_error_text():
         "reporter_error": 2,
     }
     assert switch_monitor.stop_reason is None
+
+
+def test_quality_monitor_validates_samples_for_its_collection_mode(
+    suspicion_sample_factory,
+):
+    private_sample = suspicion_sample_factory(observers=(1, 3))
+    monitored.CollectionQualityMonitor().observe_sample(private_sample)
+
+    public_sample = suspicion_sample_factory(observers=(1, 3))
+    public_sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    public_sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    public_sample["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    for observer in public_sample["observer_ids"]:
+        subject = f"player{observer}"
+        public_sample["known_werewolves"][subject] = []
+        public_sample["known_non_werewolves"][subject] = []
+
+    public_monitor = monitored.CollectionQualityMonitor(
+        collection_mode=PUBLIC_ONLY_COLLECTION_MODE,
+    )
+    public_monitor.observe_sample(public_sample)
+
+    with pytest.raises(
+        monitored.CollectionSampleSafetyViolation,
+        match="unsupported schema",
+    ) as private_mode_error:
+        monitored.CollectionQualityMonitor().observe_sample(public_sample)
+    assert private_mode_error.value.check_name == "old_schema"
+
+    mixed_sample = dict(public_sample)
+    mixed_sample["schema_version"] = SAMPLE_SCHEMA_VERSION
+    with pytest.raises(
+        monitored.CollectionSampleSafetyViolation,
+        match="unsupported schema",
+    ) as mixed_schema_error:
+        public_monitor.observe_sample(mixed_sample)
+    assert mixed_schema_error.value.check_name == "old_schema"

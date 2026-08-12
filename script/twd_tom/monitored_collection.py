@@ -173,7 +173,12 @@ def _error_rule(status: str) -> str:
 class CollectionQualityMonitor:
     """Aggregate validator outcomes and raise only frozen stop conditions."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
+    ) -> None:
+        self.collection_mode = collection_mode
         self.total_reports = 0
         self.status_counts: Counter[str] = Counter()
         self.error_rule_counts: Counter[str] = Counter()
@@ -237,7 +242,10 @@ class CollectionQualityMonitor:
                 self.stop_reason = "parse_error_rate_gt_1_percent"
 
     def observe_sample(self, sample: Mapping[str, Any]) -> None:
-        _validate_sample_safety(sample)
+        _validate_sample_safety(
+            sample,
+            collection_mode=self.collection_mode,
+        )
         game_id = sample["game_id"]
         phase = sample["phase"]
         for observer in sorted(sample["belief_status"]):
@@ -603,7 +611,9 @@ def run_monitored_collection(
         max_total_calls=config.max_total_calls,
         max_wall_seconds=config.max_wall_seconds,
     )
-    monitor = CollectionQualityMonitor()
+    monitor = CollectionQualityMonitor(
+        collection_mode=collection_mode,
+    )
     safety_checks = {name: 0 for name in _SAFETY_CHECKS}
     game_summaries = []
     status = "ok"
