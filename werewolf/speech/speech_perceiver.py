@@ -16,13 +16,19 @@ _PIPE_TRIPLET_PATTERN = re.compile(
     r"\s*[|｜]\s*"
     r"(?P<action>[a-zA-Z_]+)"
     r"\s*[|｜]\s*"
-    r"(?P<object>(?:player\s*)?[1-7])"
+    r"(?P<object>(?:player\s*[1-7]\s*至\s*player\s*[1-7]|"
+    r"(?:player\s*)?[1-7]))"
     r"\s*[\"'`]?\s*[,;，；。.！!]?\s*$",
     flags=re.IGNORECASE,
 )
 
 _BULLET_PREFIX_PATTERN = re.compile(
     r"^\s*(?:[-*•]+\s*|\d+\s*[.)、:：-]\s*)"
+)
+
+_EXPLICIT_PLAYER_RANGE_PATTERN = re.compile(
+    r"^player\s*(?P<start>[1-7])\s*至\s*player\s*(?P<end>[1-7])$",
+    flags=re.IGNORECASE,
 )
 
 _EMPTY_RESPONSE_MARKERS = {
@@ -402,6 +408,7 @@ ACTION_INTENT（当前行动意图）：
 - save、poison 和 guard 只表示当前发言者声称自己已经完成的技能行为。建议、猜测、转述、未来计划、条件或否定表达不得使用。
 - vote_intent 只表示当前发言者对当前这一轮待执行投票的无条件自身承诺，不表示怀疑或反对，也不自动产生 oppose。允许“今天我投3号”“我的票挂3号”“这一轮我会投3号”。条件承诺、可能性表达、未来其他轮次的计划、请求他人投票、转述他人投票意图、已完成的投票或实际投票系统事件不得使用，例如“如果3号不解释，我就投他”“我可能投3号”“明天再考虑投3号”“大家投3号”“2号说他会投3号”“我已经投了3号”。
 - 同一种 action 可以针对多个不同 target；只有 action 和 target 都相同才是重复。这里记录的是公开声称，不是环境最终执行的游戏动作。
+- 发言明确针对连续玩家范围时，每个 target 必须单独输出一个原子三元组。不得把“player2 至 player4”写入 object；必须依次输出 player2、player3、player4 三个 object。
 - 单纯转述、复述或引用别人的查验、身份声明或立场，不视为当前发言者自己的立场。
 - 如果当前发言者明确表示认同某人的发言，可以输出对该玩家的 support；只有当前发言者本人也明确接受某个具体身份结论时，才输出相应 point_as_*。
 - “我是好人”不是具体身份声明，不输出 point_as_villager。
@@ -479,6 +486,12 @@ player{speaker} | vote_intent | player3
 输出：
 player{speaker} | vote_intent | player1
 player{speaker} | vote_intent | player2
+
+输入：我反对 player2 至 player4 的发言。
+输出：
+player{speaker} | oppose | player2
+player{speaker} | oppose | player3
+player{speaker} | oppose | player4
 
 输入：这一轮我倾向投4号。
 输出：
@@ -981,21 +994,9 @@ player{speaker}: {speech}"""
             ) = raw_action
 
             try:
-                if strict:
-                    speech_action_type.from_values(
-                        subject=raw_subject,
-                        action=action_name,
-                        object_=object_player,
-                    )
-
-                action = (
-                    speech_action_type
-                    .from_values(
-                        subject=speaker,
-                        action=action_name,
-                        object_=(
-                            object_player
-                        ),
+                object_players = (
+                    cls._expand_explicit_player_range(
+                        object_player
                     )
                 )
             except (
@@ -1014,16 +1015,49 @@ player{speaker}: {speech}"""
                     )
                 continue
 
-            normalized = action.to_list()
-            key = tuple(normalized)
+            for atomic_object in object_players:
+                try:
+                    if strict:
+                        speech_action_type.from_values(
+                            subject=raw_subject,
+                            action=action_name,
+                            object_=atomic_object,
+                        )
 
-            if key in seen:
-                continue
+                    action = (
+                        speech_action_type
+                        .from_values(
+                            subject=speaker,
+                            action=action_name,
+                            object_=atomic_object,
+                        )
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                ) as exc:
+                    if strict:
+                        failures.append(
+                            {
+                                "candidate": item,
+                                "reason": (
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            }
+                        )
+                    continue
 
-            seen.add(key)
-            actions.append(
-                normalized
-            )
+                normalized = action.to_list()
+                key = tuple(normalized)
+
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                actions.append(
+                    normalized
+                )
 
         if failures:
             raise SpeechActionValidationError(
@@ -1031,6 +1065,28 @@ player{speaker}: {speech}"""
             )
 
         return actions
+
+    @staticmethod
+    def _expand_explicit_player_range(
+        object_player: Any,
+    ) -> list[Any]:
+        """Expand only the confirmed ascending ``playerN 至 playerM`` form."""
+
+        if not isinstance(object_player, str):
+            return [object_player]
+        match = _EXPLICIT_PLAYER_RANGE_PATTERN.fullmatch(
+            object_player.strip()
+        )
+        if match is None:
+            return [object_player]
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if start > end:
+            raise ValueError("player range must be ascending")
+        return [
+            f"player{player_id}"
+            for player_id in range(start, end + 1)
+        ]
 
     @staticmethod
     def _read_raw_action(

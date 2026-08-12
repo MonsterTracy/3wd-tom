@@ -6,6 +6,7 @@ from werewolf.speech.speech_perceiver import (
     SPEECH_PARSER_MAX_TOKENS,
     SpeechActionValidationError,
 )
+from werewolf.models.twd_tom.schema import SpeechAction, normalize_player
 
 
 class FakeBackend:
@@ -174,6 +175,14 @@ class SpeechPerceiverTest(unittest.TestCase):
         )
         self.assertIn(
             "action 不同的动作",
+            prompt,
+        )
+        self.assertIn(
+            "不得把“player2 至 player4”写入 object",
+            prompt,
+        )
+        self.assertIn(
+            "player2 | oppose | player2",
             prompt,
         )
         self.assertIn(
@@ -848,6 +857,91 @@ class SpeechPerceiverTest(unittest.TestCase):
                 ],
             ],
         )
+
+    def test_v27_player_range_expands_to_atomic_actions(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "player1 | oppose | player2 至 player7"
+            ),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "player2 至 player7 都有问题", 1, "speech"),
+            [
+                ["player1", "oppose", f"player{player_id}"]
+                for player_id in range(2, 8)
+            ],
+        )
+
+    def test_range_expansion_reuses_atomic_dedup_and_keeps_other_actions(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "\n".join(
+                    [
+                        "player1 | oppose | player2 至 player4",
+                        "player1 | oppose | player3",
+                        "player1 | support | player3",
+                        "player1 | oppose | player5",
+                    ]
+                )
+            ),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "发言", 1, "speech"),
+            [
+                ["player1", "oppose", "player2"],
+                ["player1", "oppose", "player3"],
+                ["player1", "oppose", "player4"],
+                ["player1", "support", "player3"],
+                ["player1", "oppose", "player5"],
+            ],
+        )
+
+    def test_single_player_object_remains_compatible(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("player1 | oppose | player3"),
+            model_name="test-model",
+        )
+        self.assertEqual(
+            perceiver.parse(1, "我反对3号", 1, "speech"),
+            [["player1", "oppose", "player3"]],
+        )
+
+    def test_invalid_or_malformed_ranges_fail_closed(self):
+        for object_value in (
+            "player0 至 player3",
+            "player3 至 player8",
+            "player4 至 player2",
+            "playerX 至 player4",
+        ):
+            with self.subTest(object_value=object_value):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(
+                        f"player1 | oppose | {object_value}"
+                    ),
+                    model_name="test-model",
+                )
+                self.assertEqual(
+                    perceiver.parse(1, "发言", 1, "speech"),
+                    [],
+                )
+                with self.assertRaises(
+                    (SpeechActionValidationError, ValueError)
+                ):
+                    perceiver.parse_strict(1, "发言", 1, "speech")
+
+    def test_atomic_player_validators_still_reject_range_strings(self):
+        with self.assertRaises(ValueError):
+            normalize_player("player2 至 player4")
+        with self.assertRaises(ValueError):
+            SpeechAction.from_values(
+                "player1",
+                "oppose",
+                "player2 至 player4",
+            )
 
     def test_none_is_a_valid_empty_result(
         self,
