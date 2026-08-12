@@ -49,6 +49,7 @@ def make_checkpoint(
     tom_order=1,
     backbone=QWEN2_BACKBONE_NAME,
     enable_suspicion_aux=False,
+    enable_factorized_pair_head=False,
 ):
     config = TrainingConfig(
         tom_order=tom_order,
@@ -59,6 +60,7 @@ def make_checkpoint(
         batch_size=1,
         max_seq_len=64,
         enable_suspicion_aux=enable_suspicion_aux,
+        enable_factorized_pair_head=enable_factorized_pair_head,
     )
     model = build_model(config)
     optimizer = AdamW(model.parameters())
@@ -147,6 +149,31 @@ def test_tom2_suspicion_aux_checkpoint_restores_strictly(tmp_path):
     assert hasattr(restored, "suspicion_projection")
     assert restored.suspicion_projection.in_features == HIDDEN_SIZE
     assert restored.suspicion_projection.out_features == 7
+    assert restored.state_dict().keys() == loaded["model_state_dict"].keys()
+    for name, expected in loaded["model_state_dict"].items():
+        torch.testing.assert_close(restored.state_dict()[name], expected)
+
+
+def test_tom2_factorized_pair_head_checkpoint_restores_strictly(tmp_path):
+    checkpoint = make_checkpoint(
+        tmp_path,
+        tom_order=2,
+        enable_factorized_pair_head=True,
+    )
+    checkpoint_path = tmp_path / "tom2-factorized-pair-head.pt"
+    torch.save(checkpoint, checkpoint_path)
+
+    loaded = load_checkpoint(checkpoint_path)
+    restored = build_model_from_checkpoint(
+        loaded,
+        device=torch.device("cpu"),
+    )
+
+    assert restored.tom_order == 2
+    assert restored.config.enable_factorized_pair_head is True
+    assert hasattr(restored, "factorized_player_projection")
+    assert restored.factorized_player_projection.in_features == HIDDEN_SIZE
+    assert restored.factorized_player_projection.out_features == 7
     assert restored.state_dict().keys() == loaded["model_state_dict"].keys()
     for name, expected in loaded["model_state_dict"].items():
         torch.testing.assert_close(restored.state_dict()[name], expected)

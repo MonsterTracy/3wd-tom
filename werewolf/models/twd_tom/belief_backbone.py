@@ -44,6 +44,7 @@ from werewolf.models.twd_tom.schema import (
     NUM_WOLF_PAIR_CLASSES,
     NUM_PLAYERS,
     PLAYER_TO_ID,
+    canonical_wolf_pairs,
 )
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
@@ -216,6 +217,7 @@ class ToMBeliefBackboneConfig:
     pair_class_count: int = NUM_WOLF_PAIR_CLASSES
     max_seq_len: int = 256
     enable_suspicion_aux: bool = False
+    enable_factorized_pair_head: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -243,6 +245,8 @@ class ToMBeliefBackboneConfig:
             raise ValueError("max_seq_len must be a positive integer")
         if not isinstance(self.enable_suspicion_aux, bool):
             raise TypeError("enable_suspicion_aux must be a boolean")
+        if not isinstance(self.enable_factorized_pair_head, bool):
+            raise TypeError("enable_factorized_pair_head must be a boolean")
 
 
 class ToMBeliefBackbone(nn.Module):
@@ -278,6 +282,16 @@ class ToMBeliefBackbone(nn.Module):
         )
         if self.config.enable_suspicion_aux and self.tom_order != 2:
             raise ValueError("suspicion auxiliary supervision requires tom_order=2")
+        if self.config.enable_factorized_pair_head and self.tom_order != 2:
+            raise ValueError("factorized pair head requires tom_order=2")
+        if (
+            self.config.enable_factorized_pair_head
+            and self.config.enable_suspicion_aux
+        ):
+            raise ValueError(
+                "factorized pair head and suspicion auxiliary supervision "
+                "cannot be enabled together"
+            )
 
         player_vocab_size = _mapping_vocab_size(PLAYER_TO_ID)
         action_vocab_size = _mapping_vocab_size(ACTION_TO_ID)
@@ -389,6 +403,19 @@ class ToMBeliefBackbone(nn.Module):
         )
 
         self._reset_parameters()
+        if self.config.enable_factorized_pair_head:
+            del self.output_projection
+            with torch.random.fork_rng(devices=[]):
+                self.factorized_player_projection = nn.Linear(
+                    HIDDEN_SIZE,
+                    self.config.num_players,
+                )
+                nn.init.normal_(
+                    self.factorized_player_projection.weight,
+                    mean=0.0,
+                    std=0.02,
+                )
+                nn.init.zeros_(self.factorized_player_projection.bias)
         if self.config.enable_suspicion_aux:
             with torch.random.fork_rng(devices=[]):
                 self.suspicion_projection = nn.Linear(
@@ -677,7 +704,20 @@ class ToMBeliefBackbone(nn.Module):
                 + self.private_knowledge_projection(private_knowledge)
             )
 
-        logits = self.output_projection(observer_hidden_states)
+        if self.config.enable_factorized_pair_head:
+            player_scores = self.factorized_player_projection(
+                observer_hidden_states
+            )
+            logits = torch.stack(
+                [
+                    player_scores[..., PLAYER_TO_ID[first] - 1]
+                    + player_scores[..., PLAYER_TO_ID[second] - 1]
+                    for first, second in canonical_wolf_pairs()
+                ],
+                dim=-1,
+            )
+        else:
+            logits = self.output_projection(observer_hidden_states)
         probabilities = torch.softmax(logits, dim=-1)
         result = {
             "hidden_states": hidden_states,

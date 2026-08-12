@@ -141,6 +141,7 @@ def _training_config(
     epochs: int = 1,
     backbone: str = QWEN2_BACKBONE_NAME,
     enable_suspicion_aux: bool = False,
+    enable_factorized_pair_head: bool = False,
 ) -> TrainingConfig:
     train_path = tmp_path / f"tom{tom_order}_train.jsonl"
     validation_path = tmp_path / f"tom{tom_order}_validation.jsonl"
@@ -160,6 +161,7 @@ def _training_config(
         device="cpu",
         max_seq_len=32,
         enable_suspicion_aux=enable_suspicion_aux,
+        enable_factorized_pair_head=enable_factorized_pair_head,
     )
 
 
@@ -186,6 +188,7 @@ def test_cli_requires_explicit_train_and_validation_datasets():
     assert args.validation_dataset == "val.jsonl"
     assert args.backbone == QWEN2_BACKBONE_NAME
     assert args.tom2_suspicion_aux is False
+    assert args.tom2_factorized_pair_head is False
     assert not hasattr(args, "test_dataset")
     for old_name in ("d_model", "n_head", "n_layer", "dropout", "dim_feedforward"):
         assert not hasattr(args, old_name)
@@ -226,6 +229,17 @@ def test_cli_requires_explicit_train_and_validation_datasets():
         ]
     )
     assert aux_args.tom2_suspicion_aux is True
+    factorized_args = parser.parse_args(
+        [
+            *required,
+            "--dataset",
+            "train.jsonl",
+            "--validation-dataset",
+            "val.jsonl",
+            "--tom2-factorized-pair-head",
+        ]
+    )
+    assert factorized_args.tom2_factorized_pair_head is True
 
 
 def test_model_builder_uses_fixed_qwen2_configuration(tmp_path):
@@ -819,9 +833,46 @@ def test_tom2_suspicion_aux_optimizes_sum_but_selects_on_pair_loss(tmp_path):
     assert "suspicion_projection.weight" in checkpoint["model_state_dict"]
 
 
+def test_tom2_factorized_pair_head_trains_with_existing_pair_loss(tmp_path):
+    config = _training_config(
+        tmp_path,
+        2,
+        backbone=GPT2_BLOCK_BACKBONE_NAME,
+        enable_factorized_pair_head=True,
+    )
+    summary = run_training(config)
+    checkpoint = torch.load(
+        config.run_output_dir / "best.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert summary["selection_metric_name"] == "validation_mean_loss"
+    assert summary["model_config"]["enable_factorized_pair_head"] is True
+    assert checkpoint["selection_metric_value"] == pytest.approx(
+        checkpoint["validation_metrics"]["mean_loss"]
+    )
+    assert checkpoint["training_config"]["enable_factorized_pair_head"] is True
+    assert "factorized_player_projection.weight" in checkpoint["model_state_dict"]
+    assert "output_projection.weight" not in checkpoint["model_state_dict"]
+    assert "mean_suspicion_aux_loss" not in checkpoint["train_metrics"]
+
+
 def test_training_config_rejects_suspicion_aux_for_first_order(tmp_path):
     with pytest.raises(ValueError, match="requires tom_order=2"):
         _training_config(tmp_path, 1, enable_suspicion_aux=True)
+
+
+def test_training_config_rejects_invalid_factorized_pair_head_modes(tmp_path):
+    with pytest.raises(ValueError, match="requires tom_order=2"):
+        _training_config(tmp_path, 1, enable_factorized_pair_head=True)
+    with pytest.raises(ValueError, match="cannot be enabled together"):
+        _training_config(
+            tmp_path,
+            2,
+            enable_suspicion_aux=True,
+            enable_factorized_pair_head=True,
+        )
 
 
 def test_effective_subject_mask_excludes_only_the_reasoning_player():

@@ -100,6 +100,7 @@ class TrainingConfig:
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
     enable_suspicion_aux: bool = False
+    enable_factorized_pair_head: bool = False
 
     def __post_init__(self) -> None:
         _tom_order(self.tom_order)
@@ -113,6 +114,15 @@ class TrainingConfig:
             raise TypeError("enable_suspicion_aux must be a boolean")
         if self.enable_suspicion_aux and self.tom_order != 2:
             raise ValueError("suspicion auxiliary supervision requires tom_order=2")
+        if not isinstance(self.enable_factorized_pair_head, bool):
+            raise TypeError("enable_factorized_pair_head must be a boolean")
+        if self.enable_factorized_pair_head and self.tom_order != 2:
+            raise ValueError("factorized pair head requires tom_order=2")
+        if self.enable_factorized_pair_head and self.enable_suspicion_aux:
+            raise ValueError(
+                "factorized pair head and suspicion auxiliary supervision "
+                "cannot be enabled together"
+            )
         for field_name in ("dataset_path", "validation_dataset_path"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
@@ -376,6 +386,7 @@ def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
         ToMBeliefBackboneConfig(
             max_seq_len=config.max_seq_len,
             enable_suspicion_aux=config.enable_suspicion_aux,
+            enable_factorized_pair_head=config.enable_factorized_pair_head,
         ),
         tom_order=config.tom_order,
         backbone_name=config.backbone,
@@ -1236,6 +1247,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add native suspicion-set BCE to ToM2 optimization only.",
     )
+    parser.add_argument(
+        "--tom2-factorized-pair-head",
+        action="store_true",
+        help="Use additive seven-player pair logits for ToM2.",
+    )
     return parser
 
 
@@ -1261,6 +1277,7 @@ def main() -> int:
             gradient_clip_norm=args.gradient_clip_norm,
             max_seq_len=args.max_seq_len,
             enable_suspicion_aux=args.tom2_suspicion_aux,
+            enable_factorized_pair_head=args.tom2_factorized_pair_head,
         )
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
