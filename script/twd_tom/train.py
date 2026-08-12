@@ -34,10 +34,7 @@ from werewolf.models.twd_tom.dataset import (
     collate_twd_tom_samples,
     second_order_effective_subject_mask,
 )
-from werewolf.models.twd_tom.losses import (
-    masked_distribution_cross_entropy,
-    masked_suspicion_binary_cross_entropy,
-)
+from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
 from werewolf.models.twd_tom.metrics import (
     compute_subjective_pair_diagnostics,
     compute_subjective_pair_metrics,
@@ -99,8 +96,6 @@ class TrainingConfig:
     gradient_clip_norm: float = 1.0
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
-    enable_suspicion_aux: bool = False
-    enable_factorized_pair_head: bool = False
 
     def __post_init__(self) -> None:
         _tom_order(self.tom_order)
@@ -109,19 +104,6 @@ class TrainingConfig:
         if self.backbone not in SUPPORTED_BACKBONE_NAMES:
             raise ValueError(
                 f"backbone must be one of {SUPPORTED_BACKBONE_NAMES}"
-            )
-        if not isinstance(self.enable_suspicion_aux, bool):
-            raise TypeError("enable_suspicion_aux must be a boolean")
-        if self.enable_suspicion_aux and self.tom_order != 2:
-            raise ValueError("suspicion auxiliary supervision requires tom_order=2")
-        if not isinstance(self.enable_factorized_pair_head, bool):
-            raise TypeError("enable_factorized_pair_head must be a boolean")
-        if self.enable_factorized_pair_head and self.tom_order != 2:
-            raise ValueError("factorized pair head requires tom_order=2")
-        if self.enable_factorized_pair_head and self.enable_suspicion_aux:
-            raise ValueError(
-                "factorized pair head and suspicion auxiliary supervision "
-                "cannot be enabled together"
             )
         for field_name in ("dataset_path", "validation_dataset_path"):
             value = getattr(self, field_name)
@@ -383,11 +365,7 @@ def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
     """Build the explicitly selected causal backbone."""
 
     return ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=config.max_seq_len,
-            enable_suspicion_aux=config.enable_suspicion_aux,
-            enable_factorized_pair_head=config.enable_factorized_pair_head,
-        ),
+        ToMBeliefBackboneConfig(max_seq_len=config.max_seq_len),
         tom_order=config.tom_order,
         backbone_name=config.backbone,
     )
@@ -561,8 +539,6 @@ def _move_batch_to_device(
     if "pair_targets" not in batch:
         raise ValueError("batch must contain pair_targets")
     fields.append("pair_targets")
-    if "suspicion_targets" in batch:
-        fields.append("suspicion_targets")
     moved = {field: batch[field].to(device) for field in fields}
     for field in ("known_werewolves", "known_non_werewolves"):
         if field in batch:
@@ -613,9 +589,6 @@ class MetricAccumulator:
         self.processed_snapshot_count = 0
         self.valid_subject_count = 0
         self.loss_sum = 0.0
-        self.suspicion_aux_loss_sum = 0.0
-        self.optimization_loss_sum = 0.0
-        self.has_suspicion_aux_loss = False
         self.metric_sums: dict[str, float] = {}
         self.metric_weights: dict[str, int] = {}
 
@@ -626,13 +599,7 @@ class MetricAccumulator:
         logits: torch.Tensor,
         targets: torch.Tensor,
         subject_mask: torch.Tensor,
-        suspicion_aux_loss: torch.Tensor | None = None,
-        optimization_loss: torch.Tensor | None = None,
     ) -> None:
-        if (suspicion_aux_loss is None) != (optimization_loss is None):
-            raise ValueError(
-                "suspicion_aux_loss and optimization_loss must be provided together"
-            )
         metrics = compute_subjective_pair_metrics(
             logits,
             targets,
@@ -653,14 +620,6 @@ class MetricAccumulator:
         )
         self.valid_subject_count += valid_count
         self.loss_sum += float(loss.detach().item()) * valid_count
-        if suspicion_aux_loss is not None and optimization_loss is not None:
-            self.has_suspicion_aux_loss = True
-            self.suspicion_aux_loss_sum += (
-                float(suspicion_aux_loss.detach().item()) * valid_count
-            )
-            self.optimization_loss_sum += (
-                float(optimization_loss.detach().item()) * valid_count
-            )
         for name, value in metrics.items():
             if name != "valid_subject_count":
                 weight = (
@@ -688,13 +647,6 @@ class MetricAccumulator:
             name: value / self.metric_weights[name]
             for name, value in self.metric_sums.items()
         })
-        if self.has_suspicion_aux_loss:
-            result["mean_suspicion_aux_loss"] = (
-                self.suspicion_aux_loss_sum / self.valid_subject_count
-            )
-            result["mean_optimization_loss"] = (
-                self.optimization_loss_sum / self.valid_subject_count
-            )
         if self.include_collapse_diagnostics:
             for name in (
                 "mean_target_observer_pairwise_tv",
@@ -856,16 +808,7 @@ def train_one_epoch(
             effective_targets,
             effective_subject_mask,
         )
-        suspicion_aux_loss = None
-        optimization_loss = loss
-        if model.config.enable_suspicion_aux:
-            suspicion_aux_loss = masked_suspicion_binary_cross_entropy(
-                output["observer_suspicion_logits"],
-                batch["suspicion_targets"],
-                effective_subject_mask,
-            )
-            optimization_loss = loss + suspicion_aux_loss
-        optimization_loss.backward()
+        loss.backward()
         if gradient_clip_norm > 0:
             clip_grad_norm_(model.parameters(), gradient_clip_norm)
         optimizer.step()
@@ -876,10 +819,6 @@ def train_one_epoch(
             logits=logits,
             targets=effective_targets,
             subject_mask=effective_subject_mask,
-            suspicion_aux_loss=suspicion_aux_loss,
-            optimization_loss=(
-                optimization_loss if suspicion_aux_loss is not None else None
-            ),
         )
     metrics = accumulator.finalize()
     metrics["learning_rate_start"] = learning_rate_start
@@ -916,24 +855,11 @@ def evaluate_model(
             effective_targets,
             effective_subject_mask,
         )
-        suspicion_aux_loss = None
-        optimization_loss = loss
-        if model.config.enable_suspicion_aux:
-            suspicion_aux_loss = masked_suspicion_binary_cross_entropy(
-                output["observer_suspicion_logits"],
-                batch["suspicion_targets"],
-                effective_subject_mask,
-            )
-            optimization_loss = loss + suspicion_aux_loss
         accumulator.update(
             loss=loss,
             logits=logits,
             targets=effective_targets,
             subject_mask=effective_subject_mask,
-            suspicion_aux_loss=suspicion_aux_loss,
-            optimization_loss=(
-                optimization_loss if suspicion_aux_loss is not None else None
-            ),
         )
     return accumulator.finalize()
 
@@ -1242,16 +1168,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--max-seq-len", type=int, default=256)
-    parser.add_argument(
-        "--tom2-suspicion-aux",
-        action="store_true",
-        help="Add native suspicion-set BCE to ToM2 optimization only.",
-    )
-    parser.add_argument(
-        "--tom2-factorized-pair-head",
-        action="store_true",
-        help="Use additive seven-player pair logits for ToM2.",
-    )
     return parser
 
 
@@ -1276,8 +1192,6 @@ def main() -> int:
             num_workers=args.num_workers,
             gradient_clip_norm=args.gradient_clip_norm,
             max_seq_len=args.max_seq_len,
-            enable_suspicion_aux=args.tom2_suspicion_aux,
-            enable_factorized_pair_head=args.tom2_factorized_pair_head,
         )
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))

@@ -42,13 +42,13 @@ boundary:
 
 | Root | Typical contents |
 |---|---|
-| `data/` | Raw, projected, and split JSONL |
-| `datasets/` | Archived collection datasets and run material |
-| `logs/` | Game logs, per-player calls, manifests, resolved configs, call audit |
-| `outputs/` | Checkpoints, histories, summaries, and evaluation metrics |
-| `review/` | Temporary audits, reparse reports, and review packages |
+| `data/` | Collection/source raw runs |
+| `datasets/` | Identified dataset packages, aggregated raw data, materialized formal data, and frozen splits |
+| `logs/` | Game, backend-call, configuration, and run logs |
+| `outputs/` | Training/evaluation checkpoints and metrics |
+| `review/` | Data audits, human review, reparse reports, and review packages |
 | `checkpoints/` | Model checkpoints stored independently of a run tree |
-| `models/` | Root-level downloaded model weights or provider caches |
+| `models/` | Root-level external model weights or provider caches |
 
 The root-level `models/` storage path is distinct from the tracked source
 package `werewolf/models/`.

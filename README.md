@@ -72,14 +72,19 @@ flowchart LR
     R --> V["Final speech validator"]
     V --> S["Public speech"]
     S --> SP["SpeechPerceiver"]
-    SP --> PE["Structured public event"]
+    S --> FH["Frozen full public-event history<br/>raw_text + sp_actions"]
+    SP --> FH
 
-    O --> BR["Observer belief reporter"]
-    PE --> BR
-    BR --> SW["suspected_werewolves"]
-    SW --> PR["Deterministic pair projection"]
+    O --> BR["Ordinary private-conditioned reporter"]
+    FH --> BR
+    FH --> POR["Explicit Public-only reporter"]
+    POR --> PSW["Public-only suspected_werewolves"]
+    BR --> OSW["Ordinary suspected_werewolves"]
+    PSW --> PR["Deterministic pair projection"]
+    OSW --> PR
     PR --> T["21-class target"]
-    PE --> D["ToM Dataset"]
+    FH --> SF["Structured raw-text-free<br/>public-event features"]
+    SF --> D["TWDToMDataset"]
     T --> D
     D --> M["ToM backbone"]
     M --> L["Masked soft-target loss / evaluation"]
@@ -174,7 +179,10 @@ python -m script.twd_tom.pipeline \
 ```
 
 Each stage is explicit; collection does not automatically run projection,
-split, training, or evaluation.
+split, training, or evaluation. This canonical pipeline retains the ordinary
+private-conditioned collection contract. Public-only collection is a separate,
+explicit lineage selected by `formal_batch_collection --collection-mode
+public_only`; it is not an automatic mode of every pipeline stage.
 
 Other maintained entry points have narrower roles:
 
@@ -219,20 +227,20 @@ retains the directly constructed `gpt2_block` experimental backbone.
 
 ```bash
 python -m script.twd_tom.train \
-  --dataset data/qwen25/tom1/train.jsonl \
-  --validation-dataset data/qwen25/tom1/val.jsonl \
+  --dataset datasets/<dataset-id>/formal/tom1/train.jsonl \
+  --validation-dataset datasets/<dataset-id>/formal/tom1/validation.jsonl \
   --tom-order 1 \
   --backbone qwen2_model \
-  --output-dir outputs/tom/formal_tom1 \
+  --output-dir outputs/<experiment-id> \
   --device auto \
   --seed 42
 
 python -m script.twd_tom.train \
-  --dataset data/qwen25/tom2/train.jsonl \
-  --validation-dataset data/qwen25/tom2/val.jsonl \
+  --dataset datasets/<dataset-id>/formal/tom2/train.jsonl \
+  --validation-dataset datasets/<dataset-id>/formal/tom2/validation.jsonl \
   --tom-order 2 \
   --backbone qwen2_model \
-  --output-dir outputs/tom/formal_tom2 \
+  --output-dir outputs/<experiment-id> \
   --device auto \
   --seed 42
 ```
@@ -246,12 +254,15 @@ Evaluate validation or test data with an explicit checkpoint and dataset:
 
 ```bash
 python -m script.twd_tom.eval \
-  --checkpoint outputs/tom/formal_tom2/tom_order_2/best.pt \
-  --dataset data/qwen25/tom2/val.jsonl \
-  --training-dataset data/qwen25/tom2/train.jsonl \
-  --output outputs/tom/formal_tom2/tom_order_2/val_metrics.json \
+  --checkpoint outputs/<experiment-id>/tom_order_2/best.pt \
+  --dataset datasets/<dataset-id>/formal/tom2/validation.jsonl \
+  --training-dataset datasets/<dataset-id>/formal/tom2/train.jsonl \
+  --output outputs/<experiment-id>/tom_order_2/validation_metrics.json \
   --device auto
 ```
+
+Pre-V2.7 `data/qwen25/...` paths are retained only as historical layouts; they
+are not the canonical location for a new V2.7 dataset or experiment.
 
 Validation is used before final model selection. Test data should be evaluated
 only after the model and hyperparameters are fixed.

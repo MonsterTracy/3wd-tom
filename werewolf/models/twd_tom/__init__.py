@@ -2,12 +2,14 @@
 
 The package contains a raw collection path and a separate pair-model path:
 
-    complete structured public-event prefixes
-        -> playing-agent player-level suspicion sets
+    frozen public-event prefixes
+        -> ordinary or public-only player-level suspicion reports
 
-    explicitly projected pair samples
+    valid annotated samples
+        -> deterministic pair projection
+        -> structured public-event model features
         -> causal belief backbone
-        -> masked subjective-belief loss and metrics
+        -> masked 21-class pair loss and metrics
 
 Truth-derived role labels and the legacy ten-field event representation
 are intentionally excluded.

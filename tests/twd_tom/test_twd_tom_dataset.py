@@ -119,22 +119,11 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
     assert item["pair_targets"].shape == (7, 21)
-    assert item["suspicion_targets"].shape == (7, 7)
-    for observer_id in sample["observer_ids"]:
-        subject = f"player{observer_id}"
-        expected_players = sample["suspected_werewolves"][subject]
-        expected = torch.zeros(7)
-        if expected_players is not None:
-            for player in expected_players:
-                expected[PLAYER_TO_ID[player] - 1] = 1.0
-        torch.testing.assert_close(
-            item["suspicion_targets"][observer_id - 1],
-            expected,
-        )
     assert item["reasoning_player_id"].shape == ()
     assert isinstance(
         item["post_completed_public_speech_pre_next_action"], bool
     )
+    assert "suspicion_targets" not in item
 
 
 def test_public_only_first_order_omits_private_tensor_keys():
@@ -164,7 +153,6 @@ def test_public_only_second_order_reuses_existing_public_tensor_contract():
         assert "known_non_werewolves" not in item
         assert item["reasoning_player_id"].shape == ()
         assert item["pair_targets"].shape == (7, 21)
-        assert item["suspicion_targets"].shape == (7, 7)
         assert torch.allclose(
             item["pair_targets"][item["subject_mask"]].sum(dim=-1),
             torch.ones(int(item["subject_mask"].sum().item())),
@@ -517,7 +505,7 @@ def test_collate_preserves_tensor_contracts_and_order_specific_private_fields():
     assert second_batch[
         "post_completed_public_speech_pre_next_action"
     ].shape == (1,)
-    assert second_batch["suspicion_targets"].shape == (1, 7, 7)
+    assert "suspicion_targets" not in second_batch
     assert "known_werewolves" not in second_batch
     assert "known_non_werewolves" not in second_batch
 
@@ -676,43 +664,9 @@ def test_rotated_one_hot_pair_target_uses_canonical_pair_class():
     )
     pair_index = canonical_wolf_pairs().index(rotated_pair)
     target = item["pair_targets"][PLAYER_TO_ID[rotated_subject] - 1]
-    suspicion_target = item["suspicion_targets"][
-        PLAYER_TO_ID[rotated_subject] - 1
-    ]
     assert target.shape == (21,)
     assert target[pair_index] == 1
     assert target.sum() == 1
-    assert suspicion_target.sum() == 2
-    assert all(
-        suspicion_target[PLAYER_TO_ID[player] - 1] == 1
-        for player in rotated_pair
-    )
-
-
-def test_suspicion_targets_keep_empty_valid_and_non_ok_rows_zero():
-    sample = make_public_only_training_sample(2)
-    subjects = [f"player{observer_id}" for observer_id in sample["observer_ids"]]
-    membership_subject, empty_subject, failed_subject = subjects[:3]
-    sample["suspected_werewolves"][membership_subject] = ["player2", "player5"]
-    sample["suspected_werewolves"][empty_subject] = []
-    sample["belief_status"][failed_subject] = "parse_error"
-    sample["belief_errors"][failed_subject] = "synthetic parse failure"
-    sample["suspected_werewolves"][failed_subject] = None
-
-    item = TWDToMDataset([sample], tom_order=2)[0]
-
-    membership_row = item["suspicion_targets"][
-        PLAYER_TO_ID[membership_subject] - 1
-    ]
-    assert membership_row.tolist() == [0, 1, 0, 0, 1, 0, 0]
-    assert item["suspicion_targets"][
-        PLAYER_TO_ID[empty_subject] - 1
-    ].count_nonzero() == 0
-    assert item["subject_mask"][PLAYER_TO_ID[empty_subject] - 1]
-    assert item["suspicion_targets"][
-        PLAYER_TO_ID[failed_subject] - 1
-    ].count_nonzero() == 0
-    assert not item["subject_mask"][PLAYER_TO_ID[failed_subject] - 1]
 
 
 def test_train_rotation_is_deterministic_epoch_dependent_and_train_only():

@@ -5,10 +5,7 @@ import math
 import pytest
 import torch
 
-from werewolf.models.twd_tom.losses import (
-    masked_distribution_cross_entropy,
-    masked_suspicion_binary_cross_entropy,
-)
+from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
 
 
 def tensors():
@@ -84,40 +81,3 @@ def test_seven_class_distribution_is_not_a_formal_loss_space():
     mask[0, 0] = True
     with pytest.raises(ValueError, match="21 pair classes"):
         masked_distribution_cross_entropy(logits, targets, mask)
-
-
-def test_suspicion_bce_averages_players_then_valid_observers():
-    logits = torch.zeros((1, 7, 7), requires_grad=True)
-    targets = torch.zeros_like(logits)
-    targets[0, 1, [1, 4]] = 1.0
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    mask[0, 1] = True
-    loss = masked_suspicion_binary_cross_entropy(logits, targets, mask)
-    assert loss.item() == pytest.approx(math.log(2))
-
-
-def test_suspicion_bce_masks_rows_and_accepts_all_zero_valid_target():
-    logits = torch.zeros((1, 7, 7), requires_grad=True)
-    targets = torch.zeros_like(logits)
-    targets[0, 3].fill_(1.0)
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    mask[0, 2] = True
-    loss = masked_suspicion_binary_cross_entropy(logits, targets, mask)
-    loss.backward()
-    assert loss.item() == pytest.approx(math.log(2))
-    assert logits.grad[0, 2].count_nonzero().item() == 7
-    assert logits.grad[0, ~mask[0]].count_nonzero().item() == 0
-
-
-def test_suspicion_bce_validates_shape_mask_and_target_range():
-    logits = torch.zeros((1, 7, 7))
-    targets = torch.zeros_like(logits)
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    with pytest.raises(ValueError, match="at least one valid observer"):
-        masked_suspicion_binary_cross_entropy(logits, targets, mask)
-    mask[0, 0] = True
-    with pytest.raises(ValueError, match="same shape"):
-        masked_suspicion_binary_cross_entropy(logits, targets[:, :6], mask)
-    targets[0, 0, 0] = 1.1
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        masked_suspicion_binary_cross_entropy(logits, targets, mask)

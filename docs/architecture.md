@@ -51,20 +51,30 @@ game; strict parsing is reserved for offline audit tools.
 
 ```mermaid
 flowchart LR
-    H["Pre-speech public snapshot"] --> BR["PlayingAgentBeliefReporter"]
-    K["Observer legal private knowledge"] --> BR
-    BR --> S["suspected_werewolves"]
-    S --> P["Deterministic pair projection"]
+    H["Frozen pre-speech public snapshot"] --> PR["PlayingAgentBeliefReporter"]
+    K["Observer legal private knowledge"] --> PR
+    H --> POR["PublicOnlyBeliefReporter"]
+    O["Observer identity"] --> POR
+    PR --> OS["Ordinary suspected_werewolves"]
+    POR --> PS["Public-only suspected_werewolves"]
+    OS --> P["Deterministic pair projection"]
+    PS --> P
     K --> P
+    EK["Empty public-only hard knowledge"] --> P
     P --> T["21-class pair target"]
     H --> D["Structured public-event features"]
     T --> DS["TWDToMDataset"]
     D --> DS
 ```
 
-The reporter obtains a detached self-report from each valid observer at one
-shared public-history cutoff. Supervision-side hard knowledge constrains the
-target projection but does not enter second-order model inputs.
+The ordinary reporter obtains a detached, private-conditioned self-report from
+each valid observer. The separate Public-only reporter receives only the same
+frozen public snapshot and observer identity; its raw hard-knowledge mappings
+are empty. Both lineages use the existing deterministic 21-class pair
+projection. Supervision-side hard knowledge in the ordinary lineage constrains
+the target but does not enter second-order model inputs. The canonical
+explicit-stage pipeline remains ordinary; monitored formal collection exposes
+Public-only as an explicit collection mode.
 
 The formal second-order boundary is
 `post_completed_public_speech_pre_next_action_v1`. The effective supervision

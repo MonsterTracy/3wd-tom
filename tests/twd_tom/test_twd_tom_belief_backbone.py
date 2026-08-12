@@ -1,27 +1,23 @@
 """Tests for the single fixed Qwen2 ToM backbone."""
 
 import inspect
-import math
 
 import pytest
 import torch
 from transformers import Qwen2Model
 
 from werewolf.models.twd_tom.belief_backbone import (
-    GPT2_BLOCK_BACKBONE_NAME,
     HIDDEN_SIZE,
     NONE_RELATIVE_PLAYER_INDEX,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
     relative_player_indices,
 )
-from werewolf.models.twd_tom.belief_labels import suspicion_set_to_pair_target
 from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
 from werewolf.models.twd_tom.schema import (
     ACTION_TO_ID,
     NUM_WOLF_PAIR_CLASSES,
     PLAYER_TO_ID,
-    canonical_wolf_pairs,
 )
 
 
@@ -233,219 +229,8 @@ def test_second_order_uses_the_same_single_pair_output_projection():
         torch.full((1, 7), 2.0),
     )
     assert "observer_suspicion_logits" not in output
-    assert second_order.config.enable_suspicion_aux is False
-    assert not hasattr(second_order, "suspicion_projection")
     assert not hasattr(second_order, "pair_output_projection")
     assert not hasattr(second_order, "suspicion_output_projection")
-    assert second_order.config.enable_factorized_pair_head is False
-    assert not hasattr(second_order, "factorized_player_projection")
-
-
-def test_second_order_optional_suspicion_head_reuses_observer_hidden_states():
-    second_order = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=8,
-            enable_suspicion_aux=True,
-        ),
-        tom_order=2,
-    ).eval()
-    captured = {}
-
-    def capture(_module, args):
-        captured["input"] = args[0].detach().clone()
-
-    handle = second_order.suspicion_projection.register_forward_pre_hook(capture)
-    try:
-        with torch.no_grad():
-            output = second_order(**make_features())
-    finally:
-        handle.remove()
-
-    assert output["observer_suspicion_logits"].shape == (1, 7, 7)
-    torch.testing.assert_close(captured["input"], output["observer_hidden_states"])
-    assert second_order.suspicion_projection.in_features == HIDDEN_SIZE
-    assert second_order.suspicion_projection.out_features == 7
-
-
-def test_suspicion_auxiliary_head_rejects_first_order_model():
-    with pytest.raises(ValueError, match="requires tom_order=2"):
-        ToMBeliefBackbone(
-            ToMBeliefBackboneConfig(
-                max_seq_len=8,
-                enable_suspicion_aux=True,
-            ),
-            tom_order=1,
-        )
-
-
-def test_factorized_pair_head_uses_canonical_additive_logits():
-    factorized = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=8,
-            enable_factorized_pair_head=True,
-        ),
-        tom_order=2,
-    ).eval()
-    captured = {}
-
-    def capture(_module, _args, output):
-        captured["player_scores"] = output.detach().clone()
-
-    handle = factorized.factorized_player_projection.register_forward_hook(capture)
-    try:
-        with torch.no_grad():
-            output = factorized(**make_features())
-    finally:
-        handle.remove()
-
-    expected_logits = torch.stack(
-        [
-            captured["player_scores"][..., PLAYER_TO_ID[first] - 1]
-            + captured["player_scores"][..., PLAYER_TO_ID[second] - 1]
-            for first, second in canonical_wolf_pairs()
-        ],
-        dim=-1,
-    )
-    assert output["observer_pair_logits"].shape == (1, 7, 21)
-    torch.testing.assert_close(output["observer_pair_logits"], expected_logits)
-    assert factorized.factorized_player_projection.in_features == HIDDEN_SIZE
-    assert factorized.factorized_player_projection.out_features == 7
-    assert not hasattr(factorized, "output_projection")
-
-
-@pytest.mark.parametrize(
-    "suspected_werewolves",
-    [[], ["player2"], ["player2", "player5"]],
-)
-def test_factorized_pair_head_contains_public_base_two_targets(
-    suspected_werewolves,
-):
-    factorized = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=8,
-            enable_factorized_pair_head=True,
-        ),
-        tom_order=2,
-    ).eval()
-    with torch.no_grad():
-        factorized.factorized_player_projection.weight.zero_()
-        factorized.factorized_player_projection.bias.zero_()
-        for player in suspected_werewolves:
-            factorized.factorized_player_projection.bias[
-                PLAYER_TO_ID[player] - 1
-            ] = math.log(2)
-        probabilities = factorized(**make_features())["pair_probabilities"]
-
-    expected = suspicion_set_to_pair_target(
-        suspected_werewolves,
-        known_werewolves=[],
-        known_non_werewolves=[],
-    )
-    torch.testing.assert_close(probabilities[0, 0], expected)
-
-
-def test_factorized_pair_head_rejects_first_order_and_suspicion_auxiliary():
-    with pytest.raises(ValueError, match="factorized pair head requires tom_order=2"):
-        ToMBeliefBackbone(
-            ToMBeliefBackboneConfig(
-                max_seq_len=8,
-                enable_factorized_pair_head=True,
-            ),
-            tom_order=1,
-        )
-    with pytest.raises(ValueError, match="cannot be enabled together"):
-        ToMBeliefBackbone(
-            ToMBeliefBackboneConfig(
-                max_seq_len=8,
-                enable_suspicion_aux=True,
-                enable_factorized_pair_head=True,
-            ),
-            tom_order=2,
-        )
-
-
-def test_factorized_pair_head_preserves_shared_initialization_and_rng():
-    def build(*, factorized):
-        torch.manual_seed(1234)
-        model = ToMBeliefBackbone(
-            ToMBeliefBackboneConfig(
-                max_seq_len=8,
-                enable_factorized_pair_head=factorized,
-            ),
-            tom_order=2,
-            backbone_name=GPT2_BLOCK_BACKBONE_NAME,
-        )
-        parameters = {
-            name: parameter.detach().clone()
-            for name, parameter in model.named_parameters()
-            if not name.startswith(
-                ("output_projection.", "factorized_player_projection.")
-            )
-        }
-        return parameters, torch.rand(8)
-
-    baseline_parameters, baseline_next_random = build(factorized=False)
-    factorized_parameters, factorized_next_random = build(factorized=True)
-
-    assert factorized_parameters.keys() == baseline_parameters.keys()
-    for name, expected in baseline_parameters.items():
-        torch.testing.assert_close(
-            factorized_parameters[name],
-            expected,
-            rtol=0,
-            atol=0,
-        )
-    torch.testing.assert_close(
-        factorized_next_random,
-        baseline_next_random,
-        rtol=0,
-        atol=0,
-    )
-
-
-def test_suspicion_auxiliary_head_preserves_baseline_initialization_and_rng():
-    torch.manual_seed(1234)
-    baseline = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=8,
-            enable_suspicion_aux=False,
-        ),
-        tom_order=2,
-    )
-    baseline_parameters = {
-        name: parameter.detach().clone()
-        for name, parameter in baseline.named_parameters()
-    }
-    baseline_next_random = torch.rand(8)
-
-    torch.manual_seed(1234)
-    auxiliary = ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(
-            max_seq_len=8,
-            enable_suspicion_aux=True,
-        ),
-        tom_order=2,
-    )
-    auxiliary_parameters = dict(auxiliary.named_parameters())
-    auxiliary_next_random = torch.rand(8)
-
-    assert set(auxiliary_parameters) - set(baseline_parameters) == {
-        "suspicion_projection.weight",
-        "suspicion_projection.bias",
-    }
-    for name, expected in baseline_parameters.items():
-        torch.testing.assert_close(
-            auxiliary_parameters[name],
-            expected,
-            rtol=0,
-            atol=0,
-        )
-    torch.testing.assert_close(
-        auxiliary_next_random,
-        baseline_next_random,
-        rtol=0,
-        atol=0,
-    )
 
 
 def test_second_order_observer_query_attention_shapes_and_padding_mask():
@@ -571,13 +356,7 @@ def test_second_order_rejects_private_inputs():
 
 def test_gpt2_configuration_fields_are_removed():
     parameters = inspect.signature(ToMBeliefBackboneConfig).parameters
-    assert set(parameters) == {
-        "num_players",
-        "pair_class_count",
-        "max_seq_len",
-        "enable_suspicion_aux",
-        "enable_factorized_pair_head",
-    }
+    assert set(parameters) == {"num_players", "pair_class_count", "max_seq_len"}
     with pytest.raises(TypeError):
         ToMBeliefBackboneConfig(d_model=16)  # type: ignore[call-arg]
 

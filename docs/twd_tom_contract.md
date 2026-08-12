@@ -88,15 +88,12 @@ assert the exact pair, and larger sets do not assert that both wolves are
 inside the set. Empty, single-player, and multi-player sets are structurally
 allowed.
 
-Every `K+` player must be present and every `K-` player must be absent. IDs
-are canonical, duplicate-free, and stored in player order. Let `E` be every
-canonical player outside `K-`. With no extra soft suspicion, the sole
-canonical report is `S = K+`; this is `[]` only when `K+` is empty. Reporting
-`S = E` is invalid when `E != K+`, because it gives no relative preference.
-When hard knowledge determines the complete candidate set,
-`S = E = K+` remains valid. Invalid JSON, fields, IDs, hard-knowledge
-conflicts, or noncanonical full-candidate reports fail closed without retry,
-repair, fallback, truth injection, or reuse of an earlier report.
+Every `K+` player must be present and every `K-` player must be absent. Input
+IDs are canonical and duplicate-free; validated output is stored in player
+order. Any set satisfying those constraints is structurally valid, including
+the full legal candidate set. Invalid JSON, fields, IDs, hard-knowledge
+conflicts, or duplicate IDs fail closed without retry, repair, fallback,
+truth injection, or reuse of an earlier report.
 
 The current raw schema is
 `classic7_pre_speech_player_suspicion_v2`; the prompt version remains
@@ -128,9 +125,9 @@ therefore gives a uniform hard-legal distribution. One suspect gives
 containing pairs twice the weight of other legal pairs. Two or more suspects
 use the same per-pair hit count; they do not assert an exact pair or a hard
 support. If every legal candidate is suspected, every legal pair has the
-same hit count and the formula would be uniform, which is why raw v2
-rejects that noncanonical form unless `S = E = K+`. The projection formula
-and version are unchanged. Changing this formula requires a new projection
+same hit count and the normalized target is uniform. This is a valid result
+of the current raw and projection contracts. The projection formula and
+version are unchanged. Changing this formula requires a new projection
 version and does not require recollecting raw suspicion data.
 
 Projected JSONL retains the raw suspicion and audit metadata and adds
