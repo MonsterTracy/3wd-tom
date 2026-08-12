@@ -48,9 +48,17 @@ class _TargetAuditAccumulator:
         self.marginal_sums = torch.zeros(7, dtype=torch.float64)
         self.top_counts = torch.zeros(7, dtype=torch.int64)
         self.pair_entropies: list[float] = []
+        self.max_probabilities: list[float] = []
+        self.top1_top2_margins: list[float] = []
+        self.tv_from_uniform: list[float] = []
+        self.entropy_gaps_from_uniform: list[float] = []
         self.marginal_spreads: list[float] = []
         self.observer_pairwise_tv: list[float] = []
         self.supervised_pair_entropies: list[float] = []
+        self.supervised_max_probabilities: list[float] = []
+        self.supervised_top1_top2_margins: list[float] = []
+        self.supervised_tv_from_uniform: list[float] = []
+        self.supervised_entropy_gaps_from_uniform: list[float] = []
         self.supervised_marginal_spreads: list[float] = []
         self.supervised_observer_pairwise_tv: list[float] = []
 
@@ -86,7 +94,17 @@ class _TargetAuditAccumulator:
             valid_targets
             * valid_targets.clamp_min(torch.finfo(torch.float64).tiny).log()
         ).sum(dim=-1)
+        target_max_probabilities = valid_targets.max(dim=-1).values
+        top_two = valid_targets.topk(2, dim=-1).values
+        top1_top2_margins = top_two[:, 0] - top_two[:, 1]
+        uniform = torch.full_like(valid_targets, 1.0 / 21.0)
+        tv_from_uniform = 0.5 * torch.abs(valid_targets - uniform).sum(dim=-1)
+        entropy_gaps_from_uniform = math.log(21) - entropies
         self.pair_entropies.extend(entropies.tolist())
+        self.max_probabilities.extend(target_max_probabilities.tolist())
+        self.top1_top2_margins.extend(top1_top2_margins.tolist())
+        self.tv_from_uniform.extend(tv_from_uniform.tolist())
+        self.entropy_gaps_from_uniform.extend(entropy_gaps_from_uniform.tolist())
         self.marginal_spreads.extend(
             (marginals.max(dim=-1).values - marginals.min(dim=-1).values).tolist()
         )
@@ -94,6 +112,7 @@ class _TargetAuditAccumulator:
             pairwise_tv = 0.5 * torch.pdist(valid_targets, p=1)
             self.observer_pairwise_tv.append(float(pairwise_tv.mean().item()))
         if supervised_targets.numel():
+            supervised_within_valid = effective_mask[mask]
             supervised_marginals = pair_probabilities_to_belief_marginals(
                 targets
             )[effective_mask]
@@ -104,6 +123,18 @@ class _TargetAuditAccumulator:
                 ).log()
             ).sum(dim=-1)
             self.supervised_pair_entropies.extend(supervised_entropies.tolist())
+            self.supervised_max_probabilities.extend(
+                target_max_probabilities[supervised_within_valid].tolist()
+            )
+            self.supervised_top1_top2_margins.extend(
+                top1_top2_margins[supervised_within_valid].tolist()
+            )
+            self.supervised_tv_from_uniform.extend(
+                tv_from_uniform[supervised_within_valid].tolist()
+            )
+            self.supervised_entropy_gaps_from_uniform.extend(
+                entropy_gaps_from_uniform[supervised_within_valid].tolist()
+            )
             self.supervised_marginal_spreads.extend(
                 (
                     supervised_marginals.max(dim=-1).values
@@ -170,6 +201,18 @@ class _TargetAuditAccumulator:
                 for index, player in enumerate(PLAYER_NAMES)
             },
             "target_pair_entropy": _distribution_summary(self.pair_entropies),
+            "target_max_probability": _distribution_summary(
+                self.max_probabilities
+            ),
+            "target_top1_top2_margin": _distribution_summary(
+                self.top1_top2_margins
+            ),
+            "target_tv_from_uniform": _distribution_summary(
+                self.tv_from_uniform
+            ),
+            "target_entropy_gap_from_uniform": _distribution_summary(
+                self.entropy_gaps_from_uniform
+            ),
             "target_marginal_spread": _distribution_summary(
                 self.marginal_spreads
             ),
@@ -178,6 +221,18 @@ class _TargetAuditAccumulator:
             ),
             "supervised_target_pair_entropy": (
                 _distribution_summary(self.supervised_pair_entropies)
+            ),
+            "supervised_target_max_probability": _distribution_summary(
+                self.supervised_max_probabilities
+            ),
+            "supervised_target_top1_top2_margin": _distribution_summary(
+                self.supervised_top1_top2_margins
+            ),
+            "supervised_target_tv_from_uniform": _distribution_summary(
+                self.supervised_tv_from_uniform
+            ),
+            "supervised_target_entropy_gap_from_uniform": _distribution_summary(
+                self.supervised_entropy_gaps_from_uniform
             ),
             "supervised_target_marginal_spread": (
                 _distribution_summary(self.supervised_marginal_spreads)

@@ -1,6 +1,7 @@
 """Tests for the read-only second-order target seat audit."""
 
 import json
+import math
 
 import pytest
 
@@ -61,6 +62,26 @@ def test_seven_epoch_rotation_audit_is_seat_symmetric_and_read_only(tmp_path):
         assert "supervised_target_pair_entropy" in summary
         assert "supervised_target_marginal_spread" in summary
         assert "supervised_target_observer_pairwise_tv" in summary
+        for prefix, row_count in (
+            ("target", summary["valid_observer_row_count"]),
+            ("supervised_target", summary["supervised_other_player_row_count"]),
+        ):
+            for suffix in (
+                "max_probability",
+                "top1_top2_margin",
+                "tv_from_uniform",
+                "entropy_gap_from_uniform",
+            ):
+                assert summary[f"{prefix}_{suffix}"]["count"] == row_count
+            assert summary[f"{prefix}_tv_from_uniform"]["min"] >= 0.0
+            assert summary[f"{prefix}_entropy_gap_from_uniform"]["min"] >= (
+                -1e-12
+            )
+            assert summary[f"{prefix}_entropy_gap_from_uniform"][
+                "mean"
+            ] == pytest.approx(
+                math.log(21) - summary[f"{prefix}_pair_entropy"]["mean"]
+            )
         assert set(summary["supervised_rows_by_observer_id"]) == set(
             PLAYER_NAMES
         )
