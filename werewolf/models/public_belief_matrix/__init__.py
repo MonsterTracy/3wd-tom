@@ -5,12 +5,13 @@
 
 The package currently provides deterministic target contracts, a shared
 structured public-prefix contract, a causal matrix backbone, masked row loss,
-and deterministic matrix metrics. It does not yet implement dataset
-materialization, collection, training, or evaluation pipelines.
+deterministic matrix metrics, a stateless reporter, and raw symbolic collection.
+It does not yet implement dataset materialization, training, or evaluation.
 """
 
 from werewolf.models.public_belief_matrix.public_prefix import (
     build_public_belief_matrix_visible_prefix,
+    render_public_belief_matrix_visible_prefix,
 )
 from werewolf.models.public_belief_matrix.backbone import (
     PublicBeliefMatrixBackbone,
@@ -36,6 +37,7 @@ __all__ = [
     "PublicBeliefMatrixBackboneConfig",
     "PublicBeliefMatrixTarget",
     "build_public_belief_matrix_visible_prefix",
+    "render_public_belief_matrix_visible_prefix",
     "masked_mean_row_cross_entropy",
     "masked_mean_row_entropy",
     "masked_row_soft_target_cross_entropy",

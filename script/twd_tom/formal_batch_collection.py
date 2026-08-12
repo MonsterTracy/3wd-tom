@@ -1,4 +1,4 @@
-"""Run one frozen ten-game playing-agent belief-set collection batch."""
+"""Run one monitored formal belief-label collection batch."""
 
 from __future__ import annotations
 
@@ -17,6 +17,13 @@ from run_random import (
     PRIVATE_CONDITIONED_COLLECTION_MODE,
     PUBLIC_ONLY_COLLECTION_MODE,
 )
+from werewolf.models.public_belief_matrix.collection import (
+    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
+    PUBLIC_BELIEF_MATRIX_PROVENANCE,
+    PUBLIC_BELIEF_MATRIX_SAMPLE_SCHEMA_VERSION,
+    PUBLIC_BELIEF_MATRIX_VISIBLE_PREFIX_SCHEMA_VERSION,
+)
+from werewolf.models.public_belief_matrix.reporter import PUBLIC_BELIEF_MATRIX_PROMPT_VERSION
 from werewolf.models.twd_tom.samples import (
     PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     SAMPLE_SCHEMA_VERSION,
@@ -40,6 +47,8 @@ class FormalBatchConfig:
             raise ValueError("output directory name must contain batch_id")
         if self.collection_mode not in COLLECTION_MODES:
             raise ValueError(f"collection_mode must be one of {COLLECTION_MODES}")
+        if self.collection_mode != PUBLIC_BELIEF_MATRIX_COLLECTION_MODE and self.monitored.game_count != 10:
+            raise ValueError("existing collection modes require exactly ten games")
 
 
 def run_formal_batch(config: FormalBatchConfig):
@@ -49,6 +58,9 @@ def run_formal_batch(config: FormalBatchConfig):
         "formal_batch_only": True,
         "batch_id": config.batch_id,
         "schema_version": (
+            PUBLIC_BELIEF_MATRIX_SAMPLE_SCHEMA_VERSION
+            if config.collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE
+            else
             PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
             if config.collection_mode == PUBLIC_ONLY_COLLECTION_MODE
             else SAMPLE_SCHEMA_VERSION
@@ -62,6 +74,17 @@ def run_formal_batch(config: FormalBatchConfig):
                 "true_role_visible": False,
                 "private_memory_visible": False,
                 "prompt_version": PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+            }
+        )
+    elif config.collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE:
+        mode_metadata.update(
+            {
+                **PUBLIC_BELIEF_MATRIX_PROVENANCE,
+                "visible_prefix_schema_version": PUBLIC_BELIEF_MATRIX_VISIBLE_PREFIX_SCHEMA_VERSION,
+                "prompt_version": PUBLIC_BELIEF_MATRIX_PROMPT_VERSION,
+                "playing_agent_context_reused": False,
+                "true_role_visible": False,
+                "private_memory_visible": False,
             }
         )
     return run_monitored_collection(
@@ -79,7 +102,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-id", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--game-count", required=True, type=int)
-    parser.add_argument("--seeds", required=True, type=int, nargs=10)
+    parser.add_argument("--seeds", required=True, type=int, nargs="+")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-gameplay-calls-per-game", required=True, type=int)
     parser.add_argument("--max-belief-calls-per-game", required=True, type=int)

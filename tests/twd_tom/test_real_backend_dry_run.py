@@ -15,6 +15,10 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
 )
 from werewolf.models import SpeechPerceiver
+from werewolf.models.public_belief_matrix.public_prefix import (
+    build_public_belief_matrix_visible_prefix,
+)
+from werewolf.models.public_belief_matrix.reporter import PublicBeliefMatrixReporter
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     PlayingAgentBeliefReporter,
@@ -493,6 +497,58 @@ def test_report_nonce_and_response_are_absent_from_next_action(tmp_path):
     assert belief["state_hash_before"] == belief["state_hash_after"]
     assert "TWD_TOM_REPORT_AUDIT_" not in serialized
     assert '{"suspected_werewolves":[]}' not in serialized
+
+
+def test_audited_pbm_request_has_no_nonce_or_snapshot_metadata(tmp_path):
+    session, writer = _new_session(tmp_path)
+    fake = FakeBackend(
+        ['{"suspected_werewolves":[]}', '{"suspected_werewolves":[]}']
+    )
+    audited = _backend(fake, session)
+    prefix = build_public_belief_matrix_visible_prefix(
+        [
+            {"event_idx": 0, "event_type": "phase_change", "phase": "1_day_speech"},
+            {"event_idx": 1, "event_type": "turn_start", "speaker": "player1"},
+            {
+                "event_idx": 2,
+                "event_type": "public_speech",
+                "speaker": "player1",
+                "raw_text": "RAW-TEXT-CANARY",
+                "sp_actions": [],
+            },
+        ]
+    )
+    cutoff = SimpleNamespace(
+        game_id="GAME-ID-CANARY",
+        step_idx=987654,
+        phase="PHASE-CANARY",
+        speaker_id=7,
+        public_action_count=0,
+        public_history_digest="d" * 64,
+    )
+    reporter = PublicBeliefMatrixReporter(audit_hook=session)
+    for observer in ("player1", "player2"):
+        assert reporter.report(
+            visible_prefix=prefix,
+            observer_id=observer,
+            cutoff=cutoff,
+            backend=audited,
+            backend_id="fake-backend",
+            model_name="fake-model",
+        )["status"] == "ok"
+    session.finish_game()
+    writer.close()
+
+    prompts = [call["messages"][0]["content"] for call in fake.calls]
+    for prompt in prompts:
+        assert "GAME-ID-CANARY" not in prompt
+        assert "987654" not in prompt
+        assert "PHASE-CANARY" not in prompt
+        assert "TWD_TOM_REPORT_AUDIT_" not in prompt
+        assert "RAW-TEXT-CANARY" not in prompt
+    assert prompts[0].replace("observer=player1", "observer=ROW") == (
+        prompts[1].replace("observer=player2", "observer=ROW")
+    )
 
 
 def test_audit_records_strict_belief_and_pipe_parser_contracts(

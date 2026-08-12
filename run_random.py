@@ -1,8 +1,8 @@
 """Run one seven-player Werewolf rollout.
 
-When subjective ToM collection is enabled, samples are collected immediately
-before each public speech is generated. The ToM collector never receives the
-complete role assignment.
+Private-conditioned and public-only ToM samples are collected immediately
+before each public speech. Public Belief Matrix samples are collected after a
+speech completes and before the next action. Collectors never receive roles.
 """
 
 from __future__ import annotations
@@ -26,6 +26,12 @@ from werewolf.backends import (
 )
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
+from werewolf.models.public_belief_matrix.collection import (
+    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
+    PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY,
+    PublicBeliefMatrixSampleCollector,
+)
+from werewolf.models.public_belief_matrix.reporter import PublicBeliefMatrixReporter
 from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
     PublicOnlyBeliefSnapshotCollector,
@@ -52,6 +58,7 @@ PUBLIC_ONLY_COLLECTION_MODE = "public_only"
 COLLECTION_MODES = (
     PRIVATE_CONDITIONED_COLLECTION_MODE,
     PUBLIC_ONLY_COLLECTION_MODE,
+    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
 )
 
 
@@ -93,9 +100,9 @@ def eval(
     The environment needs the hidden role assignment to simulate the
     game, but that assignment is never passed to the ToM collector.
 
-    A sample is collected before every public ``speech`` or ``speech_pk``
-    action. All readonly reports therefore use exactly the public history that
-    existed before the current speaker generates the utterance.
+    Existing ToM routes collect before each public ``speech`` or ``speech_pk``.
+    The PBM route collects after that speech completes and before the next
+    action, using only the causal public prefix through the completed speech.
     """
 
     for agent in agent_list:
@@ -115,6 +122,11 @@ def eval(
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
 
+        post_speech_collection = (
+            sample_collector is not None
+            and getattr(sample_collector, "collection_timing", None)
+            == PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY
+        )
         if (
             trigger in PUBLIC_SPEECH_EVENTS
         ):
@@ -125,7 +137,7 @@ def eval(
                     speaker_id=current_act_idx,
                     public_events=env.public_events,
                 )
-            if sample_collector is not None:
+            if sample_collector is not None and not post_speech_collection:
                 sample_collector.record(
                     env,
                     step_idx=step_idx,
@@ -154,6 +166,15 @@ def eval(
         obs, _, done, info = env.step(
             action
         )
+
+        if trigger in PUBLIC_SPEECH_EVENTS and post_speech_collection:
+            sample_collector.record(
+                env,
+                step_idx=step_idx,
+                trigger=trigger,
+                phase=action_phase,
+                speaker_id=current_act_idx,
+            )
 
         step_idx += 1
 
@@ -656,7 +677,8 @@ def build_twd_tom_sample_collector(
     game_id,
     report_audit=None,
     collection_mode=PRIVATE_CONDITIONED_COLLECTION_MODE,
-) -> TWDToMSampleCollector:
+    reporter_dispatch=None,
+):
     """Build the selected readonly belief collection stack."""
 
     if collection_mode == PRIVATE_CONDITIONED_COLLECTION_MODE:
@@ -693,6 +715,15 @@ def build_twd_tom_sample_collector(
             dispatches,
         )
         sample_builder = make_public_only_twd_tom_sample
+    elif collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE:
+        if not isinstance(reporter_dispatch, dict):
+            raise TypeError("PBM collection requires one shared reporter_dispatch")
+        return PublicBeliefMatrixSampleCollector(
+            output_path=output_path,
+            game_id=game_id,
+            reporter=PublicBeliefMatrixReporter(audit_hook=report_audit),
+            reporter_dispatch=reporter_dispatch,
+        )
     else:
         raise ValueError(f"collection_mode must be one of {COLLECTION_MODES}")
 

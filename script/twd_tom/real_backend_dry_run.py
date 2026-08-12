@@ -32,7 +32,7 @@ from run_random import (
     build_twd_tom_sample_collector,
     eval as run_game,
 )
-from werewolf.backends import load_named_backends
+from werewolf.backends import load_named_backends, resolve_backend
 from werewolf.models.twd_tom.public_events import (
     public_speech_actions,
     structured_input_digest,
@@ -416,6 +416,7 @@ class DryRunAuditSession:
         agent_backend_id: str,
         agent_model_id: str,
         report_prompt: str,
+        decorate_prompt: bool = True,
     ) -> tuple[str, str]:
         observer = normalize_player(observer_id)
         if not isinstance(agent_model_id, str) or not agent_model_id.strip():
@@ -434,7 +435,13 @@ class DryRunAuditSession:
             "state_hash_before": None,
             "state_hash_after": None,
         }
-        decorated = report_prompt + f"\nreport_audit_nonce: {nonce}"
+        if not isinstance(decorate_prompt, bool):
+            raise TypeError("decorate_prompt must be boolean")
+        decorated = (
+            report_prompt + f"\nreport_audit_nonce: {nonce}"
+            if decorate_prompt
+            else report_prompt
+        )
         return report_id, decorated
 
     @contextmanager
@@ -930,6 +937,17 @@ def run_real_backend_game(
         game_id=game_id,
         report_audit=session,
         collection_mode=collection_mode,
+        reporter_dispatch=(
+            {
+                "backend": resolve_backend(
+                    normalized["parser"]["backend"], audited_backends
+                ),
+                "backend_id": normalized["parser"]["backend"],
+                "model_name": normalized["parser"]["model"],
+            }
+            if collection_mode == "public_belief_matrix"
+            else None
+        ),
     )
     if collector_wrapper is not None:
         collector = collector_wrapper(collector)

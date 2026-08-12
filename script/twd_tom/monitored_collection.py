@@ -19,6 +19,10 @@ from run_random import (
     PRIVATE_CONDITIONED_COLLECTION_MODE,
     PUBLIC_ONLY_COLLECTION_MODE,
 )
+from werewolf.models.public_belief_matrix.collection import (
+    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
+    validate_public_belief_matrix_sample,
+)
 from script.twd_tom import real_backend_dry_run as harness
 from werewolf.models.twd_tom.samples import (
     PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
@@ -248,6 +252,16 @@ class CollectionQualityMonitor:
         )
         game_id = sample["game_id"]
         phase = sample["phase"]
+        if self.collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE:
+            for report in sample["observer_reports"]:
+                self.observe_report(
+                    game_id=game_id,
+                    phase=phase,
+                    observer=report["observer"],
+                    status=report["status"],
+                    error=report["error"],
+                )
+            return
         for observer in sorted(sample["belief_status"]):
             self.observe_report(
                 game_id=game_id,
@@ -307,6 +321,17 @@ def _validate_sample_safety(
     *,
     collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
 ) -> None:
+    if collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE:
+        try:
+            validate_public_belief_matrix_sample(sample)
+        except (TypeError, ValueError) as exc:
+            raise CollectionSampleSafetyViolation("old_schema", str(exc)) from exc
+        nested_fields = set(_walk_field_names(sample))
+        if nested_fields & (_PRIVATE_FIELDS | _OTHER_PLAYER_PRIVATE_FIELDS):
+            raise CollectionSampleSafetyViolation(
+                "private_serialization", "PBM sample contains a private field"
+            )
+        return
     if not isinstance(sample, Mapping):
         raise CollectionSampleSafetyViolation(
             "old_schema", "collector returned a non-mapping sample"
@@ -427,6 +452,10 @@ class _MonitoredCollector:
         self._write = collector.write
         collector.write = self._validated_write
 
+    @property
+    def collection_timing(self):
+        return getattr(self.collector, "collection_timing", None)
+
     def _validated_write(self, sample) -> None:
         _validate_sample_safety(
             sample,
@@ -461,10 +490,10 @@ class MonitoredCollectionConfig:
     audit_only_metadata: bool
 
     def __post_init__(self) -> None:
-        if self.game_count != 10:
-            raise ValueError("game_count must be exactly 10")
-        if len(self.seeds) != 10 or len(set(self.seeds)) != 10:
-            raise ValueError("seeds must contain exactly ten distinct values")
+        if isinstance(self.game_count, bool) or not isinstance(self.game_count, int) or self.game_count <= 0:
+            raise ValueError("game_count must be a positive integer")
+        if len(self.seeds) != self.game_count or len(set(self.seeds)) != self.game_count:
+            raise ValueError("seeds must contain game_count distinct values")
         if any(isinstance(seed, bool) or not isinstance(seed, int) for seed in self.seeds):
             raise TypeError("seeds must be integers")
         if self.privacy_safe_logging is not True:
@@ -558,7 +587,7 @@ def run_monitored_collection(
     mode_metadata: Mapping[str, Any],
     collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
 ) -> dict[str, Any]:
-    """Run one ten-game collection mode through the frozen monitor."""
+    """Run one collection batch through the frozen monitor."""
 
     if artifact_prefix != "formal_batch":
         raise ValueError("unsupported collection artifact prefix")
@@ -586,7 +615,7 @@ def run_monitored_collection(
         **dict(mode_metadata),
         "formal_training_data": False,
         "source_commit": source_commit,
-        "requested_game_count": 10,
+        "requested_game_count": config.game_count,
         "seeds": list(config.seeds),
         "configured_budgets": {
             "max_gameplay_calls_per_game": config.max_gameplay_calls_per_game,
@@ -687,7 +716,7 @@ def run_monitored_collection(
         **dict(mode_metadata),
         "status": status,
         "stop_reason": stop_reason,
-        "requested_game_count": 10,
+        "requested_game_count": config.game_count,
         "started_game_count": started_game_count,
         "completed_game_count": completed_game_count,
         "partial_game_count": partial_game_count,

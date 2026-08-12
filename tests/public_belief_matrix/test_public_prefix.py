@@ -1,9 +1,11 @@
 from copy import deepcopy
 
 import torch
+import pytest
 
 from werewolf.models.public_belief_matrix.public_prefix import (
     build_public_belief_matrix_visible_prefix,
+    render_public_belief_matrix_visible_prefix,
 )
 from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
 from werewolf.models.twd_tom.schema import ACTION_TO_ID, PLAYER_TO_ID
@@ -50,6 +52,23 @@ def test_visible_prefix_excludes_raw_text_and_retains_structured_actions():
     _assert_same_features(first, second)
     assert ACTION_TO_ID["point_as_werewolf"] in first["action_ids"].tolist()
     assert PLAYER_TO_ID["player3"] in first["object_ids"].tolist()
+    assert render_public_belief_matrix_visible_prefix(first) == (
+        render_public_belief_matrix_visible_prefix(second)
+    )
+
+
+def test_renderer_changes_for_structured_action_and_fails_closed_on_bad_vocab():
+    first = build_public_belief_matrix_visible_prefix(_speech_events())
+    second = build_public_belief_matrix_visible_prefix(
+        _speech_events(sp_actions=[["player1", "support", "player3"]])
+    )
+    assert render_public_belief_matrix_visible_prefix(first) != (
+        render_public_belief_matrix_visible_prefix(second)
+    )
+    invalid = {key: value.clone() for key, value in first.items()}
+    invalid["event_type_ids"][0] = 999
+    with pytest.raises(ValueError, match="vocabulary ID"):
+        render_public_belief_matrix_visible_prefix(invalid)
 
 
 def test_empty_action_speech_retains_the_public_speech_boundary():
@@ -59,6 +78,9 @@ def test_empty_action_speech_retains_the_public_speech_boundary():
 
     assert STRUCTURED_TOKEN_TO_ID["public_speech"] in (
         features["event_type_ids"].tolist()
+    )
+    assert '"event_type":"public_speech"' in (
+        render_public_belief_matrix_visible_prefix(features)
     )
 
 

@@ -10,6 +10,9 @@ from run_random import (
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
 )
+from werewolf.models.public_belief_matrix.collection import (
+    PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY,
+)
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
 from werewolf.speech.private_belief_perceiver import (
@@ -291,6 +294,35 @@ def test_eval_collects_all_alive_observers_before_public_speech():
         agent.reset_count == 1
         for agent in agents
     )
+
+
+def test_eval_collects_public_belief_matrix_after_completed_speech():
+    env = ScriptedEnvironment(
+        transitions=[
+            ({"current_act_idx": 2, "phase": "1_day_vote"}, 0, False, {}),
+            (
+                {"current_act_idx": 2, "phase": "1_day_vote"},
+                0,
+                True,
+                {"Werewolf": -1},
+            ),
+        ]
+    )
+    agents = [
+        ScriptedAgent([("speech", "completed speech")]),
+        ScriptedAgent([("vote", 1)]),
+    ]
+    collector = RecordingSampleCollector()
+    collector.collection_timing = PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY
+
+    eval(env, agents, roles_=["Werewolf", "Villager"], sample_collector=collector)
+
+    assert len(collector.calls) == 1
+    call = collector.calls[0]
+    assert call["environment_step_count"] == 1
+    assert call["observer_ids"] is None
+    assert call["public_history"][-1]["event_type"] == "public_speech"
+    assert call["public_history"][-1]["raw_text"] == "completed speech"
 
 
 def test_eval_collects_speech_pk():
