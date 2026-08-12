@@ -488,6 +488,7 @@ class MonitoredCollectionConfig:
     max_wall_seconds: float
     privacy_safe_logging: bool
     audit_only_metadata: bool
+    logs_root: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.game_count, bool) or not isinstance(self.game_count, int) or self.game_count <= 0:
@@ -595,6 +596,7 @@ def run_monitored_collection(
     source_commit = harness._runtime_source_commit()
     output_dir = harness.validate_output_dir(
         config.output_dir,
+        logs_root=config.logs_root,
         required_name_token=required_name_token,
     )
     runtime_path = Path(config.runtime_config_path).resolve()

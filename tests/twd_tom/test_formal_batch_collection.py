@@ -152,6 +152,78 @@ def test_formal_cli_and_config_cannot_enable_backend_retry(tmp_path):
     assert exc_info.value.code == 2
 
 
+def test_formal_cli_passes_optional_logs_root_to_monitored_config(
+    tmp_path, monkeypatch
+):
+    captured = []
+
+    def fake_run(config):
+        captured.append(config)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(formal, "run_formal_batch", fake_run)
+    logs_root = tmp_path / "data" / "project" / "logs"
+    output_dir = logs_root / "formal_batch_batch_0001"
+    formal.main(
+        [
+            "--batch-id",
+            "batch_0001",
+            "--config",
+            str(tmp_path / "runtime.yaml"),
+            "--game-count",
+            "10",
+            "--seeds",
+            *(str(seed) for seed in range(2001, 2011)),
+            "--logs-root",
+            str(logs_root),
+            "--output-dir",
+            str(output_dir),
+            "--max-gameplay-calls-per-game",
+            "96",
+            "--max-belief-calls-per-game",
+            "224",
+            "--max-total-calls-per-game",
+            "320",
+            "--max-wall-seconds-per-game",
+            "3600",
+            "--max-total-calls",
+            "2000",
+            "--max-wall-seconds",
+            "18000",
+            "--privacy-safe-logging",
+            "--audit-only-metadata",
+        ]
+    )
+    assert captured[0].monitored.logs_root == str(logs_root)
+
+
+def test_formal_cli_defaults_logs_root_to_none(tmp_path, monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        formal,
+        "run_formal_batch",
+        lambda config: captured.append(config) or {"status": "ok"},
+    )
+    formal.main(
+        [
+            "--batch-id", "batch_0001",
+            "--config", str(tmp_path / "runtime.yaml"),
+            "--game-count", "10",
+            "--seeds", *(str(seed) for seed in range(2001, 2011)),
+            "--output-dir", str(tmp_path / "logs" / "formal_batch_batch_0001"),
+            "--max-gameplay-calls-per-game", "96",
+            "--max-belief-calls-per-game", "224",
+            "--max-total-calls-per-game", "320",
+            "--max-wall-seconds-per-game", "3600",
+            "--max-total-calls", "2000",
+            "--max-wall-seconds", "18000",
+            "--privacy-safe-logging",
+            "--audit-only-metadata",
+        ]
+    )
+    assert captured[0].monitored.logs_root is None
+
+
 def test_fake_formal_batch_reuses_monitor_and_writes_final_acceptance_metadata(
     tmp_path, monkeypatch, suspicion_sample_factory
 ):

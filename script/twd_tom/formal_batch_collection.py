@@ -104,6 +104,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--game-count", required=True, type=int)
     parser.add_argument("--seeds", required=True, type=int, nargs="+")
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--logs-root")
     parser.add_argument("--max-gameplay-calls-per-game", required=True, type=int)
     parser.add_argument("--max-belief-calls-per-game", required=True, type=int)
     parser.add_argument("--max-total-calls-per-game", required=True, type=int)
@@ -135,6 +136,7 @@ def main(argv: Sequence[str] | None = None):
         max_wall_seconds=args.max_wall_seconds,
         privacy_safe_logging=args.privacy_safe_logging,
         audit_only_metadata=args.audit_only_metadata,
+        logs_root=args.logs_root,
     )
     summary = run_formal_batch(
         FormalBatchConfig(

@@ -804,9 +804,14 @@ def validate_output_dir(
     raw_path: str,
     *,
     cwd: Path | None = None,
+    logs_root: str | None = None,
     required_name_token: str = "dry_run",
 ) -> Path:
-    root = ((cwd or Path.cwd()) / "logs").resolve()
+    root = (
+        ((cwd or Path.cwd()) / "logs").resolve()
+        if logs_root is None
+        else Path(logs_root).resolve()
+    )
     output = Path(raw_path).resolve()
     try:
         relative = output.relative_to(root)

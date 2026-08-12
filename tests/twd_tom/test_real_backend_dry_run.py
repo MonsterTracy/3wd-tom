@@ -988,6 +988,30 @@ def test_output_dir_and_config_require_explicit_safe_two_game_values(tmp_path):
     with pytest.raises(ValueError, match="distinct"):
         dry_run.RealBackendDryRunConfig(**{**base, "seeds": (42, 42)})
 
+
+def test_explicit_logs_root_is_bounded_and_checks_only_relative_components(
+    tmp_path,
+):
+    logs_root = tmp_path / "data" / "project" / "logs"
+    safe = logs_root / "formal_batch_test"
+    assert dry_run.validate_output_dir(
+        str(safe),
+        logs_root=str(logs_root),
+        required_name_token="formal_batch",
+    ) == safe.resolve()
+
+    for unsafe in (
+        logs_root.parent / "formal_batch_test",
+        logs_root / ".." / "formal_batch_test",
+        logs_root / "data" / "formal_batch_test",
+    ):
+        with pytest.raises(ValueError):
+            dry_run.validate_output_dir(
+                str(unsafe),
+                logs_root=str(logs_root),
+                required_name_token="formal_batch",
+            )
+
     required_cli = [
         "--config",
         "missing.yaml",
