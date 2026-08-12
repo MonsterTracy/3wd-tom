@@ -272,6 +272,51 @@ def test_suspicion_auxiliary_head_rejects_first_order_model():
         )
 
 
+def test_suspicion_auxiliary_head_preserves_baseline_initialization_and_rng():
+    torch.manual_seed(1234)
+    baseline = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(
+            max_seq_len=8,
+            enable_suspicion_aux=False,
+        ),
+        tom_order=2,
+    )
+    baseline_parameters = {
+        name: parameter.detach().clone()
+        for name, parameter in baseline.named_parameters()
+    }
+    baseline_next_random = torch.rand(8)
+
+    torch.manual_seed(1234)
+    auxiliary = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(
+            max_seq_len=8,
+            enable_suspicion_aux=True,
+        ),
+        tom_order=2,
+    )
+    auxiliary_parameters = dict(auxiliary.named_parameters())
+    auxiliary_next_random = torch.rand(8)
+
+    assert set(auxiliary_parameters) - set(baseline_parameters) == {
+        "suspicion_projection.weight",
+        "suspicion_projection.bias",
+    }
+    for name, expected in baseline_parameters.items():
+        torch.testing.assert_close(
+            auxiliary_parameters[name],
+            expected,
+            rtol=0,
+            atol=0,
+        )
+    torch.testing.assert_close(
+        auxiliary_next_random,
+        baseline_next_random,
+        rtol=0,
+        atol=0,
+    )
+
+
 def test_second_order_observer_query_attention_shapes_and_padding_mask():
     second_order = ToMBeliefBackbone(
         ToMBeliefBackboneConfig(max_seq_len=8),

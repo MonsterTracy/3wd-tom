@@ -387,13 +387,20 @@ class ToMBeliefBackbone(nn.Module):
             HIDDEN_SIZE,
             self.config.pair_class_count,
         )
-        if self.config.enable_suspicion_aux:
-            self.suspicion_projection = nn.Linear(
-                HIDDEN_SIZE,
-                self.config.num_players,
-            )
 
         self._reset_parameters()
+        if self.config.enable_suspicion_aux:
+            with torch.random.fork_rng(devices=[]):
+                self.suspicion_projection = nn.Linear(
+                    HIDDEN_SIZE,
+                    self.config.num_players,
+                )
+                nn.init.normal_(
+                    self.suspicion_projection.weight,
+                    mean=0.0,
+                    std=0.02,
+                )
+                nn.init.zeros_(self.suspicion_projection.bias)
 
     def _reset_parameters(self) -> None:
         """Initialize project-owned embeddings and output layers."""
@@ -452,13 +459,6 @@ class ToMBeliefBackbone(nn.Module):
             std=0.02,
         )
         nn.init.zeros_(self.output_projection.bias)
-        if self.config.enable_suspicion_aux:
-            nn.init.normal_(
-                self.suspicion_projection.weight,
-                mean=0.0,
-                std=0.02,
-            )
-            nn.init.zeros_(self.suspicion_projection.bias)
 
     def forward(
         self,
