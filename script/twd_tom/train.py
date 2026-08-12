@@ -51,6 +51,7 @@ from werewolf.models.twd_tom.schema import (
     NUM_WOLF_PAIR_CLASSES,
     PAIR_ORDERING,
     PROJECTION_VERSION,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
     SECOND_ORDER_TARGET_ENCODING,
     SECOND_ORDER_OBSERVER_READOUT,
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
@@ -436,7 +437,58 @@ def build_training_data_loaders(
             f"count={len(overlapping_game_ids)}, "
             f"examples={overlapping_game_ids[:10]}"
         )
+    _training_dataset_contract(train_dataset, validation_dataset)
     return train_loader, train_dataset, validation_loader, validation_dataset
+
+
+def _training_dataset_contract(
+    train_dataset: TWDToMDataset,
+    validation_dataset: TWDToMDataset,
+) -> dict[str, Any]:
+    """Return one homogeneous contract already validated by both Datasets."""
+
+    fields = (
+        "belief_information_scope",
+        "model_input_scope",
+        "private_fields_usage",
+        "source_schema_version",
+        "annotation_schema_version",
+        "label_provenance",
+        "source_label_provenance",
+    )
+    contract = {}
+    for field_name in fields:
+        train_value = getattr(train_dataset, field_name)
+        validation_value = getattr(validation_dataset, field_name)
+        if train_value != validation_value:
+            raise ValueError(
+                f"train and validation {field_name} values differ"
+            )
+        contract[field_name] = train_value
+    return contract
+
+
+def _public_only_lineage_metadata(
+    dataset_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    if dataset_contract["belief_information_scope"] != (
+        PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
+    ):
+        return {}
+    return {
+        "schema_version": dataset_contract["source_schema_version"],
+        "belief_information_scope": dataset_contract[
+            "belief_information_scope"
+        ],
+        "private_fields_usage": dataset_contract["private_fields_usage"],
+        "annotation_schema_version": dataset_contract[
+            "annotation_schema_version"
+        ],
+        "label_provenance": dataset_contract["label_provenance"],
+        "source_label_provenance": dataset_contract[
+            "source_label_provenance"
+        ],
+    }
 
 
 def _second_order_batch_subject_mask(
@@ -853,13 +905,21 @@ def checkpoint_payload(
     best_epoch: int,
     best_validation_mean_loss: float,
     run_provenance: Mapping[str, Any],
+    dataset_contract: Mapping[str, Any] | None = None,
     learning_rate_schedule: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if dataset_contract is None:
+        dataset_contract = {
+            "belief_information_scope": "private_conditioned",
+            "source_schema_version": SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
+        }
     selection_metric_value = float(validation_metrics["mean_loss"])
     return {
-        "schema_version": SAMPLE_SCHEMA_VERSION,
+        "schema_version": dataset_contract["source_schema_version"],
         "tom_order": config.tom_order,
-        "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
+        "model_input_scope": dataset_contract["model_input_scope"],
+        **_public_only_lineage_metadata(dataset_contract),
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -910,6 +970,18 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         validation_loader,
         validation_dataset,
     ) = build_training_data_loaders(config)
+    dataset_contract = _training_dataset_contract(
+        train_dataset,
+        validation_dataset,
+    )
+    public_only_metadata = _public_only_lineage_metadata(dataset_contract)
+    if public_only_metadata:
+        run_provenance = {
+            **run_provenance,
+            "schema_version": dataset_contract["source_schema_version"],
+            "model_input_scope": dataset_contract["model_input_scope"],
+            **public_only_metadata,
+        }
     model = build_model(config).to(device)
     optimizer = AdamW(
         model.parameters(),
@@ -953,6 +1025,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             {
                 "epoch": epoch,
                 **task_contract,
+                **public_only_metadata,
                 "train": train_metrics,
                 "validation": validation_metrics,
                 "is_best": is_best,
@@ -976,6 +1049,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                     best_epoch=best_epoch,
                     best_validation_mean_loss=best_validation_mean_loss,
                     run_provenance=run_provenance,
+                    dataset_contract=dataset_contract,
                     learning_rate_schedule=learning_rate_schedule,
                 ),
                 best_checkpoint_path,
@@ -993,6 +1067,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             best_epoch=best_epoch,
             best_validation_mean_loss=best_validation_mean_loss,
             run_provenance=run_provenance,
+            dataset_contract=dataset_contract,
             learning_rate_schedule=learning_rate_schedule,
         ),
         last_checkpoint_path,
@@ -1002,7 +1077,8 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     summary = {
         "status": "ok",
         "tom_order": config.tom_order,
-        "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
+        "model_input_scope": dataset_contract["model_input_scope"],
+        **public_only_metadata,
         **task_contract,
         "train_dataset": run_provenance["train_dataset_path"],
         "validation_dataset": run_provenance["validation_dataset_path"],

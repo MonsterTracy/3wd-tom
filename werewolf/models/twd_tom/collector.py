@@ -22,6 +22,7 @@ class TWDToMSampleCollector:
         snapshot_collector,
         *,
         game_id: str,
+        sample_builder=make_twd_tom_sample,
     ):
         if not isinstance(
             output_path,
@@ -64,6 +65,9 @@ class TWDToMSampleCollector:
         self.snapshot_collector = (
             snapshot_collector
         )
+        if not callable(sample_builder):
+            raise TypeError("sample_builder must be callable")
+        self.sample_builder = sample_builder
 
         self._file = open(
             absolute_path,
@@ -129,7 +133,7 @@ class TWDToMSampleCollector:
             env=env,
         )
 
-        sample = make_twd_tom_sample(
+        sample = self.sample_builder(
             public_snapshot=public_snapshot,
             reports=reports,
         )

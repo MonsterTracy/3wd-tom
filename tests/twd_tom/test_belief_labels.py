@@ -79,6 +79,22 @@ def test_two_soft_suspects_have_one_two_four_weights():
     _assert_distribution(target)
 
 
+def test_public_only_suspicion_uses_all_canonical_pairs_with_base2_weights():
+    target = suspicion_set_to_pair_target(
+        ["player3", "player5"],
+        [],
+        [],
+    )
+    assert target.shape == (21,)
+    assert _positive_pairs(target) == set(canonical_wolf_pairs())
+    zero_hit = _mass(target, ("player1", "player2"))
+    one_hit = _mass(target, ("player1", "player3"))
+    two_hit = _mass(target, ("player3", "player5"))
+    assert one_hit / zero_hit == pytest.approx(2.0)
+    assert two_hit / zero_hit == pytest.approx(4.0)
+    _assert_distribution(target)
+
+
 def test_three_suspects_are_weighted_only_by_pair_hit_count():
     target = suspicion_set_to_pair_target(
         ["player2", "player3", "player5"], [], ["player7"]

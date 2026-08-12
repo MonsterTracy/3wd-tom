@@ -18,7 +18,10 @@ from werewolf.models.twd_tom.dataset import TWDToMDataset
 from werewolf.models.twd_tom.schema import (
     PROJECTED_SCHEMA_VERSION,
     PROJECTION_VERSION,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
 )
+from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
 
 
 def _records(*, tom_order: int) -> list[dict]:
@@ -77,6 +80,20 @@ def _all_ok(sample: dict) -> dict:
         sample["belief_status"][subject] = "ok"
         sample["belief_errors"][subject] = None
         sample["suspected_werewolves"][subject] = []
+    return sample
+
+
+def _public_only(sample: dict) -> dict:
+    sample = _all_ok(sample)
+    sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    sample["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    sample["known_werewolves"] = {
+        subject: [] for subject in sample["known_werewolves"]
+    }
+    sample["known_non_werewolves"] = {
+        subject: [] for subject in sample["known_non_werewolves"]
+    }
     return sample
 
 
@@ -325,6 +342,49 @@ def test_manifest_split_reuses_assignment_and_allows_order_row_difference(
             relative = path.relative_to(first)
             assert path.read_bytes() == (second / relative).read_bytes()
     assert seen == set().union(*map(set, assignments.values()))
+
+
+def test_public_only_reuses_manifest_assignment_without_reshuffling(
+    tmp_path,
+    suspicion_sample_factory,
+):
+    raw_records = [
+        _public_only(
+            suspicion_sample_factory(
+                game_id=f"game_{game_index:03d}",
+                observers=(1, 2, 3),
+            )
+        )
+        for game_index in range(1, 4)
+    ]
+    materialized = materialize_training_records(raw_records)
+    tom1 = tmp_path / "public_tom1.jsonl"
+    tom2 = tmp_path / "public_tom2.jsonl"
+    _write_jsonl(tom1, materialized["tom1_records"])
+    _write_jsonl(tom2, materialized["tom2_records"])
+    assignments = {
+        "train": ["game_001", "game_004"],
+        "validation": ["game_002"],
+        "test": ["game_003"],
+    }
+    manifest = tmp_path / "split_manifest.json"
+    _write_split_manifest(manifest, assignments)
+    output = tmp_path / "public-splits"
+    result = split_training_data_from_manifest(
+        tom1_path=tom1,
+        tom2_path=tom2,
+        split_manifest_path=manifest,
+        output_dir=output,
+    )
+
+    for tom_order in ("tom1", "tom2"):
+        for split_name, assigned in assignments.items():
+            assert _output_game_ids(output, tom_order, split_name) == (
+                set(assigned) & {"game_001", "game_002", "game_003"}
+            )
+        assert result["order_split_stats"][tom_order]["train"][
+            "zero_row_game_ids"
+        ] == ["game_004"]
 
 
 def test_manifest_split_rejects_unknown_games_before_writing(

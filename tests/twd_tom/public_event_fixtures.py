@@ -12,8 +12,19 @@ from werewolf.models.twd_tom.dataset import (
     SOURCE_LABEL_PROVENANCE,
     TOM_INPUT_SCOPES,
 )
-from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION
+from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+    SAMPLE_SCHEMA_VERSION,
+)
+from werewolf.models.twd_tom.schema import (
+    LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
+)
 
 
 def make_public_events(
@@ -159,6 +170,27 @@ def make_training_sample(
         },
         "tom_order": tom_order,
     }
+
+
+def make_public_only_training_sample(tom_order, **kwargs):
+    sample = make_training_sample(tom_order, **kwargs)
+    sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    sample["source_schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    sample["source_label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    sample["annotation_schema_version"] = (
+        PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+    )
+    sample["label_provenance"] = PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE
+    sample["model_input_scope"] = PUBLIC_ONLY_MODEL_INPUT_SCOPE
+    sample["private_fields_usage"] = PUBLIC_ONLY_PRIVATE_FIELDS_USAGE
+    sample["known_werewolves"] = {
+        subject: [] for subject in sample["known_werewolves"]
+    }
+    sample["known_non_werewolves"] = {
+        subject: [] for subject in sample["known_non_werewolves"]
+    }
+    return sample
 
 
 def make_full_history_training_sample(*, game_id="synthetic_full_history"):

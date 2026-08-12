@@ -14,6 +14,7 @@ from script.twd_tom.project_suspicion_to_pairs import (
     validate_raw_suspicion_sample,
 )
 from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     SAMPLE_SCHEMA_VERSION as PLAYER_SUSPICION_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.schema import (
@@ -21,6 +22,8 @@ from werewolf.models.twd_tom.schema import (
     PAIR_ORDERING,
     PROJECTED_SCHEMA_VERSION,
     PROJECTION_VERSION,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
     canonical_wolf_pairs,
 )
 
@@ -39,6 +42,20 @@ def _all_ok(raw):
             raw["belief_status"][subject] = "ok"
             raw["belief_errors"][subject] = None
             raw["suspected_werewolves"][subject] = []
+    return raw
+
+
+def _public_only(raw):
+    raw = _all_ok(raw)
+    raw["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    raw["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    raw["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    raw["known_werewolves"] = {
+        subject: [] for subject in raw["known_werewolves"]
+    }
+    raw["known_non_werewolves"] = {
+        subject: [] for subject in raw["known_non_werewolves"]
+    }
     return raw
 
 
@@ -101,6 +118,61 @@ def test_projector_supports_empty_single_two_three_and_known_wolves(
     for target in projected["pair_targets"].values():
         assert len(target) == 21
         assert sum(target) == pytest.approx(1.0)
+
+
+def test_public_only_exact_contract_projects_without_hard_knowledge(
+    suspicion_sample_factory,
+):
+    raw = _public_only(suspicion_sample_factory(observers=(3,)))
+    raw["suspected_werewolves"]["player3"] = ["player2", "player5"]
+    projected = project_suspicion_sample(raw)
+    target = projected["pair_targets"]["player3"]
+    assert projected["source_schema_version"] == (
+        PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    )
+    assert len(target) == 21
+    assert sum(target) == pytest.approx(1.0)
+    pair_mass = dict(zip(canonical_wolf_pairs(), target, strict=True))
+    assert pair_mass[("player1", "player2")] / pair_mass[
+        ("player1", "player3")
+    ] == pytest.approx(2.0)
+    assert pair_mass[("player2", "player5")] / pair_mass[
+        ("player1", "player3")
+    ] == pytest.approx(4.0)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda row: row.update(label_provenance=PUBLIC_ONLY_LABEL_PROVENANCE),
+        lambda row: row.update(
+            schema_version=PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+            label_prompt_version=PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+        ),
+    ],
+)
+def test_private_public_cross_contracts_are_rejected(
+    suspicion_sample_factory,
+    mutation,
+):
+    raw = suspicion_sample_factory()
+    mutation(raw)
+    with pytest.raises(ValueError, match="source contract tuple"):
+        validate_raw_suspicion_sample(raw)
+
+
+def test_project_jsonl_rejects_mixed_source_lineages(
+    tmp_path,
+    suspicion_sample_factory,
+):
+    private = suspicion_sample_factory(game_id="private")
+    public = _public_only(suspicion_sample_factory(game_id="public"))
+    input_path = tmp_path / "mixed.jsonl"
+    output_path = tmp_path / "projected.jsonl"
+    _write_jsonl(input_path, [private, public])
+    with pytest.raises(ValueError, match="cannot mix"):
+        project_jsonl(input_path, output_path)
+    assert not output_path.exists()
 
 
 def test_projector_rejects_prompt_v1_and_projects_full_candidates(

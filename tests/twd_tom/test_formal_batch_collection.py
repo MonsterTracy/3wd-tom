@@ -7,7 +7,15 @@ import pytest
 from script.twd_tom import formal_batch_collection as formal
 from script.twd_tom import real_backend_dry_run as harness
 from script.twd_tom import monitored_collection as monitored
-from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from run_random import PUBLIC_ONLY_COLLECTION_MODE
+from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+    SAMPLE_SCHEMA_VERSION,
+)
+from werewolf.models.twd_tom.schema import (
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+)
 
 
 def _monitored_config(tmp_path, **overrides):
@@ -40,6 +48,62 @@ def test_formal_batch_requires_safe_batch_id_and_matching_output(tmp_path):
         formal.FormalBatchConfig(batch_id="../batch", monitored=monitored_config)
     with pytest.raises(ValueError, match="contain batch_id"):
         formal.FormalBatchConfig(batch_id="batch_0002", monitored=monitored_config)
+
+
+def test_public_only_formal_mode_records_separate_artifact_provenance(
+    tmp_path, monkeypatch, suspicion_sample_factory
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(harness, "_runtime_source_commit", lambda: "a" * 40)
+
+    def fake_game(**kwargs):
+        assert kwargs["collection_mode"] == PUBLIC_ONLY_COLLECTION_MODE
+        sample = suspicion_sample_factory(
+            game_id=kwargs["game_id"], observers=(1,)
+        )
+        sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+        sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+        sample["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+        sample["known_werewolves"]["player1"] = []
+        sample["known_non_werewolves"]["player1"] = []
+        sample["suspected_werewolves"]["player1"] = []
+
+        class Collector:
+            def write(self, _sample):
+                return None
+
+            def record(self):
+                self.write(sample)
+                return sample
+
+            def close(self):
+                return None
+
+        wrapped = kwargs["collector_wrapper"](Collector())
+        wrapped.record()
+        wrapped.close()
+
+    monkeypatch.setattr(harness, "run_real_backend_game", fake_game)
+    monitored_config = _monitored_config(tmp_path)
+    formal.run_formal_batch(
+        formal.FormalBatchConfig(
+            batch_id="batch_0001",
+            monitored=monitored_config,
+            collection_mode=PUBLIC_ONLY_COLLECTION_MODE,
+        )
+    )
+
+    manifest = json.loads(
+        (
+            Path(monitored_config.output_dir) / "formal_batch_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["schema_version"] == PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    assert manifest["belief_information_scope"] == "public_events_only"
+    assert manifest["playing_agent_context_reused"] is False
+    assert manifest["true_role_visible"] is False
+    assert manifest["private_memory_visible"] is False
+    assert manifest["prompt_version"] == PUBLIC_ONLY_LABEL_PROMPT_VERSION
 
 
 def test_formal_cli_and_config_cannot_enable_backend_retry(tmp_path):

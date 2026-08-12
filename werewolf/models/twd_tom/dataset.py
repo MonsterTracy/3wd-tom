@@ -26,6 +26,7 @@ from werewolf.models.twd_tom.public_events import (
     structured_input_digest,
 )
 from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     REPORT_TRIGGERS,
     SAMPLE_SCHEMA_VERSION,
 )
@@ -37,6 +38,13 @@ from werewolf.models.twd_tom.schema import (
     NUM_WOLF_PAIR_CLASSES,
     PLAYER_NAMES,
     PLAYER_TO_ID,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
     normalize_player,
     validate_player_suspicion,
 )
@@ -59,6 +67,7 @@ PRIVATE_FIELDS_USAGE = {
 ANNOTATION_SCHEMA_VERSION = FORMAL_ANNOTATION_SCHEMA_VERSION
 ANNOTATED_LABEL_PROVENANCE = FORMAL_LABEL_PROVENANCE
 SOURCE_LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
+PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE = "private_conditioned"
 CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
 
 SUBJECT_MAPPING_FIELDS = (
@@ -333,28 +342,57 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         missing = sorted(RAW_TRAINING_SAMPLE_FIELDS - set(sample))
         extra = sorted(set(sample) - RAW_TRAINING_SAMPLE_FIELDS)
         raise ValueError(f"sample field set mismatch; missing={missing}, extra={extra}")
-    if sample.get("schema_version") != SAMPLE_SCHEMA_VERSION:
-        raise ValueError("unsupported sample schema_version")
-    if sample.get("source_schema_version") != SAMPLE_SCHEMA_VERSION:
+    source_contract = (
+        sample.get("schema_version"),
+        sample.get("label_prompt_version"),
+        sample.get("source_label_provenance"),
+    )
+    private_source_contract = (
+        SAMPLE_SCHEMA_VERSION,
+        LABEL_PROMPT_VERSION,
+        SOURCE_LABEL_PROVENANCE,
+    )
+    public_source_contract = (
+        PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+        PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+        PUBLIC_ONLY_LABEL_PROVENANCE,
+    )
+    if source_contract == private_source_contract:
+        belief_information_scope = (
+            PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE
+        )
+        expected_annotation_schema = ANNOTATION_SCHEMA_VERSION
+        expected_label_provenance = ANNOTATED_LABEL_PROVENANCE
+        expected_model_input_scope = TOM_INPUT_SCOPES[tom_order]
+        expected_private_fields_usage = PRIVATE_FIELDS_USAGE[tom_order]
+    elif source_contract == public_source_contract:
+        belief_information_scope = PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
+        expected_annotation_schema = (
+            PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+        )
+        expected_label_provenance = PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE
+        expected_model_input_scope = PUBLIC_ONLY_MODEL_INPUT_SCOPE
+        expected_private_fields_usage = PUBLIC_ONLY_PRIVATE_FIELDS_USAGE
+    else:
+        raise ValueError("unsupported formal source contract tuple")
+    if sample.get("source_schema_version") != sample.get("schema_version"):
         raise ValueError("unsupported source_schema_version")
     if sample.get("tom_order") != tom_order:
         raise ValueError(
             f"sample tom_order must match requested tom_order={tom_order}"
         )
-    if sample.get("model_input_scope") != TOM_INPUT_SCOPES[tom_order]:
+    if sample.get("model_input_scope") != expected_model_input_scope:
         raise ValueError(
             f"model_input_scope is inconsistent with tom_order={tom_order}"
         )
-    if sample.get("private_fields_usage") != PRIVATE_FIELDS_USAGE[tom_order]:
+    if sample.get("private_fields_usage") != expected_private_fields_usage:
         raise ValueError(
             f"private_fields_usage is inconsistent with tom_order={tom_order}"
         )
-    if sample.get("annotation_schema_version") != ANNOTATION_SCHEMA_VERSION:
+    if sample.get("annotation_schema_version") != expected_annotation_schema:
         raise ValueError("unsupported annotation_schema_version")
-    if sample.get("label_provenance") != ANNOTATED_LABEL_PROVENANCE:
+    if sample.get("label_provenance") != expected_label_provenance:
         raise ValueError("unsupported label_provenance")
-    if sample.get("source_label_provenance") != SOURCE_LABEL_PROVENANCE:
-        raise ValueError("unsupported source_label_provenance")
     for field_name in (
         "current_action_used",
         "expert_labels_used_as_later_evidence",
@@ -383,6 +421,11 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         )
         for field_name in SUBJECT_MAPPING_FIELDS
     }
+    if belief_information_scope == PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE and (
+        any(mappings["known_werewolves"].values())
+        or any(mappings["known_non_werewolves"].values())
+    ):
+        raise ValueError("public-only formal hard-knowledge mappings must be empty")
 
     targets: dict[str, torch.Tensor | None] = {}
     for subject in sorted(expected_subjects, key=PLAYER_TO_ID.__getitem__):
@@ -477,8 +520,6 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
     _require_non_empty_text(sample.get("game_id"), field_name="game_id")
     if sample.get("report_trigger") not in REPORT_TRIGGERS:
         raise ValueError("unsupported report_trigger")
-    if sample.get("label_prompt_version") != LABEL_PROMPT_VERSION:
-        raise ValueError("unsupported label_prompt_version")
     if sample.get("public_event_schema_version") != PUBLIC_EVENT_SCHEMA_VERSION:
         raise ValueError("unsupported public_event_schema_version")
     if sample.get("public_action_count") != len(public_speech_actions(public_events)):
@@ -494,6 +535,7 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
     for field_name, value in mappings.items():
         normalized[field_name] = value
     normalized["_pair_targets"] = targets
+    normalized["_belief_information_scope"] = belief_information_scope
     return normalized
 
 
@@ -598,6 +640,32 @@ class TWDToMDataset(Dataset):
             _normalize_sample(sample, tom_order=self.tom_order)
             for sample in self._raw_samples
         ]
+        scopes = {
+            sample["_belief_information_scope"] for sample in self.samples
+        }
+        if len(scopes) > 1:
+            raise ValueError(
+                "one Dataset cannot mix private-conditioned and public-only rows"
+            )
+        self.belief_information_scope = next(iter(scopes), None)
+        self.model_input_scope = (
+            self.samples[0]["model_input_scope"] if self.samples else None
+        )
+        self.private_fields_usage = (
+            self.samples[0]["private_fields_usage"] if self.samples else None
+        )
+        self.source_schema_version = (
+            self.samples[0]["source_schema_version"] if self.samples else None
+        )
+        self.annotation_schema_version = (
+            self.samples[0]["annotation_schema_version"] if self.samples else None
+        )
+        self.label_provenance = (
+            self.samples[0]["label_provenance"] if self.samples else None
+        )
+        self.source_label_provenance = (
+            self.samples[0]["source_label_provenance"] if self.samples else None
+        )
         last_prefix_by_game: dict[str, list[dict[str, Any]]] = {}
         for sample in self.samples:
             game_id = sample["game_id"]
@@ -726,7 +794,9 @@ class TWDToMDataset(Dataset):
             item["metadata"][
                 "post_completed_public_speech_pre_next_action"
             ] = boundary
-        else:
+        elif sample["_belief_information_scope"] != (
+            PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
+        ):
             known_wolves = torch.zeros((NUM_PLAYERS, NUM_PLAYERS), dtype=torch.float32)
             known_non_wolves = torch.zeros_like(known_wolves)
             subject = normalize_player(sample["observer_ids"][0])
@@ -783,6 +853,10 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
             for field_name in batch[0]["metadata"]
         },
     }
+    tom_orders = {item["metadata"]["tom_order"] for item in batch}
+    if len(tom_orders) != 1:
+        raise ValueError("a batch cannot mix ToM orders")
+    tom_order = next(iter(tom_orders))
     if has_private:
         result["known_werewolves"] = torch.stack(
             [item["known_werewolves"] for item in batch]
@@ -790,7 +864,7 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         result["known_non_werewolves"] = torch.stack(
             [item["known_non_werewolves"] for item in batch]
         )
-    else:
+    elif tom_order == 2:
         if any(
             "reasoning_player_id" not in item
             or "post_completed_public_speech_pre_next_action" not in item

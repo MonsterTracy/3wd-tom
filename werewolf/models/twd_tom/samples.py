@@ -19,6 +19,8 @@ from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
     LABEL_PROVENANCE,
     NUM_PLAYERS,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
     normalize_player,
     parse_speech_action,
     validate_player_suspicion,
@@ -33,6 +35,9 @@ from werewolf.speech.private_belief_perceiver import (
 
 
 SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v2"
+PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION = (
+    "classic7_pre_speech_public_only_player_suspicion_v1"
+)
 PUBLIC_SPEECH_EVENTS = {"speech", "speech_pk"}
 REPORT_TRIGGERS = {"pre_public_speech", "pre_public_speech_pk"}
 SAMPLE_FIELDS = frozenset(
@@ -307,12 +312,31 @@ def make_twd_tom_sample(
     }
 
 
+def make_public_only_twd_tom_sample(
+    *,
+    public_snapshot: PublicSnapshot,
+    reports: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the parallel public-only raw record with distinct provenance."""
+
+    sample = make_twd_tom_sample(
+        public_snapshot=public_snapshot,
+        reports=reports,
+    )
+    sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    sample["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    return sample
+
+
 __all__ = [
     "SAMPLE_SCHEMA_VERSION",
+    "PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION",
     "PUBLIC_SPEECH_EVENTS",
     "REPORT_TRIGGERS",
     "SAMPLE_FIELDS",
     "PublicSnapshot",
     "freeze_public_snapshot",
     "make_twd_tom_sample",
+    "make_public_only_twd_tom_sample",
 ]

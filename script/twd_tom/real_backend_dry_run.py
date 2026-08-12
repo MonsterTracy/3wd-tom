@@ -27,6 +27,7 @@ from typing import Any
 import yaml
 
 from run_random import (
+    PRIVATE_CONDITIONED_COLLECTION_MODE,
     build_runtime,
     build_twd_tom_sample_collector,
     eval as run_game,
@@ -893,6 +894,7 @@ def run_real_backend_game(
     budget: DryRunBudget,
     writer: PrivacySafeAuditWriter,
     collector_wrapper: Callable[[Any], Any] | None = None,
+    collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
 ) -> None:
     """Run one game through the shared audited runtime and collector."""
 
@@ -927,6 +929,7 @@ def run_real_backend_game(
         output_path=str(samples_path),
         game_id=game_id,
         report_audit=session,
+        collection_mode=collection_mode,
     )
     if collector_wrapper is not None:
         collector = collector_wrapper(collector)

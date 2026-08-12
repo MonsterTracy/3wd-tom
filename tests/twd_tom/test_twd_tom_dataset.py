@@ -29,6 +29,7 @@ from werewolf.models.twd_tom.schema import (
 )
 from tests.twd_tom.public_event_fixtures import (
     make_full_history_training_sample,
+    make_public_only_training_sample,
     make_training_sample,
 )
 
@@ -123,6 +124,39 @@ def test_second_order_has_multiple_targets_and_no_private_model_inputs():
         item["post_completed_public_speech_pre_next_action"], bool
     )
     assert "suspicion_targets" not in item
+
+
+def test_public_only_first_order_omits_private_tensor_keys():
+    sample = make_public_only_training_sample(1)
+    dataset = TWDToMDataset([sample], tom_order=1)
+    item = dataset[0]
+    batch = collate_twd_tom_samples([item])
+    assert "known_werewolves" not in item
+    assert "known_non_werewolves" not in item
+    assert "known_werewolves" not in batch
+    assert "known_non_werewolves" not in batch
+    assert "reasoning_player_id" not in batch
+    assert item["pair_targets"].shape == (7, 21)
+    assert item["pair_targets"][item["subject_mask"]].sum().item() == (
+        pytest.approx(1.0)
+    )
+
+
+def test_public_only_second_order_reuses_existing_public_tensor_contract():
+    private_item = TWDToMDataset([raw_sample(2)], tom_order=2)[0]
+    public_item = TWDToMDataset(
+        [make_public_only_training_sample(2)],
+        tom_order=2,
+    )[0]
+    for item in (private_item, public_item):
+        assert "known_werewolves" not in item
+        assert "known_non_werewolves" not in item
+        assert item["reasoning_player_id"].shape == ()
+        assert item["pair_targets"].shape == (7, 21)
+        assert torch.allclose(
+            item["pair_targets"][item["subject_mask"]].sum(dim=-1),
+            torch.ones(int(item["subject_mask"].sum().item())),
+        )
 
 
 def test_first_turn_is_not_a_completed_speech_boundary():

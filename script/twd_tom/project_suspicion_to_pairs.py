@@ -13,9 +13,11 @@ from werewolf.models.twd_tom.belief_labels import (
     suspicion_set_to_pair_target,
 )
 from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     SAMPLE_FIELDS,
     SAMPLE_SCHEMA_VERSION as PLAYER_SUSPICION_SCHEMA_VERSION,
     freeze_public_snapshot,
+    make_public_only_twd_tom_sample,
     make_twd_tom_sample,
 )
 from werewolf.models.twd_tom.schema import (
@@ -24,10 +26,28 @@ from werewolf.models.twd_tom.schema import (
     PAIR_ORDERING,
     PROJECTED_SCHEMA_VERSION,
     PROJECTION_VERSION,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
     TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING,
     TARGET_DISTRIBUTION_IS_REPORTER_PROBABILITY,
     normalize_player,
 )
+
+
+PRIVATE_CONDITIONED_LINEAGE = "private_conditioned"
+PUBLIC_ONLY_LINEAGE = "public_only"
+SOURCE_CONTRACTS = {
+    PRIVATE_CONDITIONED_LINEAGE: (
+        PLAYER_SUSPICION_SCHEMA_VERSION,
+        LABEL_PROMPT_VERSION,
+        LABEL_PROVENANCE,
+    ),
+    PUBLIC_ONLY_LINEAGE: (
+        PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+        PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+        PUBLIC_ONLY_LABEL_PROVENANCE,
+    ),
+}
 
 
 PROJECTED_SAMPLE_FIELDS = frozenset(
@@ -56,6 +76,23 @@ def _require_subject_mapping(
     return value
 
 
+def source_contract_lineage(sample: Mapping[str, Any]) -> str:
+    """Return the lineage for one exact, supported raw source contract."""
+
+    contract = (
+        sample.get("schema_version"),
+        sample.get("label_prompt_version"),
+        sample.get("label_provenance"),
+    )
+    for lineage, expected in SOURCE_CONTRACTS.items():
+        if contract == expected:
+            return lineage
+    raise ValueError(
+        "unsupported raw source contract tuple: "
+        "schema_version/label_prompt_version/label_provenance"
+    )
+
+
 def validate_raw_suspicion_sample(sample: Any) -> dict[str, Any]:
     """Strictly validate one serialized online suspicion sample."""
 
@@ -67,12 +104,7 @@ def validate_raw_suspicion_sample(sample: Any) -> dict[str, Any]:
         raise ValueError(
             f"raw sample field set mismatch; missing={missing}, extra={extra}"
         )
-    if sample.get("schema_version") != PLAYER_SUSPICION_SCHEMA_VERSION:
-        raise ValueError("unsupported raw schema_version")
-    if sample.get("label_prompt_version") != LABEL_PROMPT_VERSION:
-        raise ValueError("unsupported label_prompt_version")
-    if sample.get("label_provenance") != LABEL_PROVENANCE:
-        raise ValueError("unsupported label_provenance")
+    lineage = source_contract_lineage(sample)
 
     snapshot = freeze_public_snapshot(
         game_id=sample.get("game_id"),
@@ -119,6 +151,11 @@ def validate_raw_suspicion_sample(sample: Any) -> dict[str, Any]:
     known_non_werewolves = _require_subject_mapping(
         sample, "known_non_werewolves", expected_subjects
     )
+    if lineage == PUBLIC_ONLY_LINEAGE and (
+        any(known_werewolves.values())
+        or any(known_non_werewolves.values())
+    ):
+        raise ValueError("public-only raw hard-knowledge mappings must be empty")
     statuses = _require_subject_mapping(
         sample, "belief_status", expected_subjects
     )
@@ -140,7 +177,12 @@ def validate_raw_suspicion_sample(sample: Any) -> dict[str, Any]:
         }
         for subject in expected_subjects
     }
-    normalized = make_twd_tom_sample(
+    sample_builder = (
+        make_public_only_twd_tom_sample
+        if lineage == PUBLIC_ONLY_LINEAGE
+        else make_twd_tom_sample
+    )
+    normalized = sample_builder(
         public_snapshot=snapshot,
         reports=reports,
     )
@@ -193,6 +235,7 @@ def project_jsonl(input_path: str | Path, output_path: str | Path) -> int:
         raise FileExistsError(f"output already exists: {destination}")
 
     projected_rows: list[dict[str, Any]] = []
+    input_lineage: str | None = None
     with source.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -202,6 +245,14 @@ def project_jsonl(input_path: str | Path, output_path: str | Path) -> int:
             except json.JSONDecodeError as exc:
                 raise ValueError(f"invalid JSON on line {line_number}: {exc}") from exc
             try:
+                lineage = source_contract_lineage(raw_sample)
+                if input_lineage is None:
+                    input_lineage = lineage
+                elif lineage != input_lineage:
+                    raise ValueError(
+                        "input JSONL cannot mix private-conditioned and "
+                        "public-only source contracts"
+                    )
                 projected_rows.append(project_suspicion_sample(raw_sample))
             except (TypeError, ValueError) as exc:
                 raise type(exc)(f"line {line_number}: {exc}") from exc

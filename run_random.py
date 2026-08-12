@@ -28,12 +28,14 @@ from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
 from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
+    PublicOnlyBeliefSnapshotCollector,
 )
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
 )
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
+    make_public_only_twd_tom_sample,
 )
 from werewolf.models.twd_tom.shadow import (
     SecondOrderToMShadow,
@@ -41,6 +43,15 @@ from werewolf.models.twd_tom.shadow import (
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
+)
+from werewolf.speech.public_belief_perceiver import PublicOnlyBeliefReporter
+
+
+PRIVATE_CONDITIONED_COLLECTION_MODE = "private_conditioned"
+PUBLIC_ONLY_COLLECTION_MODE = "public_only"
+COLLECTION_MODES = (
+    PRIVATE_CONDITIONED_COLLECTION_MODE,
+    PUBLIC_ONLY_COLLECTION_MODE,
 )
 
 
@@ -644,24 +655,56 @@ def build_twd_tom_sample_collector(
     output_path,
     game_id,
     report_audit=None,
+    collection_mode=PRIVATE_CONDITIONED_COLLECTION_MODE,
 ) -> TWDToMSampleCollector:
-    """Build the readonly playing-agent collection stack."""
+    """Build the selected readonly belief collection stack."""
 
-    snapshot_collector = (
-        PlayingAgentBeliefSnapshotCollector(
-            PlayingAgentBeliefReporter(
-                audit_hook=report_audit,
-            ),
-            agent_list,
+    if collection_mode == PRIVATE_CONDITIONED_COLLECTION_MODE:
+        snapshot_collector = (
+            PlayingAgentBeliefSnapshotCollector(
+                PlayingAgentBeliefReporter(
+                    audit_hook=report_audit,
+                ),
+                agent_list,
+            )
         )
-    )
+        sample_builder = None
+    elif collection_mode == PUBLIC_ONLY_COLLECTION_MODE:
+        dispatches = []
+        for agent in agent_list:
+            backend_id = getattr(agent, "backend_id", None)
+            model_name = getattr(agent, "model_name", None)
+            backend = getattr(agent, "backend", None)
+            if not isinstance(backend_id, str) or not backend_id.strip():
+                raise ValueError("every public-only dispatch requires backend_id")
+            if not isinstance(model_name, str) or not model_name.strip():
+                raise ValueError("every public-only dispatch requires model_name")
+            if backend is None or not hasattr(backend, "chat"):
+                raise TypeError("every public-only dispatch requires backend.chat()")
+            dispatches.append(
+                {
+                    "backend": backend,
+                    "backend_id": backend_id,
+                    "model_name": model_name,
+                }
+            )
+        snapshot_collector = PublicOnlyBeliefSnapshotCollector(
+            PublicOnlyBeliefReporter(audit_hook=report_audit),
+            dispatches,
+        )
+        sample_builder = make_public_only_twd_tom_sample
+    else:
+        raise ValueError(f"collection_mode must be one of {COLLECTION_MODES}")
 
+    arguments = {
+        "output_path": output_path,
+        "snapshot_collector": snapshot_collector,
+        "game_id": game_id,
+    }
+    if sample_builder is not None:
+        arguments["sample_builder"] = sample_builder
     return TWDToMSampleCollector(
-        output_path=output_path,
-        snapshot_collector=(
-            snapshot_collector
-        ),
-        game_id=game_id,
+        **arguments,
     )
 
 

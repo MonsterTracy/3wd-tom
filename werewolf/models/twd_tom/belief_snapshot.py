@@ -9,6 +9,40 @@ from werewolf.models.twd_tom.samples import PublicSnapshot
 from werewolf.models.twd_tom.schema import normalize_player
 
 
+class PublicOnlyBeliefSnapshotCollector:
+    """Collect reports without passing the environment or playing agents."""
+
+    def __init__(self, reporter, dispatches) -> None:
+        if reporter is None or not hasattr(reporter, "report"):
+            raise TypeError("reporter must provide report()")
+        if not isinstance(dispatches, (list, tuple)) or len(dispatches) != 7:
+            raise ValueError("dispatches must contain exactly seven entries")
+        self.reporter = reporter
+        self.dispatches = tuple(dispatches)
+
+    def collect(self, public_snapshot: PublicSnapshot, *, env) -> dict[str, Any]:
+        del env
+        if not isinstance(public_snapshot, PublicSnapshot):
+            raise TypeError("public_snapshot must be a PublicSnapshot")
+        reports = {}
+        for player_id in public_snapshot.observer_ids:
+            observer = normalize_player(player_id)
+            dispatch = self.dispatches[player_id - 1]
+            result = self.reporter.report(
+                public_snapshot=public_snapshot,
+                observer_id=observer,
+                backend=dispatch["backend"],
+                backend_id=dispatch["backend_id"],
+                model_name=dispatch["model_name"],
+            )
+            if not isinstance(result, dict):
+                raise TypeError("reporter result must be a dictionary")
+            if result.get("observer") != observer:
+                raise ValueError("reporter returned an unexpected observer")
+            reports[observer] = result
+        return reports
+
+
 _EXTERNAL_AGENT_FIELDS = {
     "backend",
     "handler",
@@ -97,4 +131,7 @@ class PlayingAgentBeliefSnapshotCollector:
         return reports
 
 
-__all__ = ["PlayingAgentBeliefSnapshotCollector"]
+__all__ = [
+    "PlayingAgentBeliefSnapshotCollector",
+    "PublicOnlyBeliefSnapshotCollector",
+]

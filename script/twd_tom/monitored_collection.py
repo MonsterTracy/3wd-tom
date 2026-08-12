@@ -15,8 +15,13 @@ from typing import Any
 
 import yaml
 
+from run_random import (
+    PRIVATE_CONDITIONED_COLLECTION_MODE,
+    PUBLIC_ONLY_COLLECTION_MODE,
+)
 from script.twd_tom import real_backend_dry_run as harness
 from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     SAMPLE_FIELDS,
     SAMPLE_SCHEMA_VERSION,
 )
@@ -27,6 +32,7 @@ from werewolf.models.twd_tom.public_events import (
 )
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
     normalize_player,
     validate_player_suspicion,
 )
@@ -288,17 +294,31 @@ def _walk_field_names(value: Any):
             yield from _walk_field_names(nested)
 
 
-def _validate_sample_safety(sample: Mapping[str, Any]) -> None:
+def _validate_sample_safety(
+    sample: Mapping[str, Any],
+    *,
+    collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
+) -> None:
     if not isinstance(sample, Mapping):
         raise CollectionSampleSafetyViolation(
             "old_schema", "collector returned a non-mapping sample"
         )
     fields = set(sample)
+    expected_schema = (
+        PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+        if collection_mode == PUBLIC_ONLY_COLLECTION_MODE
+        else SAMPLE_SCHEMA_VERSION
+    )
+    expected_prompt = (
+        PUBLIC_ONLY_LABEL_PROMPT_VERSION
+        if collection_mode == PUBLIC_ONLY_COLLECTION_MODE
+        else LABEL_PROMPT_VERSION
+    )
     if (
         fields != SAMPLE_FIELDS
         or fields & _OLD_SCHEMA_FIELDS
-        or sample.get("schema_version") != SAMPLE_SCHEMA_VERSION
-        or sample.get("label_prompt_version") != LABEL_PROMPT_VERSION
+        or sample.get("schema_version") != expected_schema
+        or sample.get("label_prompt_version") != expected_prompt
     ):
         raise CollectionSampleSafetyViolation(
             "old_schema", "sample contains an unsupported schema"
@@ -343,6 +363,14 @@ def _validate_sample_safety(sample: Mapping[str, Any]) -> None:
         suspicion = sample["suspected_werewolves"][observer]
         error = sample["belief_errors"][observer]
         backend_id = sample["agent_backend_ids"][observer]
+        if collection_mode == PUBLIC_ONLY_COLLECTION_MODE and (
+            sample["known_werewolves"][observer]
+            or sample["known_non_werewolves"][observer]
+        ):
+            raise CollectionSampleSafetyViolation(
+                "private_serialization",
+                "public-only sample contains hard private knowledge",
+            )
         if status not in _VALID_STATUSES:
             raise CollectionSampleSafetyViolation(
                 "old_schema", "sample contains an unsupported belief status"
@@ -378,14 +406,24 @@ def _validate_sample_safety(sample: Mapping[str, Any]) -> None:
 
 
 class _MonitoredCollector:
-    def __init__(self, collector, monitor: CollectionQualityMonitor) -> None:
+    def __init__(
+        self,
+        collector,
+        monitor: CollectionQualityMonitor,
+        *,
+        collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
+    ) -> None:
         self.collector = collector
         self.monitor = monitor
+        self.collection_mode = collection_mode
         self._write = collector.write
         collector.write = self._validated_write
 
     def _validated_write(self, sample) -> None:
-        _validate_sample_safety(sample)
+        _validate_sample_safety(
+            sample,
+            collection_mode=self.collection_mode,
+        )
         self._write(sample)
 
     def record(self, *args, **kwargs):
@@ -510,6 +548,7 @@ def run_monitored_collection(
     required_name_token: str,
     game_id_prefix: str,
     mode_metadata: Mapping[str, Any],
+    collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE,
 ) -> dict[str, Any]:
     """Run one ten-game collection mode through the frozen monitor."""
 
@@ -595,8 +634,11 @@ def run_monitored_collection(
                     budget=budget,
                     writer=writer,
                     collector_wrapper=lambda collector: _MonitoredCollector(
-                        collector, monitor
+                        collector,
+                        monitor,
+                        collection_mode=collection_mode,
                     ),
+                    collection_mode=collection_mode,
                 )
                 completed = True
             except CollectionQualityStop as exc:

@@ -12,13 +12,23 @@ from script.twd_tom.monitored_collection import (
     MonitoredCollectionConfig,
     run_monitored_collection,
 )
-from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from run_random import (
+    COLLECTION_MODES,
+    PRIVATE_CONDITIONED_COLLECTION_MODE,
+    PUBLIC_ONLY_COLLECTION_MODE,
+)
+from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+    SAMPLE_SCHEMA_VERSION,
+)
+from werewolf.models.twd_tom.schema import PUBLIC_ONLY_LABEL_PROMPT_VERSION
 
 
 @dataclass(frozen=True)
 class FormalBatchConfig:
     batch_id: str
     monitored: MonitoredCollectionConfig
+    collection_mode: str = PRIVATE_CONDITIONED_COLLECTION_MODE
 
     def __post_init__(self) -> None:
         if not isinstance(self.batch_id, str) or re.fullmatch(
@@ -28,21 +38,39 @@ class FormalBatchConfig:
         output_name = Path(self.monitored.output_dir).name.lower()
         if self.batch_id.lower() not in output_name:
             raise ValueError("output directory name must contain batch_id")
+        if self.collection_mode not in COLLECTION_MODES:
+            raise ValueError(f"collection_mode must be one of {COLLECTION_MODES}")
 
 
 def run_formal_batch(config: FormalBatchConfig):
     """Delegate one formal raw batch to the frozen monitored runner."""
 
+    mode_metadata = {
+        "formal_batch_only": True,
+        "batch_id": config.batch_id,
+        "schema_version": (
+            PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+            if config.collection_mode == PUBLIC_ONLY_COLLECTION_MODE
+            else SAMPLE_SCHEMA_VERSION
+        ),
+    }
+    if config.collection_mode == PUBLIC_ONLY_COLLECTION_MODE:
+        mode_metadata.update(
+            {
+                "belief_information_scope": "public_events_only",
+                "playing_agent_context_reused": False,
+                "true_role_visible": False,
+                "private_memory_visible": False,
+                "prompt_version": PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+            }
+        )
     return run_monitored_collection(
         config.monitored,
         artifact_prefix="formal_batch",
         required_name_token="formal_batch",
         game_id_prefix=f"formal_{config.batch_id}_game",
-        mode_metadata={
-            "formal_batch_only": True,
-            "batch_id": config.batch_id,
-            "schema_version": SAMPLE_SCHEMA_VERSION,
-        },
+        mode_metadata=mode_metadata,
+        collection_mode=config.collection_mode,
     )
 
 
@@ -61,6 +89,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-wall-seconds", required=True, type=float)
     parser.add_argument("--privacy-safe-logging", required=True, action="store_true")
     parser.add_argument("--audit-only-metadata", required=True, action="store_true")
+    parser.add_argument(
+        "--collection-mode",
+        choices=COLLECTION_MODES,
+        default=PRIVATE_CONDITIONED_COLLECTION_MODE,
+    )
     return parser
 
 
@@ -81,7 +114,11 @@ def main(argv: Sequence[str] | None = None):
         audit_only_metadata=args.audit_only_metadata,
     )
     summary = run_formal_batch(
-        FormalBatchConfig(batch_id=args.batch_id, monitored=monitored)
+        FormalBatchConfig(
+            batch_id=args.batch_id,
+            monitored=monitored,
+            collection_mode=args.collection_mode,
+        )
     )
     if summary["status"] != "ok":
         raise SystemExit(1)

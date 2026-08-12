@@ -13,6 +13,8 @@ from typing import Any
 import torch
 
 from script.twd_tom.project_suspicion_to_pairs import (
+    PUBLIC_ONLY_LINEAGE,
+    source_contract_lineage,
     validate_raw_suspicion_sample,
 )
 from werewolf.models.twd_tom.belief_labels import (
@@ -30,6 +32,12 @@ from werewolf.models.twd_tom.schema import (
     FORMAL_ANNOTATION_SCHEMA_VERSION,
     FORMAL_LABEL_PROVENANCE,
     FORMALIZATION_POLICY_VERSION,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
     SOURCE_REPORT_ANNOTATION_CONFIDENCE,
     SOURCE_REPORT_OBSERVER_PROVENANCE,
 )
@@ -53,6 +61,7 @@ def _load_raw_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"raw input not found: {path}")
     records: list[dict[str, Any]] = []
+    input_lineage: str | None = None
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -64,7 +73,16 @@ def _load_raw_jsonl(path: Path) -> list[dict[str, Any]]:
                     f"invalid JSON on line {line_number}: {exc}"
                 ) from exc
             try:
-                records.append(validate_raw_suspicion_sample(value))
+                normalized = validate_raw_suspicion_sample(value)
+                lineage = source_contract_lineage(normalized)
+                if input_lineage is None:
+                    input_lineage = lineage
+                elif lineage != input_lineage:
+                    raise ValueError(
+                        "raw input cannot mix private-conditioned and "
+                        "public-only source contracts"
+                    )
+                records.append(normalized)
             except (TypeError, ValueError) as exc:
                 raise type(exc)(f"line {line_number}: {exc}") from exc
     if not records:
@@ -73,7 +91,7 @@ def _load_raw_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _observer_decision(
-    sample: dict[str, Any], subject: str
+    sample: dict[str, Any], subject: str, *, public_only: bool
 ) -> dict[str, Any]:
     status = sample["belief_status"][subject]
     if status == STATUS_OK:
@@ -84,6 +102,15 @@ def _observer_decision(
             ),
             "provenance": SOURCE_REPORT_OBSERVER_PROVENANCE,
             "confidence": SOURCE_REPORT_ANNOTATION_CONFIDENCE,
+            "compatible_pair_count": None,
+        }
+
+    if public_only:
+        return {
+            "kind": "unavailable",
+            "suspected_werewolves": None,
+            "provenance": None,
+            "confidence": None,
             "compatible_pair_count": None,
         }
 
@@ -131,6 +158,7 @@ def _formal_sample(
     tom_order: int,
     observer_ids: list[int],
     decisions: dict[str, dict[str, Any]],
+    public_only: bool,
 ) -> dict[str, Any]:
     subjects = [f"player{observer_id}" for observer_id in observer_ids]
     formal = deepcopy(raw)
@@ -164,12 +192,28 @@ def _formal_sample(
             )
 
     formal["source_schema_version"] = raw["schema_version"]
-    formal["annotation_schema_version"] = FORMAL_ANNOTATION_SCHEMA_VERSION
-    formal["label_provenance"] = FORMAL_LABEL_PROVENANCE
+    formal["annotation_schema_version"] = (
+        PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+        if public_only
+        else FORMAL_ANNOTATION_SCHEMA_VERSION
+    )
+    formal["label_provenance"] = (
+        PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE
+        if public_only
+        else FORMAL_LABEL_PROVENANCE
+    )
     formal["source_label_provenance"] = raw["label_provenance"]
     formal["tom_order"] = tom_order
-    formal["model_input_scope"] = TOM_INPUT_SCOPES[tom_order]
-    formal["private_fields_usage"] = PRIVATE_FIELDS_USAGE[tom_order]
+    formal["model_input_scope"] = (
+        PUBLIC_ONLY_MODEL_INPUT_SCOPE
+        if public_only
+        else TOM_INPUT_SCOPES[tom_order]
+    )
+    formal["private_fields_usage"] = (
+        PUBLIC_ONLY_PRIVATE_FIELDS_USAGE
+        if public_only
+        else PRIVATE_FIELDS_USAGE[tom_order]
+    )
     formal["current_action_used"] = False
     formal["expert_labels_used_as_later_evidence"] = False
     formal["future_information_used"] = False
@@ -186,13 +230,27 @@ def materialize_training_records(
     semantic_errors = 0
     hard_knowledge_recovered = 0
     unresolved = 0
+    input_lineage: str | None = None
 
     for raw_value in raw_records:
         raw = validate_raw_suspicion_sample(raw_value)
+        lineage = source_contract_lineage(raw)
+        if input_lineage is None:
+            input_lineage = lineage
+        elif lineage != input_lineage:
+            raise ValueError(
+                "raw records cannot mix private-conditioned and public-only "
+                "source contracts"
+            )
+        public_only = lineage == PUBLIC_ONLY_LINEAGE
         decisions: dict[str, dict[str, Any]] = {}
         for observer_id in raw["observer_ids"]:
             subject = f"player{observer_id}"
-            decision = _observer_decision(raw, subject)
+            decision = _observer_decision(
+                raw,
+                subject,
+                public_only=public_only,
+            )
             decisions[subject] = decision
             if raw["belief_status"][subject] == STATUS_SEMANTIC_ERROR:
                 semantic_errors += 1
@@ -227,6 +285,7 @@ def materialize_training_records(
                     tom_order=1,
                     observer_ids=[speaker_id],
                     decisions=decisions,
+                    public_only=public_only,
                 )
             )
 
@@ -242,13 +301,19 @@ def materialize_training_records(
                     tom_order=2,
                     observer_ids=tom2_observers,
                     decisions=decisions,
+                    public_only=public_only,
                 )
             )
 
     TWDToMDataset(tom1_records, tom_order=1)
     TWDToMDataset(tom2_records, tom_order=2)
-    return {
-        "policy_version": FORMALIZATION_POLICY_VERSION,
+    public_only = input_lineage == PUBLIC_ONLY_LINEAGE
+    result = {
+        "policy_version": (
+            PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION
+            if public_only
+            else FORMALIZATION_POLICY_VERSION
+        ),
         "input_snapshot_count": len(raw_records),
         "semantic_error_observer_count": semantic_errors,
         "hard_knowledge_recovered_count": hard_knowledge_recovered,
@@ -258,6 +323,11 @@ def materialize_training_records(
         "tom1_records": tom1_records,
         "tom2_records": tom2_records,
     }
+    if public_only:
+        result["belief_information_scope"] = (
+            PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
+        )
+    return result
 
 
 def write_jsonl_atomic(path: Path, records: list[dict[str, Any]]) -> None:

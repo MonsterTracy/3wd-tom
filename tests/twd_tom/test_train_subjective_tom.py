@@ -49,12 +49,22 @@ from werewolf.models.twd_tom.dataset import (
     second_order_effective_subject_mask,
 )
 from werewolf.models.twd_tom.schema import (
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
     SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
-from tests.twd_tom.public_event_fixtures import make_training_sample
+from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+from tests.twd_tom.public_event_fixtures import (
+    make_public_only_training_sample,
+    make_training_sample,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -305,6 +315,44 @@ def test_first_order_loader_does_not_call_second_order_prefilter(
     assert next(iter(loader))["subject_mask"].any()
 
 
+@pytest.mark.parametrize(
+    ("tom_order", "public_only", "expects_private"),
+    [(1, False, True), (1, True, False), (2, True, False)],
+)
+def test_forwarding_respects_validated_information_scope(
+    tmp_path,
+    tom_order,
+    public_only,
+    expects_private,
+):
+    sample = (
+        make_public_only_training_sample(tom_order)
+        if public_only
+        else make_training_sample(tom_order)
+    )
+    config = _training_config(
+        tmp_path,
+        tom_order,
+        train_sample=sample,
+        validation_sample=deepcopy(sample) | {"game_id": "validation-game"},
+    )
+    loader, _dataset = build_data_loader(
+        config,
+        dataset_path=config.resolved_dataset_path,
+        shuffle=False,
+    )
+
+    class CapturingModel:
+        def __call__(self, **kwargs):
+            self.arguments = kwargs
+            return {}
+
+    model = CapturingModel()
+    _forward_batch(model, next(iter(loader)))
+    assert ("known_werewolves" in model.arguments) is expects_private
+    assert ("known_non_werewolves" in model.arguments) is expects_private
+
+
 def test_second_order_rotation_is_enabled_only_for_training_loader(tmp_path):
     config = _training_config(tmp_path, 2)
     train_loader, train_dataset, validation_loader, validation_dataset = (
@@ -473,6 +521,55 @@ def test_each_epoch_validates_and_equal_loss_keeps_earlier_best(tmp_path, monkey
     assert [entry["is_best"] for entry in history] == [True, True, False]
     assert [entry["best_epoch"] for entry in history] == [1, 2, 2]
     assert all("train" in entry and "validation" in entry for entry in history)
+
+
+def test_public_only_checkpoint_and_summary_record_dataset_lineage(
+    tmp_path,
+    monkeypatch,
+):
+    config = _training_config(
+        tmp_path,
+        1,
+        train_sample=make_public_only_training_sample(
+            1,
+            game_id="public-train",
+        ),
+        validation_sample=make_public_only_training_sample(
+            1,
+            game_id="public-validation",
+        ),
+    )
+    monkeypatch.setattr(
+        train_module,
+        "train_one_epoch",
+        lambda *_args, **_kwargs: {"mean_loss": 1.0, "valid_subject_count": 1},
+    )
+    monkeypatch.setattr(
+        train_module,
+        "evaluate_model",
+        lambda *_args, **_kwargs: {"mean_loss": 1.0, "valid_subject_count": 1},
+    )
+    summary = run_training(config)
+    checkpoint = torch.load(
+        config.run_output_dir / "best.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+    expected = {
+        "schema_version": PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+        "model_input_scope": PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+        "private_fields_usage": PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
+        "belief_information_scope": PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+        "annotation_schema_version": (
+            PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+        ),
+        "label_provenance": PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+        "source_label_provenance": PUBLIC_ONLY_LABEL_PROVENANCE,
+    }
+    for field_name, value in expected.items():
+        assert checkpoint[field_name] == value
+        assert summary[field_name] == value
+        assert checkpoint["run_provenance"][field_name] == value
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])

@@ -6,6 +6,7 @@ from copy import deepcopy
 import pytest
 import torch
 
+import script.twd_tom.materialize_training_data as materializer_module
 from script.twd_tom.materialize_training_data import (
     materialize_training_data,
     materialize_training_records,
@@ -22,7 +23,16 @@ from werewolf.models.twd_tom.schema import (
     DETERMINISTIC_HARD_KNOWLEDGE_OBSERVER_PROVENANCE,
     FORMAL_ANNOTATION_SCHEMA_VERSION,
     FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION,
+    PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
 )
+from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
 
 
 def _all_ok(sample):
@@ -50,6 +60,20 @@ def _semantic_error(sample, observer_id, *, unique_pair=False):
             for player in (f"player{index}" for index in range(1, 8))
             if player not in pair
         ]
+    return sample
+
+
+def _public_only(sample):
+    sample = deepcopy(sample)
+    sample["schema_version"] = PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+    sample["label_prompt_version"] = PUBLIC_ONLY_LABEL_PROMPT_VERSION
+    sample["label_provenance"] = PUBLIC_ONLY_LABEL_PROVENANCE
+    sample["known_werewolves"] = {
+        subject: [] for subject in sample["known_werewolves"]
+    }
+    sample["known_non_werewolves"] = {
+        subject: [] for subject in sample["known_non_werewolves"]
+    }
     return sample
 
 
@@ -110,6 +134,74 @@ def test_unique_hard_knowledge_is_retained_as_exact_deterministic_target(
     target = item["pair_targets"][2]
     assert torch.count_nonzero(target).item() == 1
     assert target.sum().item() == pytest.approx(1.0)
+
+
+def test_public_only_ok_reports_materialize_with_public_lineage(
+    suspicion_sample_factory,
+):
+    raw = _public_only(
+        _all_ok(suspicion_sample_factory(observers=(1, 2, 3)))
+    )
+    raw["suspected_werewolves"]["player2"] = ["player4", "player6"]
+    result = materialize_training_records([raw])
+    first = result["tom1_records"][0]
+    second = result["tom2_records"][0]
+    assert result["policy_version"] == (
+        PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION
+    )
+    assert result["belief_information_scope"] == (
+        PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
+    )
+    assert first["suspected_werewolves"]["player2"] == [
+        "player4",
+        "player6",
+    ]
+    for sample in (first, second):
+        assert sample["source_schema_version"] == (
+            PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+        )
+        assert sample["source_label_provenance"] == (
+            PUBLIC_ONLY_LABEL_PROVENANCE
+        )
+        assert sample["annotation_schema_version"] == (
+            PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+        )
+        assert sample["label_provenance"] == (
+            PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE
+        )
+        assert sample["model_input_scope"] == PUBLIC_ONLY_MODEL_INPUT_SCOPE
+        assert sample["private_fields_usage"] == (
+            PUBLIC_ONLY_PRIVATE_FIELDS_USAGE
+        )
+
+
+@pytest.mark.parametrize("status", ["semantic_error", "parse_error", "reporter_error"])
+def test_public_only_non_ok_is_unavailable_without_hard_knowledge_recovery(
+    suspicion_sample_factory,
+    monkeypatch,
+    status,
+):
+    raw = _public_only(
+        _all_ok(suspicion_sample_factory(observers=(1, 2, 3)))
+    )
+    subject = "player2"
+    raw["belief_status"][subject] = status
+    raw["belief_errors"][subject] = f"synthetic {status}"
+    raw["suspected_werewolves"][subject] = None
+
+    def forbidden_recovery(*_args, **_kwargs):
+        raise AssertionError("public-only policy entered hard-knowledge recovery")
+
+    monkeypatch.setattr(
+        materializer_module,
+        "close_hard_knowledge",
+        forbidden_recovery,
+    )
+    result = materialize_training_records([raw])
+    assert result["hard_knowledge_recovered_count"] == 0
+    assert result["unresolved_observer_count"] == 1
+    assert result["tom1_records"] == []
+    assert set(result["tom2_records"][0]["observer_ids"]) == {1, 3}
 
 
 def test_unresolved_speaker_drops_tom1_and_filters_tom2_atomically(
@@ -202,4 +294,3 @@ def test_materializer_is_deterministic_atomic_and_refuses_overwrite(
             tom1_output_path=first_tom1,
             tom2_output_path=first_tom2,
         )
-
