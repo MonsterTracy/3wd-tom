@@ -38,10 +38,19 @@ from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     STRUCTURED_TOKEN_TO_ID,
 )
-from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.models.twd_tom.samples import (
+    PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+    SAMPLE_SCHEMA_VERSION,
+)
 from werewolf.models.twd_tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
 )
 
 
@@ -105,9 +114,31 @@ def build_model_from_checkpoint(
             "checkpoint backbone mismatch: expected one of "
             f"{SUPPORTED_BACKBONE_NAMES!r}, got {backbone_name!r}"
         )
+    schema_version = checkpoint.get("schema_version")
+    if schema_version == SAMPLE_SCHEMA_VERSION:
+        lineage_contract = {
+            "schema_version": SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": TOM_INPUT_SCOPES[tom_order],
+        }
+    elif schema_version == PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION:
+        lineage_contract = {
+            "schema_version": PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+            "belief_information_scope": PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+            "private_fields_usage": PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
+            "annotation_schema_version": (
+                PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+            ),
+            "label_provenance": PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+            "source_label_provenance": PUBLIC_ONLY_LABEL_PROVENANCE,
+        }
+    else:
+        raise ValueError(
+            "checkpoint schema_version is not a supported formal lineage: "
+            f"{schema_version!r}"
+        )
     expected = {
-        "schema_version": SAMPLE_SCHEMA_VERSION,
-        "model_input_scope": TOM_INPUT_SCOPES[tom_order],
+        **lineage_contract,
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),

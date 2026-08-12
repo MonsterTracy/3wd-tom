@@ -26,11 +26,18 @@ from werewolf.models.twd_tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
     PAIR_ORDERING,
+    PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+    PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION,
+    PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+    PUBLIC_ONLY_LABEL_PROVENANCE,
+    PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+    PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
     SECOND_ORDER_OBSERVER_EVENT_CONDITIONING,
     SECOND_ORDER_OBSERVER_READOUT,
     SECOND_ORDER_SUBJECT_SUPERVISION,
     SECOND_ORDER_TARGET_ENCODING,
 )
+from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
 from tests.twd_tom.public_event_fixtures import make_training_sample
 from werewolf.models.twd_tom.belief_backbone import (
@@ -50,6 +57,7 @@ def make_checkpoint(
     backbone=QWEN2_BACKBONE_NAME,
     enable_suspicion_aux=False,
     enable_factorized_pair_head=False,
+    public_only=False,
 ):
     config = TrainingConfig(
         tom_order=tom_order,
@@ -70,6 +78,19 @@ def make_checkpoint(
     validation_sha256 = (
         sha256_file(validation_path) if validation_path.is_file() else "0" * 64
     )
+    dataset_contract = None
+    if public_only:
+        dataset_contract = {
+            "source_schema_version": PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": PUBLIC_ONLY_MODEL_INPUT_SCOPE,
+            "belief_information_scope": PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+            "private_fields_usage": PUBLIC_ONLY_PRIVATE_FIELDS_USAGE,
+            "annotation_schema_version": (
+                PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION
+            ),
+            "label_provenance": PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE,
+            "source_label_provenance": PUBLIC_ONLY_LABEL_PROVENANCE,
+        }
     return checkpoint_payload(
         model=model,
         optimizer=optimizer,
@@ -96,6 +117,7 @@ def make_checkpoint(
             "deterministic_algorithms_enabled": True,
             "seed": 42,
         },
+        dataset_contract=dataset_contract,
     )
 
 
@@ -177,6 +199,60 @@ def test_tom2_factorized_pair_head_checkpoint_restores_strictly(tmp_path):
     assert restored.state_dict().keys() == loaded["model_state_dict"].keys()
     for name, expected in loaded["model_state_dict"].items():
         torch.testing.assert_close(restored.state_dict()[name], expected)
+
+
+@pytest.mark.parametrize("enable_factorized_pair_head", [False, True])
+def test_public_only_tom2_checkpoint_restores_strictly(
+    tmp_path,
+    enable_factorized_pair_head,
+):
+    checkpoint = make_checkpoint(
+        tmp_path,
+        tom_order=2,
+        enable_factorized_pair_head=enable_factorized_pair_head,
+        public_only=True,
+    )
+
+    restored = build_model_from_checkpoint(
+        checkpoint,
+        device=torch.device("cpu"),
+    )
+
+    assert restored.tom_order == 2
+    assert (
+        restored.config.enable_factorized_pair_head
+        is enable_factorized_pair_head
+    )
+    assert restored.state_dict().keys() == checkpoint["model_state_dict"].keys()
+    for name, expected in checkpoint["model_state_dict"].items():
+        torch.testing.assert_close(restored.state_dict()[name], expected)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("private_fields_usage", "label_construction_only"),
+        ("model_input_scope", "structured_public_events_only"),
+    ],
+)
+def test_public_only_checkpoint_with_mixed_lineage_is_rejected(
+    tmp_path,
+    field,
+    value,
+):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2, public_only=True)
+    checkpoint[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+def test_unknown_checkpoint_schema_fails_closed(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2)
+    checkpoint["schema_version"] = "unknown_formal_schema"
+
+    with pytest.raises(ValueError, match="supported formal lineage"):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 
 @pytest.mark.parametrize(
