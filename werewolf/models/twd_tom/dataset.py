@@ -783,6 +783,22 @@ class TWDToMDataset(Dataset):
             "metadata": metadata,
         }
         if self.tom_order == 2:
+            suspicion_targets = torch.zeros(
+                (NUM_PLAYERS, NUM_PLAYERS),
+                dtype=self.target_dtype,
+            )
+            for subject, suspected_players in sample[
+                "suspected_werewolves"
+            ].items():
+                if suspected_players is None:
+                    continue
+                subject_index = PLAYER_TO_ID[subject] - 1
+                for player in suspected_players:
+                    suspicion_targets[
+                        subject_index,
+                        PLAYER_TO_ID[player] - 1,
+                    ] = 1.0
+            item["suspicion_targets"] = suspicion_targets
             item["reasoning_player_id"] = torch.tensor(
                 sample["speaker_id"], dtype=torch.int64
             )
@@ -868,11 +884,15 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         if any(
             "reasoning_player_id" not in item
             or "post_completed_public_speech_pre_next_action" not in item
+            or "suspicion_targets" not in item
             for item in batch
         ):
             raise ValueError(
                 "second-order samples require formal supervision fields"
             )
+        result["suspicion_targets"] = torch.stack(
+            [item["suspicion_targets"] for item in batch]
+        )
         result["reasoning_player_id"] = torch.stack(
             [item["reasoning_player_id"] for item in batch]
         )

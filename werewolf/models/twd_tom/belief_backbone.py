@@ -215,6 +215,7 @@ class ToMBeliefBackboneConfig:
     num_players: int = NUM_PLAYERS
     pair_class_count: int = NUM_WOLF_PAIR_CLASSES
     max_seq_len: int = 256
+    enable_suspicion_aux: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -240,6 +241,8 @@ class ToMBeliefBackboneConfig:
             or self.max_seq_len <= 0
         ):
             raise ValueError("max_seq_len must be a positive integer")
+        if not isinstance(self.enable_suspicion_aux, bool):
+            raise TypeError("enable_suspicion_aux must be a boolean")
 
 
 class ToMBeliefBackbone(nn.Module):
@@ -273,6 +276,8 @@ class ToMBeliefBackbone(nn.Module):
             if config is None
             else config
         )
+        if self.config.enable_suspicion_aux and self.tom_order != 2:
+            raise ValueError("suspicion auxiliary supervision requires tom_order=2")
 
         player_vocab_size = _mapping_vocab_size(PLAYER_TO_ID)
         action_vocab_size = _mapping_vocab_size(ACTION_TO_ID)
@@ -382,6 +387,11 @@ class ToMBeliefBackbone(nn.Module):
             HIDDEN_SIZE,
             self.config.pair_class_count,
         )
+        if self.config.enable_suspicion_aux:
+            self.suspicion_projection = nn.Linear(
+                HIDDEN_SIZE,
+                self.config.num_players,
+            )
 
         self._reset_parameters()
 
@@ -442,6 +452,13 @@ class ToMBeliefBackbone(nn.Module):
             std=0.02,
         )
         nn.init.zeros_(self.output_projection.bias)
+        if self.config.enable_suspicion_aux:
+            nn.init.normal_(
+                self.suspicion_projection.weight,
+                mean=0.0,
+                std=0.02,
+            )
+            nn.init.zeros_(self.suspicion_projection.bias)
 
     def forward(
         self,
@@ -675,6 +692,10 @@ class ToMBeliefBackbone(nn.Module):
         if self.tom_order == 2:
             result["relative_public_hidden_states"] = (
                 relative_public_hidden_states
+            )
+        if self.config.enable_suspicion_aux:
+            result["observer_suspicion_logits"] = self.suspicion_projection(
+                observer_hidden_states
             )
         return result
 

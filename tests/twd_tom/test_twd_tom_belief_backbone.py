@@ -229,8 +229,47 @@ def test_second_order_uses_the_same_single_pair_output_projection():
         torch.full((1, 7), 2.0),
     )
     assert "observer_suspicion_logits" not in output
+    assert second_order.config.enable_suspicion_aux is False
+    assert not hasattr(second_order, "suspicion_projection")
     assert not hasattr(second_order, "pair_output_projection")
     assert not hasattr(second_order, "suspicion_output_projection")
+
+
+def test_second_order_optional_suspicion_head_reuses_observer_hidden_states():
+    second_order = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(
+            max_seq_len=8,
+            enable_suspicion_aux=True,
+        ),
+        tom_order=2,
+    ).eval()
+    captured = {}
+
+    def capture(_module, args):
+        captured["input"] = args[0].detach().clone()
+
+    handle = second_order.suspicion_projection.register_forward_pre_hook(capture)
+    try:
+        with torch.no_grad():
+            output = second_order(**make_features())
+    finally:
+        handle.remove()
+
+    assert output["observer_suspicion_logits"].shape == (1, 7, 7)
+    torch.testing.assert_close(captured["input"], output["observer_hidden_states"])
+    assert second_order.suspicion_projection.in_features == HIDDEN_SIZE
+    assert second_order.suspicion_projection.out_features == 7
+
+
+def test_suspicion_auxiliary_head_rejects_first_order_model():
+    with pytest.raises(ValueError, match="requires tom_order=2"):
+        ToMBeliefBackbone(
+            ToMBeliefBackboneConfig(
+                max_seq_len=8,
+                enable_suspicion_aux=True,
+            ),
+            tom_order=1,
+        )
 
 
 def test_second_order_observer_query_attention_shapes_and_padding_mask():
@@ -356,7 +395,12 @@ def test_second_order_rejects_private_inputs():
 
 def test_gpt2_configuration_fields_are_removed():
     parameters = inspect.signature(ToMBeliefBackboneConfig).parameters
-    assert set(parameters) == {"num_players", "pair_class_count", "max_seq_len"}
+    assert set(parameters) == {
+        "num_players",
+        "pair_class_count",
+        "max_seq_len",
+        "enable_suspicion_aux",
+    }
     with pytest.raises(TypeError):
         ToMBeliefBackboneConfig(d_model=16)  # type: ignore[call-arg]
 

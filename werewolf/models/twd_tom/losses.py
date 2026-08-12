@@ -115,6 +115,63 @@ def masked_distribution_kl_divergence(
     )
 
 
+def masked_suspicion_binary_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    subject_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Average seven-player BCE over supervised observer rows."""
+
+    tensors = {
+        "logits": logits,
+        "targets": targets,
+        "subject_mask": subject_mask,
+    }
+    for field_name, tensor in tensors.items():
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{field_name} must be a tensor")
+    if logits.ndim != 3 or tuple(logits.shape[1:]) != (
+        NUM_PLAYERS,
+        NUM_PLAYERS,
+    ):
+        raise ValueError(
+            f"logits must have shape [B, {NUM_PLAYERS}, {NUM_PLAYERS}]"
+        )
+    if tuple(targets.shape) != tuple(logits.shape):
+        raise ValueError("targets must have the same shape as logits")
+    if tuple(subject_mask.shape) != tuple(logits.shape[:2]):
+        raise ValueError(
+            f"subject_mask must have shape [B, {NUM_PLAYERS}]"
+        )
+    if logits.shape[0] <= 0:
+        raise ValueError("batch size must be positive")
+    if not torch.is_floating_point(logits):
+        raise TypeError("logits must use a floating-point dtype")
+    if not torch.is_floating_point(targets):
+        raise TypeError("targets must use a floating-point dtype")
+    if subject_mask.dtype != torch.bool:
+        raise TypeError("subject_mask must use torch.bool")
+    if not torch.isfinite(logits).all():
+        raise ValueError("logits must contain only finite values")
+    if not torch.isfinite(targets).all():
+        raise ValueError("targets must contain only finite values")
+    if ((targets < 0.0) | (targets > 1.0)).any():
+        raise ValueError("targets must contain values in [0, 1]")
+
+    targets = targets.to(device=logits.device, dtype=logits.dtype)
+    subject_mask = subject_mask.to(device=logits.device)
+    valid_subject_count = subject_mask.sum()
+    if valid_subject_count.item() == 0:
+        raise ValueError("subject_mask must select at least one valid observer")
+    per_subject_loss = F.binary_cross_entropy_with_logits(
+        logits,
+        targets,
+        reduction="none",
+    ).mean(dim=-1)
+    masked_loss = per_subject_loss * subject_mask.to(per_subject_loss.dtype)
+    return masked_loss.sum() / valid_subject_count.to(masked_loss.dtype)
+
+
 def _validate_distribution_loss_inputs(
     *,
     logits: torch.Tensor,
@@ -299,4 +356,5 @@ __all__ = [
     "VALID_REDUCTIONS",
     "masked_distribution_cross_entropy",
     "masked_distribution_kl_divergence",
+    "masked_suspicion_binary_cross_entropy",
 ]

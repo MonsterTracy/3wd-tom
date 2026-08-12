@@ -140,6 +140,7 @@ def _training_config(
     validation_sample: dict | None = None,
     epochs: int = 1,
     backbone: str = QWEN2_BACKBONE_NAME,
+    enable_suspicion_aux: bool = False,
 ) -> TrainingConfig:
     train_path = tmp_path / f"tom{tom_order}_train.jsonl"
     validation_path = tmp_path / f"tom{tom_order}_validation.jsonl"
@@ -158,6 +159,7 @@ def _training_config(
         batch_size=1,
         device="cpu",
         max_seq_len=32,
+        enable_suspicion_aux=enable_suspicion_aux,
     )
 
 
@@ -183,6 +185,7 @@ def test_cli_requires_explicit_train_and_validation_datasets():
     assert args.dataset == "train.jsonl"
     assert args.validation_dataset == "val.jsonl"
     assert args.backbone == QWEN2_BACKBONE_NAME
+    assert args.tom2_suspicion_aux is False
     assert not hasattr(args, "test_dataset")
     for old_name in ("d_model", "n_head", "n_layer", "dropout", "dim_feedforward"):
         assert not hasattr(args, old_name)
@@ -212,6 +215,17 @@ def test_cli_requires_explicit_train_and_validation_datasets():
         ]
     )
     assert gpt2_args.backbone == GPT2_BLOCK_BACKBONE_NAME
+    aux_args = parser.parse_args(
+        [
+            *required,
+            "--dataset",
+            "train.jsonl",
+            "--validation-dataset",
+            "val.jsonl",
+            "--tom2-suspicion-aux",
+        ]
+    )
+    assert aux_args.tom2_suspicion_aux is True
 
 
 def test_model_builder_uses_fixed_qwen2_configuration(tmp_path):
@@ -768,10 +782,46 @@ def test_one_batch_forward_backward_uses_only_soft_target_cross_entropy(
     loss.backward()
     assert output["observer_pair_logits"].shape == (1, 7, 21)
     assert "observer_suspicion_logits" not in output
-    assert "suspicion_targets" not in batch
+    assert ("suspicion_targets" in batch) is (tom_order == 2)
     assert torch.isfinite(loss)
     assert model.output_projection.weight.grad is not None
     assert loss.grad_fn is not None
+
+
+def test_tom2_suspicion_aux_optimizes_sum_but_selects_on_pair_loss(tmp_path):
+    config = _training_config(
+        tmp_path,
+        2,
+        backbone=GPT2_BLOCK_BACKBONE_NAME,
+        enable_suspicion_aux=True,
+    )
+    summary = run_training(config)
+    checkpoint = torch.load(
+        config.run_output_dir / "best.pt",
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    for metrics in (
+        summary["final_train_metrics"],
+        summary["final_validation_metrics"],
+    ):
+        assert metrics["mean_optimization_loss"] == pytest.approx(
+            metrics["mean_loss"] + metrics["mean_suspicion_aux_loss"]
+        )
+    assert checkpoint["selection_metric_name"] == "validation_mean_loss"
+    assert checkpoint["selection_metric_value"] == pytest.approx(
+        checkpoint["validation_metrics"]["mean_loss"]
+    )
+    assert summary["model_config"]["enable_suspicion_aux"] is True
+    assert checkpoint["model_config"]["enable_suspicion_aux"] is True
+    assert checkpoint["training_config"]["enable_suspicion_aux"] is True
+    assert "suspicion_projection.weight" in checkpoint["model_state_dict"]
+
+
+def test_training_config_rejects_suspicion_aux_for_first_order(tmp_path):
+    with pytest.raises(ValueError, match="requires tom_order=2"):
+        _training_config(tmp_path, 1, enable_suspicion_aux=True)
 
 
 def test_effective_subject_mask_excludes_only_the_reasoning_player():
