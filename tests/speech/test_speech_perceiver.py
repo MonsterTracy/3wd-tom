@@ -107,6 +107,14 @@ class SpeechPerceiverTest(unittest.TestCase):
             call["response_format"],
         )
         self.assertEqual(
+            call["extra_body"],
+            {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
+        )
+        self.assertEqual(
             call["messages"][0]["role"],
             "user",
         )

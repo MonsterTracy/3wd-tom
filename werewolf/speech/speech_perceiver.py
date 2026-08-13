@@ -300,6 +300,11 @@ class SpeechPerceiver:
             max_tokens=(
                 SPEECH_PARSER_MAX_TOKENS
             ),
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
         )
 
         try:
