@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -111,6 +112,18 @@ class SpeechActionValidationError(ValueError):
         return self._raw_response
 
 
+@dataclass(frozen=True)
+class SpeechParseAuditResult:
+    """One online parse result with the actual backend response."""
+
+    normalized_actions: list[list[str]]
+    raw_response: str | None
+    parse_status: str
+    protected_self_claim_actions: list[list[str]]
+    error_type: str | None
+    error_message: str | None
+
+
 class SpeechPerceiver:
     """Convert one public speech turn into structured speech actions.
 
@@ -146,38 +159,75 @@ class SpeechPerceiver:
         """Parse one speech turn without interrupting the game on failure."""
 
         del context
+        return self.parse_with_audit(
+            speaker=speaker,
+            speech=speech,
+            day=day,
+            phase=phase,
+        ).normalized_actions
 
+    def parse_with_audit(
+        self,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+    ) -> SpeechParseAuditResult:
+        """Parse once through the online tolerant path and retain audit data."""
+
+        precondition_error = None
         if self.backend is None or not self.model_name:
-            return []
-
-        if type(speaker) is not int or not 1 <= speaker <= 7:
-            return []
-
-        if not isinstance(speech, str) or not speech.strip():
-            return []
-
-        protected_actions = (
-            self._extract_explicit_self_claim_actions(
-                speaker=speaker,
-                speech=speech,
+            precondition_error = RuntimeError(
+                "speech parser backend and model must be configured"
             )
-        )
+        elif type(speaker) is not int or not 1 <= speaker <= 7:
+            precondition_error = ValueError(
+                "speaker must be an integer in [1, 7]"
+            )
+        elif not isinstance(speech, str) or not speech.strip():
+            precondition_error = ValueError("speech must be non-empty text")
+        if precondition_error is not None:
+            return SpeechParseAuditResult(
+                normalized_actions=[],
+                raw_response=None,
+                parse_status="parser_error",
+                protected_self_claim_actions=[],
+                error_type=type(precondition_error).__name__,
+                error_message=str(precondition_error),
+            )
 
+        protected_actions = self._extract_explicit_self_claim_actions(
+            speaker=speaker,
+            speech=speech,
+        )
         try:
-            return self._parse_configured(
+            actions, raw_response = self._parse_configured_with_response(
                 speaker=speaker,
                 speech=speech,
                 day=day,
                 phase=phase,
-                protected_actions=(
-                    protected_actions
-                ),
+                protected_actions=protected_actions,
             )
-        except Exception:
-            # A literal public self-role declaration is still valid public
-            # evidence even if the LLM parser fails. No hidden role or
-            # game-state information is used here.
-            return protected_actions
+            return SpeechParseAuditResult(
+                normalized_actions=actions,
+                raw_response=raw_response,
+                parse_status="ok",
+                protected_self_claim_actions=protected_actions,
+                error_type=None,
+                error_message=None,
+            )
+        except Exception as exc:
+            raw_response = getattr(exc, "raw_response", None)
+            if not isinstance(raw_response, str):
+                raw_response = None
+            return SpeechParseAuditResult(
+                normalized_actions=protected_actions,
+                raw_response=raw_response,
+                parse_status="parser_error",
+                protected_self_claim_actions=protected_actions,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
 
     def parse_strict(
         self,
@@ -329,6 +379,9 @@ class SpeechPerceiver:
                 raw_response=response_text,
             ) from exc
         except ValueError as exc:
+            exc.raw_response = response_text
+            raise
+        except Exception as exc:
             exc.raw_response = response_text
             raise
 
@@ -1143,5 +1196,6 @@ player{speaker}: {speech}"""
 
 __all__ = [
     "SPEECH_PARSER_MAX_TOKENS",
+    "SpeechParseAuditResult",
     "SpeechPerceiver",
 ]
