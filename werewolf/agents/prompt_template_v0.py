@@ -1,3 +1,5 @@
+import json
+
 from werewolf.models.twd_tom.schema import ACTION_NAMES
 
 
@@ -18,6 +20,9 @@ CON = Const()
 LEGACY_GAMEPLAY_PROMPT_PROFILE = "legacy"
 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
     "strict_classic7"
+)
+STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE = (
+    "strict_classic7_discourse_v1"
 )
 
 
@@ -377,6 +382,92 @@ def build_strict_classic7_speech_plan_prompt(
 - 只输出符合请求 JSON Schema 的对象。"""
 
 
+def build_strict_classic7_discourse_speech_plan_prompt(
+    observation,
+    *,
+    suggestible_player_ids,
+    public_events,
+):
+    """Add canonical public evidence selection to the strict private planner."""
+
+    base_prompt = build_strict_classic7_speech_plan_prompt(
+        observation,
+        suggestible_player_ids=suggestible_player_ids,
+    )
+    contract_marker = "【计划合同】"
+    if base_prompt.count(contract_marker) != 1:
+        raise ValueError(
+            "strict speech plan prompt must contain contract marker exactly once"
+        )
+    baseline_output_clause = (
+        "- 只输出 public_actions；禁止 reasoning、strategy、notes、summary "
+        "或其他自由文本字段。"
+    )
+    if base_prompt.count(baseline_output_clause) != 1:
+        raise ValueError(
+            "strict speech plan output clause must appear exactly once"
+        )
+    discourse_output_clause = (
+        "- 只输出 public_actions 和 public_evidence_refs；禁止 reason、"
+        "rationale、analysis、thought、notes、summary、evidence_text、"
+        "strategy 或其他自由文本字段。"
+    )
+    public_history = _render_discourse_public_evidence(public_events)
+    prompt = base_prompt.replace(
+        baseline_output_clause,
+        discourse_output_clause,
+        1,
+    )
+    evidence_section = f"""【可引用的因果公开事件】
+下列 event_idx 是唯一允许引用的公开历史。observable_public_fact 是已发生的公开事实；public_claim 只是玩家公开声称，不是权威真值。只选择与本轮表达相关的事件；不要撰写证据摘要。
+{public_history}
+
+"""
+    return prompt.replace(
+        contract_marker,
+        evidence_section + contract_marker,
+        1,
+    )
+
+
+def _render_discourse_public_evidence(public_events):
+    """Label public events as observable facts or non-authoritative claims."""
+
+    represented = []
+    for event in public_events:
+        if event.get("event_type") == "public_speech":
+            represented.append(
+                {
+                    "epistemic_type": "public_claim",
+                    "claimant": event.get("speaker"),
+                    "truth_status": "not_authoritative_truth",
+                    "event": event,
+                }
+            )
+        elif event.get("token_type") == "speech_action":
+            represented.append(
+                {
+                    "epistemic_type": "public_claim",
+                    "claimant": event.get("subject"),
+                    "truth_status": "not_authoritative_truth",
+                    "event": event,
+                }
+            )
+        else:
+            represented.append(
+                {
+                    "epistemic_type": "observable_public_fact",
+                    "event": event,
+                }
+            )
+    return json.dumps(
+        represented,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 _PUBLIC_ACTION_REALIZATION_TEMPLATES = {
     "point_as_werewolf": "必须明确公开判断 player{target} 是狼人。",
     "point_as_villager": "必须明确公开判断 player{target} 是村民。",
@@ -461,6 +552,49 @@ def build_strict_classic7_speech_render_prompt(
 - 只将上面的公开表达义务表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
 - 不得新增计划外玩家、角色判断、技能结果或投票目标。
 - 不输出 JSON、Markdown、标题或分析。"""
+
+
+def build_strict_classic7_discourse_speech_render_prompt(
+    *,
+    phase_text,
+    actor,
+    public_actions,
+    selected_public_evidence,
+):
+    """Render validated actions with only explicitly selected public evidence."""
+
+    baseline = build_strict_classic7_speech_render_prompt(
+        phase_text=phase_text,
+        actor=actor,
+        public_actions=public_actions,
+    )
+    baseline_player_rules = """- 只将上面的公开表达义务表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
+- 不得新增计划外玩家、角色判断、技能结果或投票目标。"""
+    if baseline.count(baseline_player_rules) != 1:
+        raise ValueError(
+            "strict speech renderer player rules must appear exactly once"
+        )
+    discourse_player_rules = """- 只将 public_actions 中的原子游戏语义表述成自然语言，不补充计划之外的角色判断、技能结果或投票目标。
+- 可以为引用或比较下方已选择的公开证据而提到证据中显式出现的玩家；这些玩家不得因此获得任何新的原子游戏语义。"""
+    baseline = baseline.replace(
+        baseline_player_rules,
+        discourse_player_rules,
+        1,
+    )
+    evidence_text = _render_discourse_public_evidence(
+        selected_public_evidence
+    )
+    return baseline + f"""
+【仅可使用的已验证公开证据】
+{evidence_text}
+【discourse 合同】
+- 生成简洁、具体、自然的公开发言；可以基于上述证据解释为什么支持、反对或怀疑计划中的玩家。
+- observable_public_fact 可以作为已发生的公开事实；public_claim 及其中的 sp_actions 只能表述为对应玩家曾公开说过或声称过，不能当作权威真值。
+- 可以比较所选 public_claim、指出公开可见的不一致，或提出基于所选公开历史的自然追问。
+- selected evidence 中的玩家只能作为公开历史参与者被引用；任何角色判断、查验、救/毒/守或投票意图仍必须由 public_actions 明确授权。
+- 最终发言必须完整实现全部 public_actions，且不得新增计划外角色判断、查验结果、救/毒/守声明或投票目标。
+- 例如只有 oppose(player4) 时，可以说公开说法不一致、目前不信任 player4，但不得升级为 player4 是狼人。
+- 不得引用未列出的历史，不得输出 planner response、JSON、分析或控制字段。"""
 
 CON.game_description = """你现在正在玩一局7人狼人杀游戏。
 

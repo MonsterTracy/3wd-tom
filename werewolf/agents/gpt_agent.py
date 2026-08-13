@@ -6,18 +6,24 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     PublicSpeechPlanValidationError,
     canonical_suggestible_player_ids,
+    discourse_public_speech_plan_response_format,
     night_action_response_format,
+    public_evidence_player_ids,
     public_speech_plan_response_format,
     validate_gameplay_public_speech,
+    validate_discourse_public_speech_plan,
     validate_public_speech_plan,
 )
 from werewolf.backends import BackendError
 from werewolf.agents.prompt_template_v0 import (
     CON,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
     _render_authoritative_public_phase,
+    build_strict_classic7_discourse_speech_render_prompt,
     build_strict_classic7_speech_render_prompt,
 )
+from werewolf.models.twd_tom.public_events import normalize_public_events
 from . import agent_registry as AgentRegistry
 
 
@@ -53,15 +59,26 @@ class GPTAgent(LLMAgent):
         )
         is_strict_speech = (
             'speech' in phase
-            and self.gameplay_prompt_profile == (
-                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
-            )
+            and self.gameplay_prompt_profile in {
+                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+                STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
+            }
         )
         suggestible_player_ids = None
         if is_strict_speech:
             suggestible_player_ids = canonical_suggestible_player_ids(
                 observation.get("authoritative_public_state")
             )
+        if (
+            is_strict_speech
+            and self.gameplay_prompt_profile
+            == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+        ):
+            public_events = normalize_public_events(
+                observation.get("canonical_public_events")
+            )
+            observation = dict(observation)
+            observation["canonical_public_events"] = public_events
         night_candidate_snapshot = None
         if is_constrained_night_action:
             night_candidate_snapshot = (
@@ -245,15 +262,33 @@ class GPTAgent(LLMAgent):
             },
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=public_speech_plan_response_format(
-                supports_json_schema=getattr(
-                    self.backend,
-                    "supports_json_schema",
-                    False,
-                ),
-                suggestible_player_ids=suggestible_player_ids,
-                speaker_id=player_id,
-                speaker_role=speaker_role,
+            response_format=(
+                discourse_public_speech_plan_response_format(
+                    supports_json_schema=getattr(
+                        self.backend,
+                        "supports_json_schema",
+                        False,
+                    ),
+                    suggestible_player_ids=suggestible_player_ids,
+                    speaker_id=player_id,
+                    speaker_role=speaker_role,
+                    public_event_indices=tuple(
+                        event["event_idx"]
+                        for event in observation["canonical_public_events"]
+                    ),
+                )
+                if self.gameplay_prompt_profile
+                == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+                else public_speech_plan_response_format(
+                    supports_json_schema=getattr(
+                        self.backend,
+                        "supports_json_schema",
+                        False,
+                    ),
+                    suggestible_player_ids=suggestible_player_ids,
+                    speaker_id=player_id,
+                    speaker_role=speaker_role,
+                )
             ),
         )
         context = (
@@ -270,21 +305,72 @@ class GPTAgent(LLMAgent):
             raise PublicSpeechPlanValidationError(
                 f"planner response is not valid JSON ({context})"
             ) from exc
-        plan = validate_public_speech_plan(
-            plan_payload,
-            suggestible_player_ids=suggestible_player_ids,
-            player_id=player_id,
-            speaker_role=speaker_role,
-            phase=phase,
-            game_context=game_context,
-        )
-        renderer_prompt = build_strict_classic7_speech_render_prompt(
-            phase_text=_render_authoritative_public_phase(
-                observation["authoritative_public_state"]
-            ),
-            actor=player_id,
-            public_actions=plan.as_list(),
-        )
+        if self.gameplay_prompt_profile == (
+            STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+        ):
+            public_events = normalize_public_events(
+                observation["canonical_public_events"]
+            )
+            event_by_index = {
+                event["event_idx"]: event for event in public_events
+            }
+            plan = validate_discourse_public_speech_plan(
+                plan_payload,
+                suggestible_player_ids=suggestible_player_ids,
+                player_id=player_id,
+                speaker_role=speaker_role,
+                phase=phase,
+                public_event_indices=tuple(event_by_index),
+                game_context=game_context,
+            )
+            selected_public_evidence = [
+                event_by_index[index]
+                for index in plan.public_evidence_refs
+            ]
+            allowed_speech_player_ids = set(plan.targets) | set(
+                public_evidence_player_ids(selected_public_evidence)
+            )
+            renderer_prompt = build_strict_classic7_discourse_speech_render_prompt(
+                phase_text=_render_authoritative_public_phase(
+                    observation["authoritative_public_state"]
+                ),
+                actor=player_id,
+                public_actions=plan.actions_as_list(),
+                selected_public_evidence=selected_public_evidence,
+            )
+            if self.has_log:
+                self.logger.info(
+                    "speech_discourse_plan_validated",
+                    extra={
+                        "game_id": game_context,
+                        "player_id": player_id,
+                        "phase": phase,
+                        "public_actions": plan.actions_as_list(),
+                        "public_evidence_refs": list(
+                            plan.public_evidence_refs
+                        ),
+                        "selected_public_evidence": (
+                            selected_public_evidence
+                        ),
+                    },
+                )
+        else:
+            plan = validate_public_speech_plan(
+                plan_payload,
+                suggestible_player_ids=suggestible_player_ids,
+                player_id=player_id,
+                speaker_role=speaker_role,
+                phase=phase,
+                game_context=game_context,
+            )
+            renderer_prompt = build_strict_classic7_speech_render_prompt(
+                phase_text=_render_authoritative_public_phase(
+                    observation["authoritative_public_state"]
+                ),
+                actor=player_id,
+                public_actions=plan.as_list(),
+            )
+            allowed_speech_player_ids = plan.targets
         rendered_content, render_metadata = self._chat_with_metadata(
             [{"role": "user", "content": renderer_prompt}],
             player_log_context={
@@ -304,7 +390,7 @@ class GPTAgent(LLMAgent):
             finish_reason=render_metadata["finish_reason"],
             player_id=player_id,
             phase=phase,
-            planned_player_ids=plan.targets,
+            planned_player_ids=allowed_speech_player_ids,
         )
         final_speech = rendered_content.strip()
         return final_speech, final_speech, renderer_prompt
