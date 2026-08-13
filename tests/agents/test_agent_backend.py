@@ -361,6 +361,15 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(len(backend.calls), 2)
         self.assertEqual(backend.calls[0]["response_format"]["type"], "json_schema")
         self.assertIsNone(backend.calls[1]["response_format"])
+        self.assertNotIn("extra_body", backend.calls[0])
+        self.assertEqual(
+            backend.calls[1]["extra_body"],
+            {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
+        )
         self.assertEqual(
             [call["temperature"] for call in backend.calls],
             [1.0, 0.0],
@@ -1119,6 +1128,7 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(backend.calls[0]["model"], "agent-model")
         self.assertEqual(backend.calls[0]["temperature"], 0.2)
         self.assertIsNone(backend.calls[0]["max_tokens"])
+        self.assertNotIn("extra_body", backend.calls[0])
 
     def test_gameplay_speech_requires_explicit_fresh_metadata(self):
         no_metadata_backend = RecordingBackend(["不会被旧路径读取"])
@@ -1291,6 +1301,7 @@ class AgentBackendTest(unittest.TestCase):
                     request["response_format"]["json_schema"]["strict"]
                 )
                 self.assertEqual(request["max_tokens"], 512)
+                self.assertNotIn("extra_body", request)
                 self.assertEqual(
                     schema["properties"]["action_index"]["enum"],
                     list(range(len(valid_actions))),

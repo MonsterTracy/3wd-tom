@@ -285,6 +285,11 @@ class GPTAgent(LLMAgent):
             },
             temperature=0.0,
             max_tokens=max_tokens,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
         )
         validate_gameplay_public_speech(
             rendered_content,
