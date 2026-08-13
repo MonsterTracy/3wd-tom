@@ -332,7 +332,7 @@ def test_discourse_planner_preserves_baseline_contract_byte_exactly():
         suggestible_player_ids=(2, 3, 4, 5, 6, 7),
     )
     assert hashlib.sha256(baseline.encode()).hexdigest() == (
-        "3dde5d3540fed19e539c24113751944740d675e759ca319d7d4950f008891cca"
+        "f67c003ba7ff48fd71a7e299fc275767310f5c89b91d732f2263c7693ae2adba"
     )
 
     discourse = prompt_template_v0.build_strict_classic7_discourse_speech_plan_prompt(

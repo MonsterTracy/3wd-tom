@@ -347,12 +347,12 @@ def build_strict_classic7_speech_plan_prompt(
         if getattr(log, "event", None) not in {"speech", "speech_pk"}:
             continue
         source = getattr(log, "source", None)
-        if source == actor or not isinstance(source, int) or not 1 <= source <= 7:
+        if not isinstance(source, int) or not 1 <= source <= 7:
             continue
         speech = getattr(log, "content", {}).get("speech_content")
         if isinstance(speech, str) and speech.strip():
             public_claims.append(f"- player{source}：{speech}")
-    claims_text = "\n".join(public_claims) or "- (尚无其他玩家公开主张)"
+    claims_text = "\n".join(public_claims) or "- (尚无玩家公开主张)"
 
     action_names = ", ".join(ACTION_NAMES)
     return f"""你是 strict gameplay 的 Private Planner。
@@ -366,7 +366,7 @@ def build_strict_classic7_speech_plan_prompt(
 
 {role_rules}
 
-【其他玩家此前的公开主张】
+【所有玩家此前的公开主张】
 这些只是玩家发言，可能是真话、谎言、误解或策略性表达；若与权威公共状态冲突，以权威公共状态为准。
 {claims_text}
 
@@ -378,6 +378,8 @@ def build_strict_classic7_speech_plan_prompt(
 - vote_intent 只能指向“当前可公开建议放逐”中的玩家，可以不输出 vote_intent。
 - 不要把历史旧投票目标直接复制成当前目标；已死亡或放逐玩家不得成为 vote_intent。
 - 其他历史技能声明可以指向过去玩家，因为它们只是准备公开表达的声称。
+- 同一个 target 不得同时被 point_as_* 明确判断为两个不同角色。
+- 若明确用 point_as_* 自报角色，同一计划中的技能声明必须符合该公开身份：预言家只能查验，女巫只能救人或毒人，守卫只能守护，村民或狼人不得声称技能；没有明确自报角色时仍可用技能声明进行 bluff。
 - 只保留少量关键 action，避免复述完整历史；空 public_actions 合法。
 - 只输出符合请求 JSON Schema 的对象。"""
 
@@ -470,13 +472,13 @@ def _render_discourse_public_evidence(public_events):
 
 _PUBLIC_ACTION_REALIZATION_TEMPLATES = {
     "point_as_werewolf": "必须明确公开判断 player{target} 是狼人。",
-    "point_as_villager": "必须明确公开判断 player{target} 是村民。",
-    "point_as_seer": "必须明确公开判断 player{target} 是预言家。",
-    "point_as_witch": "必须明确公开判断 player{target} 是女巫。",
-    "point_as_guard": "必须明确公开判断 player{target} 是守卫。",
+    "point_as_villager": "必须明确公开判断 player{target} 是村民；这是角色判断，不得表述为查验得出村民身份。",
+    "point_as_seer": "必须明确公开判断 player{target} 是预言家；这是角色判断，不得表述为查验得出预言家身份。",
+    "point_as_witch": "必须明确公开判断 player{target} 是女巫；这是角色判断，不得表述为查验得出女巫身份。",
+    "point_as_guard": "必须明确公开判断 player{target} 是守卫；这是角色判断，不得表述为查验得出守卫身份。",
     "support": "必须明确表达支持、认可或赞同 player{target}；不得因此自动产生任何角色判断。",
     "oppose": "必须明确表达质疑、反对、不认可 player{target} 或认为其发言可疑；不得因此自动产生狼人判断或投票意图。",
-    "check_as_good": "必须明确公开声称查验 player{target} 的结果为好人；不得额外产生 point_as_villager(player{target})。",
+    "check_as_good": "必须明确公开声称查验 player{target} 的结果仅为好人；不得说查验得出其具体身份是村民、预言家、女巫或守卫，也不得额外产生任何 point_as_* 判断。",
     "check_as_werewolf": "必须明确公开声称查验 player{target} 的结果为狼人；不得额外产生 point_as_werewolf(player{target})。",
     "save": "必须明确公开声称救了 player{target}。",
     "poison": "必须明确公开声称毒了 player{target}。",

@@ -365,6 +365,61 @@ class SpeechPerceiverPilotCasesTest(
             prompt,
         )
 
+    def test_witch_smoke_failure_texts_follow_primary_ontology(self):
+        cases = (
+            (
+                5,
+                "我今天的投票意向是放逐 player3。同时，我公开判断 player4 是村民。",
+                "player5 | point_as_villager | player4",
+                [["player5", "point_as_villager", "player4"]],
+            ),
+            (
+                6,
+                "我认为 player1 是村民。查验 player5 的结果是好人。",
+                "player6 | point_as_villager | player1",
+                [["player6", "point_as_villager", "player1"]],
+            ),
+            (
+                4,
+                "我认为 player1 是村民，player2 也是村民。同时，我判断 player3 是村民，但 player3 也是女巫。",
+                (
+                    "player4 | point_as_villager | player1\n"
+                    "player4 | point_as_villager | player2\n"
+                    "player4 | point_as_villager | player3\n"
+                    "player4 | point_as_witch | player3"
+                ),
+                [
+                    ["player4", "point_as_villager", "player1"],
+                    ["player4", "point_as_villager", "player2"],
+                    ["player4", "point_as_villager", "player3"],
+                    ["player4", "point_as_witch", "player3"],
+                ],
+            ),
+            (
+                7,
+                "经过查验，player4 是预言家，而查验 player2 的结果为好人。",
+                "player7 | point_as_seer | player4",
+                [["player7", "point_as_seer", "player4"]],
+            ),
+        )
+
+        for speaker, speech, response, expected in cases:
+            with self.subTest(speech=speech):
+                actions, prompt = self.parse_with_response(
+                    speaker=speaker,
+                    speech=speech,
+                    response=response,
+                )
+                self.assertEqual(actions, expected)
+                self.assertIn("穷尽抽取所有明确属于上述7类的命题", prompt)
+                self.assertIn(
+                    "投票意图不属于动作，也不等于 support 或 oppose",
+                    prompt,
+                )
+                self.assertIn("查验结果单独存在时不得产生 support", prompt)
+                self.assertIn("不得产生 point_as_villager", prompt)
+                self.assertIn("player4 是预言家", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

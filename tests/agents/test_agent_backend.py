@@ -457,16 +457,16 @@ class AgentBackendTest(unittest.TestCase):
                 {"action": "vote_intent", "target": 3},
             ],
             [
-                {"action": "check_as_werewolf", "target": 1},
-                {"action": "point_as_werewolf", "target": 1},
+                {"action": "check_as_werewolf", "target": 2},
+                {"action": "point_as_werewolf", "target": 2},
             ],
             [
-                {"action": "check_as_good", "target": 1},
-                {"action": "point_as_villager", "target": 1},
+                {"action": "check_as_good", "target": 2},
+                {"action": "point_as_villager", "target": 2},
             ],
             [
-                {"action": "point_as_villager", "target": 1},
-                {"action": "check_as_good", "target": 1},
+                {"action": "point_as_villager", "target": 2},
+                {"action": "check_as_good", "target": 2},
                 {"action": "vote_intent", "target": 7},
             ],
         )
@@ -527,9 +527,9 @@ class AgentBackendTest(unittest.TestCase):
         ])
 
         distinct_pairs = [
-            {"action": "check_as_good", "target": 1},
-            {"action": "point_as_villager", "target": 1},
-            {"action": "check_as_werewolf", "target": 1},
+            {"action": "check_as_good", "target": 4},
+            {"action": "point_as_villager", "target": 4},
+            {"action": "check_as_werewolf", "target": 4},
             {"action": "support", "target": 1},
             {"action": "support", "target": 2},
             {"action": "vote_intent", "target": 2},
@@ -543,6 +543,44 @@ class AgentBackendTest(unittest.TestCase):
             phase="1_day_speech",
         )
         self.assertEqual(plan.as_list(), distinct_pairs)
+
+    def test_public_speech_plan_rejects_observed_claim_contradictions(self):
+        common = {
+            "suggestible_player_ids": (1, 2, 4, 5, 6, 7),
+            "player_id": 3,
+            "speaker_role": "Witch",
+            "phase": "1_day_speech",
+        }
+        invalid_plans = (
+            [
+                {"action": "point_as_villager", "target": 3},
+                {"action": "point_as_witch", "target": 3},
+            ],
+            [
+                {"action": "point_as_witch", "target": 3},
+                {"action": "check_as_good", "target": 1},
+            ],
+        )
+        for actions in invalid_plans:
+            with self.subTest(actions=actions), self.assertRaises(
+                PublicSpeechPlanValidationError
+            ):
+                validate_public_speech_plan(
+                    {"public_actions": actions},
+                    **common,
+                )
+
+        bluff = [
+            {"action": "check_as_good", "target": 1},
+            {"action": "vote_intent", "target": 2},
+        ]
+        self.assertEqual(
+            validate_public_speech_plan(
+                {"public_actions": bluff},
+                **common,
+            ).as_list(),
+            bluff,
+        )
 
     def test_seed_510_duplicate_plan_reaches_renderer_once(self):
         observation = self._strict_observation()

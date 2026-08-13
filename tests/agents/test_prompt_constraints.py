@@ -138,7 +138,7 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         for section in (
             "【权威公共状态】",
             "【你合法知道的私有信息】",
-            "【其他玩家此前的公开主张】",
+            "【所有玩家此前的公开主张】",
             "【计划合同】",
         ):
             self.assertIn(section, strict_prompt)
@@ -223,6 +223,29 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
                 (werewolf, villager, seer, witch, guard)
             ))
 
+    def test_planner_includes_speakers_own_prior_public_claims(self):
+        prompt = _plan_prompt(
+            _speech_observation(
+                "Villager",
+                game_log=[
+                    _log(
+                        event="speech",
+                        source=3,
+                        content={"speech_content": "我此前公开支持player2。"},
+                    ),
+                    _log(
+                        event="speech",
+                        source=5,
+                        content={"speech_content": "player5公开质疑player2。"},
+                    ),
+                ],
+            )
+        )
+
+        self.assertIn("【所有玩家此前的公开主张】", prompt)
+        self.assertIn("player3：我此前公开支持player2。", prompt)
+        self.assertIn("player5：player5公开质疑player2。", prompt)
+
     def test_renderer_receives_only_phase_actor_and_validated_plan(self):
         observation = _speech_observation(
             "Werewolf",
@@ -293,10 +316,28 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         check_wolf = render_public_action_obligation(
             "check_as_werewolf", 2, speaker_id=1
         )
-        self.assertIn("不得额外产生 point_as_villager(player2)", check_good)
+        self.assertIn("不得额外产生任何 point_as_* 判断", check_good)
         self.assertIn("不得额外产生 point_as_werewolf(player2)", check_wolf)
         self.assertNotIn("必须明确公开判断 player2 是村民", check_good)
         self.assertNotIn("必须明确公开判断 player2 是狼人", check_wolf)
+
+        seer_judgment = render_public_action_obligation(
+            "point_as_seer", 4, speaker_id=7
+        )
+        self.assertIn("不得表述为查验得出预言家身份", seer_judgment)
+        self.assertIn("查验 player2 的结果仅为好人", check_good)
+        for role in ("村民", "预言家", "女巫", "守卫"):
+            self.assertIn(role, check_good)
+
+    def test_planner_states_public_claim_consistency_contract(self):
+        planner = _plan_prompt(_speech_observation("Werewolf"))
+
+        self.assertIn(
+            "同一个 target 不得同时被 point_as_* 明确判断为两个不同角色",
+            planner,
+        )
+        self.assertIn("同一计划中的技能声明必须符合该公开身份", planner)
+        self.assertIn("没有明确自报角色时仍可用技能声明进行 bluff", planner)
 
     def test_renderer_numbers_every_r13_realization_obligation(self):
         renderer = build_strict_classic7_speech_render_prompt(

@@ -383,7 +383,7 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("player0", prompt)
         self.assertNotIn("狼人", authoritative)
         self.assertNotIn("查验", authoritative)
-        self.assertIn("【其他玩家此前的公开主张】", remainder)
+        self.assertIn("【所有玩家此前的公开主张】", remainder)
         self.assertIn(
             "player5：player1 已死亡，player3 仍存活，应该投 player4。",
             remainder,

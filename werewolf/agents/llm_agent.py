@@ -383,6 +383,53 @@ def validate_public_speech_plan(
     validated = _stable_unique_public_action_pairs(validated)
     seen = set(validated)
 
+    role_attributions = {
+        "point_as_werewolf": "Werewolf",
+        "point_as_villager": "Villager",
+        "point_as_seer": "Seer",
+        "point_as_witch": "Witch",
+        "point_as_guard": "Guard",
+    }
+    attributed_role_by_target = {}
+    for action, target in validated:
+        role = role_attributions.get(action)
+        if role is None:
+            continue
+        prior_role = attributed_role_by_target.setdefault(target, role)
+        if prior_role != role:
+            reject(
+                f"player{target} cannot be attributed both "
+                f"{prior_role} and {role}"
+            )
+
+    claimed_self_role = attributed_role_by_target.get(player_id)
+    allowed_skills_by_claimed_role = {
+        "Werewolf": frozenset(),
+        "Villager": frozenset(),
+        "Seer": frozenset({"check_as_good", "check_as_werewolf"}),
+        "Witch": frozenset({"save", "poison"}),
+        "Guard": frozenset({"guard"}),
+    }
+    if claimed_self_role is not None:
+        public_skill_actions = {
+            "check_as_good",
+            "check_as_werewolf",
+            "save",
+            "poison",
+            "guard",
+        }
+        incompatible_skills = [
+            action
+            for action, _target in validated
+            if action in public_skill_actions
+            and action not in allowed_skills_by_claimed_role[claimed_self_role]
+        ]
+        if incompatible_skills:
+            reject(
+                f"self-claim as {claimed_self_role} is incompatible with "
+                f"skill claim(s) {incompatible_skills}"
+            )
+
     for action, target in validated:
         if action == "vote_intent" and target not in suggestible_player_ids:
             reject(f"vote_intent target player{target} is not currently suggestible")
@@ -559,7 +606,7 @@ def validate_gameplay_public_speech(
     forbidden_control_text = (
         "【权威公共状态】",
         "【你合法知道的私有信息】",
-        "【其他玩家此前的公开主张】",
+        "【所有玩家此前的公开主张】",
         "【公开发言要求】",
         "system prompt",
         "系统提示词",
