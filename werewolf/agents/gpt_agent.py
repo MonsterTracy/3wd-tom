@@ -327,8 +327,8 @@ class GPTAgent(LLMAgent):
                 event_by_index[index]
                 for index in plan.public_evidence_refs
             ]
-            allowed_speech_player_ids = set(plan.targets) | set(
-                public_evidence_player_ids(selected_public_evidence)
+            evidence_player_ids = public_evidence_player_ids(
+                selected_public_evidence
             )
             renderer_prompt = build_strict_classic7_discourse_speech_render_prompt(
                 phase_text=_render_authoritative_public_phase(
@@ -370,7 +370,6 @@ class GPTAgent(LLMAgent):
                 actor=player_id,
                 public_actions=plan.as_list(),
             )
-            allowed_speech_player_ids = plan.targets
         rendered_content, render_metadata = self._chat_with_metadata(
             [{"role": "user", "content": renderer_prompt}],
             player_log_context={
@@ -385,13 +384,25 @@ class GPTAgent(LLMAgent):
                 }
             },
         )
-        validate_gameplay_public_speech(
-            rendered_content,
-            finish_reason=render_metadata["finish_reason"],
-            player_id=player_id,
-            phase=phase,
-            planned_player_ids=allowed_speech_player_ids,
-        )
+        if self.gameplay_prompt_profile == (
+            STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+        ):
+            validate_gameplay_public_speech(
+                rendered_content,
+                finish_reason=render_metadata["finish_reason"],
+                player_id=player_id,
+                phase=phase,
+                planned_player_ids=plan.targets,
+                additional_allowed_player_ids=evidence_player_ids,
+            )
+        else:
+            validate_gameplay_public_speech(
+                rendered_content,
+                finish_reason=render_metadata["finish_reason"],
+                player_id=player_id,
+                phase=phase,
+                planned_player_ids=plan.targets,
+            )
         final_speech = rendered_content.strip()
         return final_speech, final_speech, renderer_prompt
 

@@ -531,6 +531,7 @@ def validate_gameplay_public_speech(
     player_id=None,
     phase=None,
     planned_player_ids=None,
+    additional_allowed_player_ids=None,
 ):
     """Validate only high-confidence gameplay speech failures."""
 
@@ -570,9 +571,13 @@ def validate_gameplay_public_speech(
         raise GameplaySpeechQualityError(
             f"internal control text in gameplay public speech ({context})"
         )
-    if planned_player_ids is not None:
-        planned = set(planned_player_ids)
-        allowed = planned | {player_id}
+    if (
+        planned_player_ids is not None
+        or additional_allowed_player_ids is not None
+    ):
+        planned = set(planned_player_ids or ())
+        additional_allowed = set(additional_allowed_player_ids or ())
+        allowed = planned | additional_allowed | {player_id}
         unexpected = referenced_players - allowed
         if unexpected:
             raise GameplaySpeechQualityError(

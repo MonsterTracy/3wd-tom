@@ -245,25 +245,63 @@ def test_evidence_player_boundary_is_exact_and_baseline_stays_strict():
     assert public_evidence_player_ids(selected) == frozenset({2, 3, 4})
 
     validate_gameplay_public_speech(
-        "player2此前支持player3，但player4现在反对player3，因此我暂不信任player4。",
+        "player4值得怀疑。",
         player_id=1,
         phase="1_day_speech",
-        planned_player_ids={2, 3, 4},
+        planned_player_ids={4},
+    )
+    with pytest.raises(GameplaySpeechQualityError, match="missing"):
+        validate_gameplay_public_speech(
+            "我暂时保持观望。",
+            player_id=1,
+            phase="1_day_speech",
+            planned_player_ids={4},
+        )
+    with pytest.raises(GameplaySpeechQualityError, match="unplanned player"):
+        validate_gameplay_public_speech(
+            "player4值得怀疑，player6也一样。",
+            player_id=1,
+            phase="1_day_speech",
+            planned_player_ids={4},
+        )
+
+    validate_gameplay_public_speech(
+        "player2此前谈到player3，因此我暂不信任player4。",
+        player_id=1,
+        phase="1_day_speech",
+        planned_player_ids={4},
+        additional_allowed_player_ids={2, 3},
+    )
+    validate_gameplay_public_speech(
+        "player4值得怀疑。",
+        player_id=1,
+        phase="1_day_speech",
+        planned_player_ids={4},
+        additional_allowed_player_ids={2, 3},
     )
     with pytest.raises(GameplaySpeechQualityError, match="unplanned player"):
         validate_gameplay_public_speech(
             "player4值得怀疑，player6也一样。",
             player_id=1,
             phase="1_day_speech",
-            planned_player_ids={2, 3, 4},
+            planned_player_ids={4},
+            additional_allowed_player_ids={2, 3},
         )
-    with pytest.raises(GameplaySpeechQualityError, match="unplanned player"):
+    with pytest.raises(GameplaySpeechQualityError, match="missing"):
         validate_gameplay_public_speech(
-            "player4值得怀疑，player2也一样。",
+            "player2此前谈到player3。",
             player_id=1,
             phase="1_day_speech",
             planned_player_ids={4},
+            additional_allowed_player_ids={2, 3},
         )
+
+    validate_gameplay_public_speech(
+        "我自己暂时不信任player4。",
+        player_id=1,
+        phase="1_day_speech",
+        planned_player_ids={4},
+    )
 
 
 def test_baseline_renderer_prompt_remains_byte_exact():
@@ -479,6 +517,27 @@ def test_discourse_agent_rejects_players_outside_actions_and_evidence(
     with pytest.raises(GameplaySpeechQualityError, match="unplanned player"):
         agent.act(_observation())
 
+    assert len(backend.calls) == 2
+
+
+def test_discourse_agent_does_not_require_selected_evidence_players():
+    backend = MetadataBackend(
+        [
+            json.dumps(_valid_payload([2]), ensure_ascii=False),
+            "player4现在的说法让我不太信任。",
+        ]
+    )
+    agent = GPTAgent(
+        backend=backend,
+        model_name="agent-model",
+        gameplay_prompt_profile=STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
+    )
+    agent.rate_limit = 0
+
+    assert agent.act(_observation()) == (
+        "speech",
+        "player4现在的说法让我不太信任。",
+    )
     assert len(backend.calls) == 2
 
 
