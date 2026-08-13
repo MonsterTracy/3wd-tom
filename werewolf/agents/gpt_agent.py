@@ -33,6 +33,7 @@ _CONSTRAINED_NIGHT_PHASES = (
     "skill_guard",
     "skill_witch",
 )
+MAX_SPEECH_PLAN_ATTEMPTS = 2
 
 
 @AgentRegistry.register(["gpt", "gpt-4", "GPT-4", "gpt4", "o1", "gpt4o", "gpt4o-mini", 'deepseek'])
@@ -260,75 +261,103 @@ class GPTAgent(LLMAgent):
             "game_id",
             None,
         )
-        plan_content, plan_metadata = self._chat_with_metadata(
-            [{"role": "user", "content": planner_prompt}],
-            player_log_context={
-                "stage": "speech_plan",
-                "observation": observation,
-            },
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=(
-                discourse_public_speech_plan_response_format(
-                    supports_json_schema=getattr(
-                        self.backend,
-                        "supports_json_schema",
-                        False,
-                    ),
-                    suggestible_player_ids=suggestible_player_ids,
-                    speaker_id=player_id,
-                    speaker_role=speaker_role,
-                    public_event_indices=tuple(
-                        event["event_idx"]
-                        for event in observation["canonical_public_events"]
-                    ),
-                )
-                if self.gameplay_prompt_profile
-                == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-                else public_speech_plan_response_format(
-                    supports_json_schema=getattr(
-                        self.backend,
-                        "supports_json_schema",
-                        False,
-                    ),
-                    suggestible_player_ids=suggestible_player_ids,
-                    speaker_id=player_id,
-                    speaker_role=speaker_role,
-                )
-            ),
+        planner_messages = [{"role": "user", "content": planner_prompt}]
+        planner_response_format = (
+            discourse_public_speech_plan_response_format(
+                supports_json_schema=getattr(
+                    self.backend,
+                    "supports_json_schema",
+                    False,
+                ),
+                suggestible_player_ids=suggestible_player_ids,
+                speaker_id=player_id,
+                speaker_role=speaker_role,
+                public_event_indices=tuple(
+                    event["event_idx"]
+                    for event in observation["canonical_public_events"]
+                ),
+            )
+            if self.gameplay_prompt_profile
+            == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+            else public_speech_plan_response_format(
+                supports_json_schema=getattr(
+                    self.backend,
+                    "supports_json_schema",
+                    False,
+                ),
+                suggestible_player_ids=suggestible_player_ids,
+                speaker_id=player_id,
+                speaker_role=speaker_role,
+            )
         )
         context = (
             f"game={game_context or 'unavailable'}, "
             f"player={player_id}, phase={phase}"
         )
-        if plan_metadata["finish_reason"] == "length":
-            raise PublicSpeechPlanValidationError(
-                f"planner response was truncated ({context})"
-            )
-        try:
-            plan_payload = json.loads(plan_content)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise PublicSpeechPlanValidationError(
-                f"planner response is not valid JSON ({context})"
-            ) from exc
+        event_by_index = None
+        for attempt_index in range(MAX_SPEECH_PLAN_ATTEMPTS):
+            try:
+                plan_content, plan_metadata = self._chat_with_metadata(
+                    planner_messages,
+                    player_log_context={
+                        "stage": "speech_plan",
+                        "observation": observation,
+                        "gen_times": attempt_index,
+                    },
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=planner_response_format,
+                )
+                if plan_metadata["finish_reason"] == "length":
+                    raise PublicSpeechPlanValidationError(
+                        f"planner response was truncated ({context})"
+                    )
+                try:
+                    plan_payload = json.loads(plan_content)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise PublicSpeechPlanValidationError(
+                        f"planner response is not valid JSON ({context})"
+                    ) from exc
+                if self.gameplay_prompt_profile == (
+                    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+                ):
+                    public_events = normalize_public_events(
+                        observation["canonical_public_events"]
+                    )
+                    event_by_index = {
+                        event["event_idx"]: event for event in public_events
+                    }
+                    plan = validate_discourse_public_speech_plan(
+                        plan_payload,
+                        suggestible_player_ids=suggestible_player_ids,
+                        player_id=player_id,
+                        speaker_role=speaker_role,
+                        phase=phase,
+                        public_event_indices=tuple(event_by_index),
+                        game_context=game_context,
+                    )
+                else:
+                    plan = validate_public_speech_plan(
+                        plan_payload,
+                        suggestible_player_ids=suggestible_player_ids,
+                        player_id=player_id,
+                        speaker_role=speaker_role,
+                        phase=phase,
+                        game_context=game_context,
+                    )
+            except PublicSpeechPlanValidationError as exc:
+                if attempt_index + 1 == MAX_SPEECH_PLAN_ATTEMPTS:
+                    raise PublicSpeechPlanValidationError(
+                        "speech planner exhausted "
+                        f"{MAX_SPEECH_PLAN_ATTEMPTS} attempts; "
+                        f"last validation error: {exc}"
+                    ) from exc
+                continue
+            break
+
         if self.gameplay_prompt_profile == (
             STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
         ):
-            public_events = normalize_public_events(
-                observation["canonical_public_events"]
-            )
-            event_by_index = {
-                event["event_idx"]: event for event in public_events
-            }
-            plan = validate_discourse_public_speech_plan(
-                plan_payload,
-                suggestible_player_ids=suggestible_player_ids,
-                player_id=player_id,
-                speaker_role=speaker_role,
-                phase=phase,
-                public_event_indices=tuple(event_by_index),
-                game_context=game_context,
-            )
             selected_public_evidence = [
                 event_by_index[index]
                 for index in plan.public_evidence_refs
@@ -361,14 +390,6 @@ class GPTAgent(LLMAgent):
                     },
                 )
         else:
-            plan = validate_public_speech_plan(
-                plan_payload,
-                suggestible_player_ids=suggestible_player_ids,
-                player_id=player_id,
-                speaker_role=speaker_role,
-                phase=phase,
-                game_context=game_context,
-            )
             renderer_prompt = build_strict_classic7_speech_render_prompt(
                 phase_text=_render_authoritative_public_phase(
                     observation["authoritative_public_state"]

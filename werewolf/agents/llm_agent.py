@@ -791,7 +791,7 @@ class LLMAgent(Agent):
                 "player_id": observation["current_act_idx"],
                 "role": observation["identity"],
                 "phase": observation["phase"],
-                "gen_times": 0,
+                "gen_times": player_log_context.get("gen_times", 0),
             },
         )
 

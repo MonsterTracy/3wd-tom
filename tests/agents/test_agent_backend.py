@@ -157,12 +157,6 @@ class AgentBackendTest(unittest.TestCase):
     def test_strict_player_log_records_each_returned_call_before_validation(self):
         cases = (
             (
-                ['{"public_actions":[{"action":"vote_intent","target":1}]}'],
-                None,
-                PublicSpeechPlanValidationError,
-                1,
-            ),
-            (
                 ['{"public_actions":[{"action":"oppose","target":3}]}', "我反对4号。"],
                 None,
                 GameplaySpeechQualityError,
@@ -317,7 +311,7 @@ class AgentBackendTest(unittest.TestCase):
 
         for responses, error_type in (
             (
-                ['{"public_actions":[{"action":"vote_intent","target":1}]}'],
+                ['{"public_actions":[{"action":"vote_intent","target":1}]}'] * 2,
                 PublicSpeechPlanValidationError,
             ),
             (
@@ -775,7 +769,7 @@ class AgentBackendTest(unittest.TestCase):
         backend = MetadataBackend([
             '{"public_actions":['
             '{"action":"point_as_werewolf","target":6}]}'
-        ])
+        ] * 2)
         backend.supports_json_schema = True
         backend.session = SimpleNamespace(game_id="game_010_seed_464")
         agent = GPTAgent(
@@ -786,7 +780,7 @@ class AgentBackendTest(unittest.TestCase):
         agent.rate_limit = 0
         with self.assertRaises(PublicSpeechPlanValidationError):
             agent.act(observation)
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
         schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
 
         for action in ("point_as_werewolf", "check_as_werewolf"):
@@ -896,7 +890,7 @@ class AgentBackendTest(unittest.TestCase):
                 phase="1_day_speech",
             )
 
-        backend = MetadataBackend([json.dumps(payload)])
+        backend = MetadataBackend([json.dumps(payload)] * 2)
         backend.supports_json_schema = True
         agent = GPTAgent(
             backend=backend,
@@ -906,7 +900,7 @@ class AgentBackendTest(unittest.TestCase):
         agent.rate_limit = 0
         with self.assertRaises(PublicSpeechPlanValidationError):
             agent.act(observation)
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_final_speech_must_realize_exact_plan_player_scope(self):
         self.assertEqual(
@@ -1065,12 +1059,20 @@ class AgentBackendTest(unittest.TestCase):
                     phase="1_day_speech",
                 )
 
-    def test_strict_speech_stops_at_failed_stage_without_retry_or_fallback(self):
+    def test_strict_speech_uses_bounded_plan_retry_and_no_fallback(self):
         cases = (
             ([BackendError("planner failed")], None, 1),
-            (["not json"], None, 1),
-            (['{"public_actions":[]}'], [{"finish_reason": "length"}], 1),
-            (['{"public_actions":[{"action":"vote_intent","target":1}]}'], None, 1),
+            (["not json"] * 2, None, 2),
+            (
+                ['{"public_actions":[]}'] * 2,
+                [{"finish_reason": "length"}] * 2,
+                2,
+            ),
+            (
+                ['{"public_actions":[{"action":"vote_intent","target":1}]}'] * 2,
+                None,
+                2,
+            ),
             (['{"public_actions":[]}'], [None], 1),
             (['{"public_actions":[]}', BackendError("renderer failed")], None, 2),
             (['{"public_actions":[]}', "观望"], [{"finish_reason": "stop"}, None], 2),
@@ -1101,6 +1103,127 @@ class AgentBackendTest(unittest.TestCase):
         with self.assertRaisesRegex(BackendError, "JSON Schema support"):
             agent.act(self._strict_observation())
         self.assertEqual(backend.calls, [])
+
+    def test_strict_speech_regenerates_complete_plan_with_same_input(self):
+        invalid_plan = json.dumps({"public_actions": [
+            {"action": "point_as_villager", "target": 1},
+            {"action": "point_as_witch", "target": 1},
+        ]})
+        valid_plan = json.dumps({"public_actions": [
+            {"action": "oppose", "target": 3},
+        ]})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "Player_1.jsonl"
+            backend = MetadataBackend([
+                invalid_plan,
+                valid_plan,
+                "我不认可3号。",
+            ])
+            backend.supports_json_schema = True
+            agent = GPTAgent(
+                backend=backend,
+                model_name="agent-model",
+                log_file=str(log_path),
+                gameplay_prompt_profile="strict_classic7",
+                gameplay_max_tokens=512,
+            )
+            agent.rate_limit = 0
+            try:
+                self.assertEqual(
+                    agent.act(self._strict_observation()),
+                    ("speech", "我不认可3号。"),
+                )
+            finally:
+                agent.close()
+
+            self.assertEqual(len(backend.calls), 3)
+            first, second, renderer = backend.calls
+            self.assertIs(first["messages"], second["messages"])
+            self.assertIs(
+                first["response_format"],
+                second["response_format"],
+            )
+            for field in ("messages", "response_format", "temperature", "max_tokens"):
+                self.assertEqual(first[field], second[field])
+            self.assertEqual(first["temperature"], 1.0)
+            self.assertEqual(first["max_tokens"], 512)
+            self.assertNotIn(invalid_plan, second["messages"][0]["content"])
+            self.assertNotIn("correction", second["messages"][0]["content"])
+            self.assertIsNone(renderer["response_format"])
+
+            plan_records = [
+                record
+                for record in self._player_records(log_path)
+                if record["message"] == "speech_plan"
+            ]
+            self.assertEqual(
+                [record["gen_times"] for record in plan_records],
+                [0, 1],
+            )
+
+    def test_strict_speech_aborts_after_two_invalid_plans(self):
+        invalid_plan = json.dumps({"public_actions": [
+            {"action": "point_as_villager", "target": 1},
+            {"action": "point_as_witch", "target": 1},
+        ]})
+        backend = MetadataBackend([invalid_plan, invalid_plan])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+
+        with self.assertRaisesRegex(
+            PublicSpeechPlanValidationError,
+            "exhausted 2 attempts.*both Villager and Witch",
+        ) as captured:
+            agent.act(self._strict_observation())
+        self.assertIn(
+            "game=unavailable, player=1, phase=1_day_speech",
+            str(captured.exception),
+        )
+        self.assertIsInstance(
+            captured.exception.__cause__,
+            PublicSpeechPlanValidationError,
+        )
+        self.assertEqual(len(backend.calls), 2)
+        self.assertTrue(all(
+            call["response_format"] is not None
+            for call in backend.calls
+        ))
+
+    def test_strict_speech_does_not_retry_backend_or_renderer_failure(self):
+        backend = MetadataBackend([BackendError("planner failed")])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+        with self.assertRaisesRegex(BackendError, "planner failed"):
+            agent.act(self._strict_observation())
+        self.assertEqual(len(backend.calls), 1)
+
+        backend = MetadataBackend([
+            '{"public_actions":[{"action":"oppose","target":3}]}',
+            "我不认可4号。",
+        ])
+        backend.supports_json_schema = True
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent.rate_limit = 0
+        with self.assertRaises(GameplaySpeechQualityError):
+            agent.act(self._strict_observation())
+        self.assertEqual(len(backend.calls), 2)
+        self.assertIsNotNone(backend.calls[0]["response_format"])
+        self.assertIsNone(backend.calls[1]["response_format"])
 
     def test_gameplay_public_speech_quality_accepts_safe_numeric_context(self):
         for speech in (

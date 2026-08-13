@@ -490,6 +490,39 @@ def test_discourse_agent_uses_planner_then_selected_evidence_renderer_only(
     ] == [0, 2, 4]
 
 
+def test_discourse_agent_regenerates_invalid_plan_before_renderer():
+    invalid_payload = {
+        "public_actions": [
+            {"action": "point_as_villager", "target": 4},
+            {"action": "point_as_witch", "target": 4},
+        ],
+        "public_evidence_refs": [],
+    }
+    backend = MetadataBackend([
+        json.dumps(invalid_payload),
+        json.dumps(_valid_payload([2, 4])),
+        "player4的说法让我不太信任。",
+    ])
+    agent = GPTAgent(
+        backend=backend,
+        model_name="agent-model",
+        gameplay_prompt_profile=STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
+    )
+    agent.rate_limit = 0
+
+    assert agent.act(_observation()) == (
+        "speech",
+        "player4的说法让我不太信任。",
+    )
+    assert len(backend.calls) == 3
+    assert backend.calls[0]["messages"] is backend.calls[1]["messages"]
+    assert (
+        backend.calls[0]["response_format"]
+        is backend.calls[1]["response_format"]
+    )
+    assert "response_format" not in backend.calls[2]
+
+
 @pytest.mark.parametrize(
     ("refs", "speech"),
     [
