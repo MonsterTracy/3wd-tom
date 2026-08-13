@@ -279,7 +279,6 @@ def discourse_public_speech_plan_json_schema(
             "public_evidence_refs": {
                 "type": "array",
                 "maxItems": MAX_PUBLIC_EVIDENCE_REFS,
-                "uniqueItems": True,
                 "items": {
                     "type": "integer",
                     "enum": list(public_event_indices),

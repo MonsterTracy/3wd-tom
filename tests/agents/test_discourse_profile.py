@@ -158,13 +158,19 @@ def test_discourse_plan_schema_and_validator_require_enriched_contract():
     }
     assert "speaking_strategy" not in json.dumps(schema)
     assert schema["properties"]["public_evidence_refs"]["maxItems"] == 3
-    assert schema["properties"]["public_evidence_refs"]["uniqueItems"] is True
+    assert "uniqueItems" not in schema["properties"]["public_evidence_refs"]
 
 
 def test_discourse_plan_fails_closed_for_invalid_evidence_refs_and_fields():
-    for refs in ([6], [99], [2, 2], [0, 1, 2, 3]):
+    for refs in ([6], [99], [0, 1, 2, 3]):
         with pytest.raises(PublicSpeechPlanValidationError):
             _validate(_valid_payload(refs))
+
+    with pytest.raises(
+        PublicSpeechPlanValidationError,
+        match="public_evidence_refs cannot contain duplicates",
+    ):
+        _validate(_valid_payload([0, 0]))
 
     invalid_fields = _valid_payload()
     invalid_fields["strategy"] = "extra"
