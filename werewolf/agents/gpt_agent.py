@@ -158,10 +158,18 @@ class GPTAgent(LLMAgent):
                             )
                         raw_action = raw_action.strip().strip("- ")
                     else:
+                        request_kwargs = {}
+                        if "vote" in phase:
+                            request_kwargs["extra_body"] = {
+                                "chat_template_kwargs": {
+                                    "enable_thinking": False,
+                                }
+                            }
                         raw_action = self._chat(
                             messages,
                             temperature=request_temperature,
                             max_tokens=request_max_tokens,
+                            **request_kwargs,
                         ).strip().strip("- ")
                     if "vote" in phase:
                         parsed_vote_action = self.parse_vote_action(raw_action, observation, valid_action)

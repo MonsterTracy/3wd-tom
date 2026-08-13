@@ -1212,6 +1212,99 @@ class AgentBackendTest(unittest.TestCase):
                     backend.calls[0]["max_tokens"],
                     512,
                 )
+                if name == "vote":
+                    self.assertEqual(
+                        backend.calls[0]["temperature"],
+                        1.0,
+                    )
+                    self.assertEqual(
+                        backend.calls[0]["extra_body"],
+                        {
+                            "chat_template_kwargs": {
+                                "enable_thinking": False,
+                            }
+                        },
+                    )
+                else:
+                    self.assertNotIn("extra_body", backend.calls[0])
+
+    def test_vote_retries_three_times_then_keeps_existing_fallback(self):
+        backend = RecordingBackend(["bad", "still bad", "also bad"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            temperature=0.6,
+            gameplay_max_tokens=512,
+        )
+        agent.rate_limit = 0
+        fallback_calls = []
+        agent.choose_fallback_vote_action = lambda *_args: (
+            fallback_calls.append(True) or "{'投票': '2'}"
+        )
+        observation = {
+            "phase": "1_day_vote",
+            "identity": "Villager",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": [("vote", 2), ("vote", 3)],
+        }
+
+        self.assertEqual(agent.act(observation), ("vote", 2))
+        self.assertEqual(len(backend.calls), 3)
+        self.assertEqual(fallback_calls, [True])
+        for call in backend.calls:
+            self.assertEqual(call["temperature"], 0.6)
+            self.assertEqual(call["max_tokens"], 512)
+            self.assertEqual(
+                call["extra_body"],
+                {
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    }
+                },
+            )
+
+    def test_invalid_vote_response_retries_then_accepts_valid_response(self):
+        backend = RecordingBackend(["bad", "{'投票': '3'}"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_max_tokens=512,
+        )
+        agent.rate_limit = 0
+        observation = {
+            "phase": "1_day_vote_pk",
+            "identity": "Villager",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": [("vote_pk", 2), ("vote_pk", 3)],
+        }
+
+        self.assertEqual(agent.act(observation), ("vote_pk", 3))
+        self.assertEqual(len(backend.calls), 2)
+
+    def test_non_vote_legacy_action_does_not_receive_vote_only_parameter(self):
+        backend = RecordingBackend(["{'守卫':'2'}"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_max_tokens=512,
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(
+                {
+                    "phase": "1_night_skill_guard",
+                    "identity": "Guard",
+                    "current_act_idx": 1,
+                    "game_log": [],
+                    "valid_action": [("guard", 2)],
+                }
+            ),
+            ("guard", 2),
+        )
+        self.assertNotIn("extra_body", backend.calls[0])
 
     def test_v25_structural_matcher_remains_the_membership_boundary(self):
         agent = GPTAgent()
