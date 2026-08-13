@@ -24,6 +24,12 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
+def _vocabulary_size(mapping: dict[str, int]) -> int:
+    """Return the cardinality of a canonical zero-based ID space."""
+
+    return max(mapping.values()) + 1
+
+
 @dataclass(frozen=True)
 class PublicBeliefMatrixBackboneConfig:
     """Fixed V1 architecture with a configurable maximum prefix length."""
@@ -57,19 +63,21 @@ class PublicBeliefMatrixBackbone(nn.Module):
         self.config = config or PublicBeliefMatrixBackboneConfig()
 
         self.subject_embedding = nn.Embedding(
-            len(PLAYER_TO_ID), HIDDEN_SIZE, padding_idx=0
+            _vocabulary_size(PLAYER_TO_ID), HIDDEN_SIZE, padding_idx=0
         )
         self.action_embedding = nn.Embedding(
-            len(ACTION_TO_ID), HIDDEN_SIZE, padding_idx=0
+            _vocabulary_size(ACTION_TO_ID), HIDDEN_SIZE, padding_idx=0
         )
         self.object_embedding = nn.Embedding(
-            len(PLAYER_TO_ID), HIDDEN_SIZE, padding_idx=0
+            _vocabulary_size(PLAYER_TO_ID), HIDDEN_SIZE, padding_idx=0
         )
         self.event_type_embedding = nn.Embedding(
-            len(STRUCTURED_TOKEN_TO_ID), HIDDEN_SIZE, padding_idx=0
+            _vocabulary_size(STRUCTURED_TOKEN_TO_ID),
+            HIDDEN_SIZE,
+            padding_idx=0,
         )
         self.phase_embedding = nn.Embedding(
-            len(PHASE_TO_ID), HIDDEN_SIZE, padding_idx=0
+            _vocabulary_size(PHASE_TO_ID), HIDDEN_SIZE, padding_idx=0
         )
         self.day_projection = nn.Linear(1, HIDDEN_SIZE, bias=False)
         self.transformer = GPT2BlockStack(max_seq_len=self.config.max_seq_len)
@@ -192,11 +200,14 @@ class PublicBeliefMatrixBackbone(nn.Module):
             raise ValueError("all feature tensors must use the same device")
 
         id_tensors = {
-            "subject_ids": (subject_ids, len(PLAYER_TO_ID)),
-            "action_ids": (action_ids, len(ACTION_TO_ID)),
-            "object_ids": (object_ids, len(PLAYER_TO_ID)),
-            "event_type_ids": (event_type_ids, len(STRUCTURED_TOKEN_TO_ID)),
-            "phase_ids": (phase_ids, len(PHASE_TO_ID)),
+            "subject_ids": (subject_ids, _vocabulary_size(PLAYER_TO_ID)),
+            "action_ids": (action_ids, _vocabulary_size(ACTION_TO_ID)),
+            "object_ids": (object_ids, _vocabulary_size(PLAYER_TO_ID)),
+            "event_type_ids": (
+                event_type_ids,
+                _vocabulary_size(STRUCTURED_TOKEN_TO_ID),
+            ),
+            "phase_ids": (phase_ids, _vocabulary_size(PHASE_TO_ID)),
         }
         for name, (tensor, vocabulary_size) in id_tensors.items():
             if tensor.dtype == torch.bool or torch.is_floating_point(tensor):

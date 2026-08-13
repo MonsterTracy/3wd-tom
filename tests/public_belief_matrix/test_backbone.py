@@ -12,8 +12,8 @@ from werewolf.models.public_belief_matrix.public_prefix import (
     build_public_belief_matrix_visible_prefix,
 )
 from werewolf.models.twd_tom.belief_backbone import GPT2BlockStack
-from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
-from werewolf.models.twd_tom.schema import PLAYER_TO_ID
+from werewolf.models.twd_tom.public_events import PHASE_TO_ID, STRUCTURED_TOKEN_TO_ID
+from werewolf.models.twd_tom.schema import ACTION_TO_ID, PLAYER_TO_ID
 
 
 def _features(attention_mask=None):
@@ -67,6 +67,95 @@ def test_backbone_has_fixed_gpt2_capacity_and_matrix_output(model):
         "observer_hidden_states",
         "relative_public_hidden_states",
     }.isdisjoint(output)
+
+
+def test_embedding_cardinalities_cover_canonical_id_spaces(model):
+    assert (
+        model.subject_embedding.num_embeddings
+        == max(PLAYER_TO_ID.values()) + 1
+        == 8
+    )
+    assert (
+        model.action_embedding.num_embeddings
+        == max(ACTION_TO_ID.values()) + 1
+        == 14
+    )
+    assert (
+        model.object_embedding.num_embeddings
+        == max(PLAYER_TO_ID.values()) + 1
+        == 8
+    )
+    assert model.event_type_embedding.num_embeddings == max(
+        STRUCTURED_TOKEN_TO_ID.values()
+    ) + 1
+    assert model.event_type_embedding.num_embeddings == 11
+    assert (
+        model.phase_embedding.num_embeddings
+        == max(PHASE_TO_ID.values()) + 1
+        == 6
+    )
+    assert all(
+        embedding.padding_idx == 0
+        for embedding in (
+            model.subject_embedding,
+            model.action_embedding,
+            model.object_embedding,
+            model.event_type_embedding,
+            model.phase_embedding,
+        )
+    )
+
+
+def test_maximum_canonical_ids_and_padding_can_forward(model):
+    features = _features([[1, 1]])
+    features.update(
+        {
+            "subject_ids": torch.tensor([[max(PLAYER_TO_ID.values()), 0]]),
+            "action_ids": torch.tensor([[max(ACTION_TO_ID.values()), 0]]),
+            "object_ids": torch.tensor([[max(PLAYER_TO_ID.values()), 0]]),
+            "event_type_ids": torch.tensor(
+                [[max(STRUCTURED_TOKEN_TO_ID.values()), 0]]
+            ),
+            "phase_ids": torch.tensor([[max(PHASE_TO_ID.values()), 0]]),
+        }
+    )
+
+    with torch.no_grad():
+        output = model(**features)
+
+    assert output["matrix_logits"].shape == (1, 7, 7)
+    assert output["matrix_probabilities"].shape == (1, 7, 7)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_id"),
+    [
+        ("event_type_ids", max(STRUCTURED_TOKEN_TO_ID.values()) + 1),
+        ("phase_ids", max(PHASE_TO_ID.values()) + 1),
+    ],
+)
+def test_id_above_canonical_maximum_fails_closed(model, field, invalid_id):
+    features = _features([[1]])
+    features[field] = torch.tensor([[invalid_id]])
+
+    with pytest.raises(ValueError, match=rf"{field} contains an out-of-range ID"):
+        model(**features)
+
+
+def test_stage4_batch_style_max_event_and_phase_ids_can_forward(model):
+    features = _features([[1, 1, 1], [1, 1, 0]])
+    features["event_type_ids"] = torch.tensor(
+        [[1, 10, 3], [10, 2, 0]], dtype=torch.long
+    )
+    features["phase_ids"] = torch.tensor(
+        [[1, 5, 1], [5, 2, 0]], dtype=torch.long
+    )
+
+    with torch.no_grad():
+        output = model(**features)
+
+    assert output["matrix_logits"].shape == (2, 7, 7)
+    assert output["matrix_probabilities"].shape == (2, 7, 7)
 
 
 def test_stage1_visible_prefix_feeds_stage2_backbone_directly(model):
