@@ -9,7 +9,13 @@ from typing import Any
 
 NUM_PLAYERS = 7
 PAD_TOKEN = "<pad>"
+NONE_TOKEN = "<none>"
 PLAYER_NAMES = tuple(f"player{index}" for index in range(1, NUM_PLAYERS + 1))
+PLAYER_TO_ID = {
+    PAD_TOKEN: 0,
+    NONE_TOKEN: 1,
+    **{name: index for index, name in enumerate(PLAYER_NAMES, start=2)},
+}
 
 ACTION_NAMES = (
     "point_as_werewolf",
@@ -24,8 +30,25 @@ ACTION_TO_ID = {
     PAD_TOKEN: 0,
     **{name: index for index, name in enumerate(ACTION_NAMES, start=1)},
 }
+NONE_ACTION_ID = len(ACTION_TO_ID)
 
 EPISODE_CONTEXTS = ("seer_guard", "seer_witch")
+CONFIG_TO_ID = {
+    context: index
+    for index, context in enumerate(EPISODE_CONTEXTS)
+}
+
+EVENT_NAMES = ("speech_action", "vote", "exile", "night_result")
+EVENT_TO_ID = {
+    PAD_TOKEN: 0,
+    **{name: index for index, name in enumerate(EVENT_NAMES, start=1)},
+}
+
+PHASE_NAMES = ("discussion", "pk_discussion", "vote", "pk_vote", "night")
+PHASE_TO_ID = {
+    PAD_TOKEN: 0,
+    **{name: index for index, name in enumerate(PHASE_NAMES, start=1)},
+}
 
 
 def normalize_player(value: Any) -> str:
@@ -89,10 +112,18 @@ class SpeechAction:
 __all__ = [
     "ACTION_NAMES",
     "ACTION_TO_ID",
+    "CONFIG_TO_ID",
     "EPISODE_CONTEXTS",
+    "EVENT_NAMES",
+    "EVENT_TO_ID",
+    "NONE_ACTION_ID",
+    "NONE_TOKEN",
     "NUM_PLAYERS",
     "PAD_TOKEN",
+    "PHASE_NAMES",
+    "PHASE_TO_ID",
     "PLAYER_NAMES",
+    "PLAYER_TO_ID",
     "SpeechAction",
     "normalize_action",
     "normalize_episode_context",

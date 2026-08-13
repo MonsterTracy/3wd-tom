@@ -1,6 +1,7 @@
 """Formal Theory-of-Mind input and collection contracts."""
 
 from werewolf.models.tom.collection import Collector
+from werewolf.models.tom.dataset import TomDataset, collate_batch, encode_sample
 from werewolf.models.tom.public_history import build_model_input
 from werewolf.models.tom.reporter import BeliefReporter
 from werewolf.models.tom.schema import (
@@ -18,7 +19,10 @@ __all__ = [
     "Collector",
     "EPISODE_CONTEXTS",
     "SpeechAction",
+    "TomDataset",
     "build_model_input",
+    "collate_batch",
+    "encode_sample",
     "materialize_target",
     "suspicion_to_row",
 ]
