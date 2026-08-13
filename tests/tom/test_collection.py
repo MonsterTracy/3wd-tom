@@ -117,6 +117,94 @@ def prompt_for(agent):
     return agent.backend.calls[0]["messages"][0]["content"]
 
 
+def test_reporter_prompt_freezes_subjective_hard_knowledge_contract():
+    env = ready_env()
+    observation = env.get_observation_for(1)
+    prompt = BeliefReporter.build_prompt("player1", observation)
+
+    for clause in (
+        "私有、只读的主观狼人怀疑标注请求",
+        "不是公开发言或游戏行动",
+        "不要使用公开博弈中的欺骗策略作答",
+        "不要求确定性",
+        "当前 evidence 使某玩家成为具体怀疑对象时可以包含",
+        "不确定并不禁止列出具体怀疑对象",
+        "仅仅尚未排除或理论上可能是狼人",
+        "信息不足，不足以加入 suspected_werewolves",
+        "任何已知狼人必须包含",
+        "任何已知非狼人必须排除",
+        "如果 self_role=Werewolf，必须包含 observer 自己",
+        "合法知道的狼人队友",
+        "如果 self_role 不是 Werewolf，必须排除 observer 自己",
+        "bad/狼人结果必须包含",
+        "good/非狼人结果必须排除",
+        "如果没有任何合法已知狼人，并且当前确实没有任何具体怀疑对象",
+        "空集合 [] 仍然合法",
+        "不强制至少一人，也不强制两人",
+    ):
+        assert clause in prompt
+    assert "不得使用 god view、真实角色表、其他玩家私人信息或未来信息" in prompt
+
+
+def test_reporter_request_uses_qwen_thinking_suppression():
+    env = ready_env()
+    agent_list = agents()
+    dispatches = [
+        {"backend": agent.backend, "model_name": agent.model_name}
+        for agent in agent_list
+    ]
+    result = BeliefReporter(dispatches).report(
+        "player1",
+        env.get_observation_for(1),
+    )
+
+    assert result["valid"] is True
+    request = agent_list[0].backend.calls[0]
+    assert request["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    assert "thinking" not in request["extra_body"]
+    schema = request["response_format"]["json_schema"]
+    assert schema["strict"] is True
+    assert schema["schema"]["properties"]["suspected_werewolves"] == {
+        "type": "array",
+        "minItems": 0,
+        "maxItems": 7,
+        "items": {
+            "type": "string",
+            "enum": [f"player{player_id}" for player_id in range(1, 8)],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"suspected_werewolves":[]}', []),
+        ('{"suspected_werewolves":["player4"]}', ["player4"]),
+        (
+            '{"suspected_werewolves":["player7","player1","player4"]}',
+            ["player1", "player4", "player7"],
+        ),
+    ],
+)
+def test_reporter_valid_suspicion_sets_remain_canonical(raw, expected):
+    assert BeliefReporter.parse(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"suspected_werewolves":["player3","player3"]}',
+        '{"suspected_werewolves":["player8"]}',
+        '{"suspected_werewolves":[],"extra":true}',
+    ],
+)
+def test_reporter_parser_remains_strict(raw):
+    with pytest.raises((TypeError, ValueError)):
+        BeliefReporter.parse(raw)
+
+
 @pytest.mark.parametrize(("guard", "context"), [(False, "seer_witch"), (True, "seer_guard")])
 def test_post_speech_observations_are_private_aware_for_both_configs(
     tmp_path, guard, context

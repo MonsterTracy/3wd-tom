@@ -89,9 +89,11 @@ class BeliefReporter:
             sort_keys=True,
             separators=(",", ":"),
         )
-        return f"""这是一个私有、只读的主观狼人怀疑标注请求，不是公开发言或游戏行动。
-只根据下面 observer={observer} 当前合法拥有的公开与私人信息回答。当前公开发言已经发生并包含在信息中。不得使用 god view、真实角色表、其他玩家私人信息或未来信息。不要为了公开博弈策略欺骗 reporter。
-允许怀疑 0 到 7 名玩家，包括空集合；不要强迫恰好两名。合法 ID 只有：{', '.join(PLAYER_NAMES)}。不得输出概率、理由、推理或额外字段。
+        return f"""这是一个私有、只读的主观狼人怀疑标注请求，不是公开发言或游戏行动；不要使用公开博弈中的欺骗策略作答。
+只根据下面 observer={observer} 当前合法拥有的公开与私人信息回答。当前公开发言已经发生并包含在信息中。不得使用 god view、真实角色表、其他玩家私人信息或未来信息。
+suspected_werewolves 表示 observer 当前基于合法 public/private information 主观怀疑为狼人的玩家集合；不要求确定性。当前 evidence 使某玩家成为具体怀疑对象时可以包含，不确定并不禁止列出具体怀疑对象；但仅仅尚未排除或理论上可能是狼人，或者只是信息不足，不足以加入 suspected_werewolves。
+严格遵守 observer 的合法 hard knowledge：任何已知狼人必须包含，任何已知非狼人必须排除。如果 self_role=Werewolf，必须包含 observer 自己以及合法知道的狼人队友；如果 self_role 不是 Werewolf，必须排除 observer 自己。对于 observer 自己的预言家查验，bad/狼人结果必须包含，good/非狼人结果必须排除。
+允许怀疑 0 到 7 名玩家，不强制至少一人，也不强制两人。如果没有任何合法已知狼人，并且当前确实没有任何具体怀疑对象，空集合 [] 仍然合法。合法 ID 只有：{', '.join(PLAYER_NAMES)}。不得输出概率、理由、推理或额外字段。
 legal_post_speech_observation: {serialized}
 Return only: {{"suspected_werewolves":[...]}}"""
 
@@ -135,7 +137,11 @@ Return only: {{"suspected_werewolves":[...]}}"""
                         False,
                     )
                 ),
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body={
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    }
+                },
             )
         except Exception:
             return self._result(observer, valid=False, error="reporter_error")
