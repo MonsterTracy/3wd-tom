@@ -5,8 +5,8 @@
 
 The package currently provides deterministic target contracts, a shared
 structured public-prefix contract, a causal matrix backbone, masked row loss,
-deterministic matrix metrics, a stateless reporter, and raw symbolic collection.
-It does not yet implement dataset materialization, training, or evaluation.
+deterministic matrix metrics, a stateless reporter, raw symbolic collection,
+and a strict materialized Dataset contract. Training remains an independent CLI.
 """
 
 from werewolf.models.public_belief_matrix.public_prefix import (
