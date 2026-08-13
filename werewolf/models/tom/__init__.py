@@ -9,6 +9,7 @@ from werewolf.models.tom.schema import (
     EPISODE_CONTEXTS,
     SpeechAction,
 )
+from werewolf.models.tom.targets import materialize_target, suspicion_to_row
 
 __all__ = [
     "ACTION_NAMES",
@@ -18,4 +19,6 @@ __all__ = [
     "EPISODE_CONTEXTS",
     "SpeechAction",
     "build_model_input",
+    "materialize_target",
+    "suspicion_to_row",
 ]
