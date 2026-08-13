@@ -1283,29 +1283,6 @@ class AgentBackendTest(unittest.TestCase):
         self.assertEqual(agent.act(observation), ("vote_pk", 3))
         self.assertEqual(len(backend.calls), 2)
 
-    def test_non_vote_legacy_action_does_not_receive_vote_only_parameter(self):
-        backend = RecordingBackend(["{'守卫':'2'}"])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_max_tokens=512,
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(
-                {
-                    "phase": "1_night_skill_guard",
-                    "identity": "Guard",
-                    "current_act_idx": 1,
-                    "game_log": [],
-                    "valid_action": [("guard", 2)],
-                }
-            ),
-            ("guard", 2),
-        )
-        self.assertNotIn("extra_body", backend.calls[0])
-
     def test_v25_structural_matcher_remains_the_membership_boundary(self):
         agent = GPTAgent()
         candidates = (
@@ -1347,6 +1324,14 @@ class AgentBackendTest(unittest.TestCase):
                 '```json\n{"action_index":0}\n```',
                 ("kill", 3),
                 "{'杀害':'3'}",
+            ),
+            (
+                "guard",
+                "0_night_skill_guard",
+                [("guard", 2), ("guard", 4), ("guard", 6)],
+                '{"action_index":1}',
+                ("guard", 4),
+                "{'守卫':'4'}",
             ),
             (
                 "witch",
@@ -1394,7 +1379,14 @@ class AgentBackendTest(unittest.TestCase):
                     request["response_format"]["json_schema"]["strict"]
                 )
                 self.assertEqual(request["max_tokens"], 512)
-                self.assertNotIn("extra_body", request)
+                self.assertEqual(
+                    request["extra_body"],
+                    {
+                        "chat_template_kwargs": {
+                            "enable_thinking": False,
+                        }
+                    },
+                )
                 self.assertEqual(
                     schema["properties"]["action_index"]["enum"],
                     list(range(len(valid_actions))),
@@ -1414,6 +1406,8 @@ class AgentBackendTest(unittest.TestCase):
                     self.assertNotIn("{'查验':'3'}", prompt)
                 elif name == "werewolf":
                     self.assertNotIn("{'杀害':'2'}", prompt)
+                elif name == "guard":
+                    self.assertNotIn("{'守卫':'3'}", prompt)
                 else:
                     self.assertNotIn(
                         "{'解药': '4', '毒药': '1'}",
@@ -1498,6 +1492,7 @@ class AgentBackendTest(unittest.TestCase):
             "[]",
             "null",
             "not json",
+            'Thinking about the choice.\n{"action_index":0}',
         )
 
         for response in invalid_responses:

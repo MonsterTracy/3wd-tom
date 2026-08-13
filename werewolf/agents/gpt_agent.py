@@ -30,6 +30,7 @@ from . import agent_registry as AgentRegistry
 _CONSTRAINED_NIGHT_PHASES = (
     "skill_wolf",
     "skill_seer",
+    "skill_guard",
     "skill_witch",
 )
 
@@ -167,6 +168,11 @@ class GPTAgent(LLMAgent):
                                 ),
                                 candidate_snapshot=night_candidate_snapshot,
                             ),
+                            extra_body={
+                                "chat_template_kwargs": {
+                                    "enable_thinking": False,
+                                }
+                            },
                         )
                         if metadata["finish_reason"] == "length":
                             raise GameplayActionValidationError(
