@@ -1,8 +1,8 @@
 """Run one seven-player Werewolf rollout.
 
-Private-conditioned and public-only ToM samples are collected immediately
-before each public speech. Public Belief Matrix samples are collected after a
-speech completes and before the next action. Collectors never receive roles.
+Legacy ToM samples are collected immediately before each public speech. Formal
+ToM and Public Belief Matrix samples are collected after a speech completes and
+before the next action. Collectors never receive role assignments.
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ from werewolf.backends import (
 )
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
+from werewolf.models.tom.collection import Collector as TomCollector
+from werewolf.models.tom.reporter import BeliefReporter
 from werewolf.models.public_belief_matrix.collection import (
     PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
     PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY,
@@ -97,15 +99,17 @@ def eval(
     sample_collector=None,
     call_audit=None,
     tom2_shadow=None,
+    tom_collector=None,
 ):
     """Run one game and optionally collect subjective ToM samples.
 
     The environment needs the hidden role assignment to simulate the
     game, but that assignment is never passed to the ToM collector.
 
-    Existing ToM routes collect before each public ``speech`` or ``speech_pk``.
-    The PBM route collects after that speech completes and before the next
-    action, using only the causal public prefix through the completed speech.
+    Legacy ToM routes collect before each public ``speech`` or ``speech_pk``.
+    The formal ToM and PBM routes collect after that speech completes and
+    before the next action. Formal labels use each alive observer's legal
+    post-speech observation.
     """
 
     for agent in agent_list:
@@ -124,6 +128,7 @@ def eval(
         ]
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
+        action_round = getattr(env, "day", None)
 
         post_speech_collection = (
             sample_collector is not None
@@ -180,6 +185,15 @@ def eval(
         obs, _, done, info = env.step(
             action
         )
+
+        if trigger in PUBLIC_SPEECH_EVENTS and tom_collector is not None:
+            tom_collector.record(
+                env,
+                step_idx=step_idx,
+                round_number=action_round,
+                phase=trigger,
+                speaker_id=current_act_idx,
+            )
 
         if trigger in PUBLIC_SPEECH_EVENTS and post_speech_collection:
             sample_collector.record(
@@ -753,6 +767,38 @@ def build_twd_tom_sample_collector(
     )
 
 
+def build_tom_collector(
+    *,
+    env,
+    agent_list,
+    output_path,
+    game_id,
+    seed,
+):
+    """Build the single formal post-speech collection path."""
+
+    if env.n_guard == 1 and env.n_witch == 0:
+        episode_context = "seer_guard"
+    elif env.n_guard == 0 and env.n_witch == 1:
+        episode_context = "seer_witch"
+    else:
+        raise ValueError("formal ToM requires seer_guard or seer_witch")
+    dispatches = [
+        {
+            "backend": getattr(agent, "backend", None),
+            "model_name": getattr(agent, "model_name", None),
+        }
+        for agent in agent_list
+    ]
+    return TomCollector(
+        output_path,
+        game_id=game_id,
+        seed=seed,
+        episode_context=episode_context,
+        reporter=BeliefReporter(dispatches),
+    )
+
+
 def _write_role_assignment(
     *,
     log_save_path,
@@ -909,6 +955,7 @@ def main_cli(args):
 
     begin = time.time()
     sample_collector = None
+    tom_collector = None
     tom2_shadow = None
 
     sample_path = getattr(
@@ -916,6 +963,7 @@ def main_cli(args):
         "twd_tom_sample_path",
         None,
     )
+    tom_sample_path = getattr(args, "tom_sample_path", None)
 
     game_id = os.path.basename(
         os.path.normpath(
@@ -933,6 +981,14 @@ def main_cli(args):
                     game_id=game_id,
                 )
             )
+        if tom_sample_path is not None:
+            tom_collector = build_tom_collector(
+                env=env,
+                agent_list=agent_list,
+                output_path=tom_sample_path,
+                game_id=game_id,
+                seed=getattr(args, "random_seed", None),
+            )
         if shadow_options is not None:
             checkpoint_path, device, output_path = shadow_options
             tom2_shadow = SecondOrderToMShadow(
@@ -949,10 +1005,13 @@ def main_cli(args):
                 sample_collector
             ),
             tom2_shadow=tom2_shadow,
+            tom_collector=tom_collector,
         )
     finally:
         if sample_collector is not None:
             sample_collector.close()
+        if tom_collector is not None:
+            tom_collector.close()
         if tom2_shadow is not None:
             tom2_shadow.close()
 
@@ -992,6 +1051,13 @@ def build_arg_parser() -> (
         "--random_seed",
         type=int,
         default=None,
+    )
+
+    parser.add_argument(
+        "--tom_sample_path",
+        type=str,
+        default=None,
+        help="optional JSONL path for formal post-speech ToM samples",
     )
 
     parser.add_argument(
