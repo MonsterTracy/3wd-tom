@@ -737,6 +737,33 @@ class AgentBackendTest(unittest.TestCase):
             len(ACTION_NAMES),
         )
 
+    def test_public_check_claims_remain_available_to_every_role(self):
+        payload = {
+            "public_actions": [
+                {"action": "check_as_good", "target": 3},
+                {"action": "check_as_werewolf", "target": 4},
+            ],
+        }
+
+        for speaker_role in (
+            "Werewolf",
+            "Seer",
+            "Guard",
+            "Witch",
+            "Villager",
+        ):
+            with self.subTest(speaker_role=speaker_role):
+                self.assertEqual(
+                    validate_public_speech_plan(
+                        payload,
+                        suggestible_player_ids=(1, 2, 3, 4, 5, 6),
+                        player_id=7,
+                        speaker_role=speaker_role,
+                        phase="1_day_speech",
+                    ).as_list(),
+                    payload["public_actions"],
+                )
+
     def test_dynamic_plan_schema_omits_vote_branch_for_empty_candidates(self):
         schema = public_speech_plan_json_schema(
             suggestible_player_ids=(),

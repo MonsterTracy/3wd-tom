@@ -214,9 +214,11 @@ class WerewolfTextEnvV0(gym.Env):
         info = {}
 
         if (
-            self.phase in {'vote', 'vote_pk'}
+            self.phase in {'skill_seer', 'vote', 'vote_pk'}
             and action not in self._get_valid_action_for_current_actor()
         ):
+            if self.phase == 'skill_seer':
+                raise ValueError("invalid Seer check action")
             vote_phase = "normal" if self.phase == 'vote' else "PK"
             raise ValueError(f"invalid {vote_phase} vote action")
 
@@ -675,6 +677,7 @@ class WerewolfTextEnvV0(gym.Env):
                 for idx, is_live in enumerate(self.alive)
                 if (
                     is_live == 1
+                    and idx != self.SEER_IDX
                     and idx not in self.seer_check_target.values()
                 )
             ]

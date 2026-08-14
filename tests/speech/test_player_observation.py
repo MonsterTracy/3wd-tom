@@ -441,14 +441,46 @@ class PlayerObservationTest(unittest.TestCase):
         )
         self.assertIn("(尚无已完成查验)", strict_rules)
 
-    def test_seer_player3_check_is_unchanged(self):
+    def test_seer_candidates_exclude_self_and_keep_other_alive_players(self):
+        self.env.phase = "skill_seer"
+        self.env.current_act_idx = self.env.SEER_IDX
+        self.env.alive = [1, 1, 1, 1, 0, 1, 0]
+
+        valid_actions = self.env.get_observation_for(3)["valid_action"]
+
+        self.assertNotIn(("check", 3), valid_actions)
+        self.assertEqual(
+            valid_actions,
+            [
+                ("check", 0),
+                ("check", 1),
+                ("check", 2),
+                ("check", 4),
+                ("check", 6),
+            ],
+        )
+
+    def test_seer_direct_self_check_is_rejected_without_retargeting(self):
+        self.env.phase = "skill_seer"
+        self.env.current_act_idx = self.env.SEER_IDX
+        logs_before = serialize_logs(self.env.game_log)
+
+        with self.assertRaisesRegex(ValueError, "invalid Seer check action"):
+            self.env.step(("check", 3))
+
+        self.assertEqual(self.env.phase, "skill_seer")
+        self.assertEqual(self.env.current_act_idx, self.env.SEER_IDX)
+        self.assertEqual(self.env.seer_check_target, {})
+        self.assertEqual(serialize_logs(self.env.game_log), logs_before)
+
+    def test_seer_check_of_another_alive_player_is_unchanged(self):
         self.env.step(("kill", 5))
         self.env.step(("kill", 5))
-        self.env.step(("check", 3))
+        self.env.step(("check", 4))
 
         self.assertEqual(
             list(self.env.seer_check_target.values()),
-            [2],
+            [3],
         )
         seer_observation = self.env.get_observation_for(3)
         check_logs = [
@@ -457,7 +489,7 @@ class PlayerObservationTest(unittest.TestCase):
             if log.event == "skill_seer"
         ]
         self.assertEqual(len(check_logs), 1)
-        self.assertEqual(check_logs[0].target, 3)
+        self.assertEqual(check_logs[0].target, 4)
         self.assertEqual(
             check_logs[0].content["cheked_identity"],
             "good",
@@ -465,11 +497,11 @@ class PlayerObservationTest(unittest.TestCase):
         formatted = LLMAgent().format_log(
             seer_observation["game_log"]
         )
-        self.assertIn("查验了3号的身份是好人", formatted)
+        self.assertIn("查验了4号的身份是好人", formatted)
         self.assertNotIn("player0", formatted)
         self.assertNotIn("0号", formatted)
         self.assertIn(
-            "player3=好人",
+            "player4=好人",
             build_strict_classic7_speech_plan_prompt(
                 seer_observation,
                 suggestible_player_ids=tuple(
