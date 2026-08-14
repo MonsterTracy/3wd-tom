@@ -361,6 +361,49 @@ class StrictClassic7GameplayPromptTest(unittest.TestCase):
         self.assertIn("4. vote_intent(player3)", renderer)
         self.assertIn("当前准备投票给或放逐 player3", renderer)
 
+    def test_renderer_requires_each_target_instead_of_range_or_aggregate(self):
+        renderer = build_strict_classic7_speech_render_prompt(
+            phase_text="第1天白天公开发言",
+            actor=2,
+            public_actions=[
+                *[
+                    {"action": "check_as_good", "target": target}
+                    for target in range(1, 8)
+                ],
+                {"action": "support", "target": 1},
+            ],
+        )
+
+        self.assertIn("逐个、独立、显式写出每个 target", renderer)
+        self.assertIn("同一 predicate 涉及 3 个或更多 target", renderer)
+        self.assertIn("target 是当前发言者自己时也不例外", renderer)
+        for target in range(1, 8):
+            self.assertIn(f"player{target}/{target}号", renderer)
+        for forbidden_substitute in (
+            "连续编号范围",
+            "集合/聚合指代",
+            "N号至M号",
+            "N-M号",
+            "所有玩家",
+            "全部玩家",
+            "大家",
+            "其他所有人",
+        ):
+            self.assertIn(forbidden_substitute, renderer)
+        self.assertIn("不能在合并时省略任何 target identity", renderer)
+
+    def test_renderer_self_target_still_requires_explicit_player_reference(self):
+        renderer = build_strict_classic7_speech_render_prompt(
+            phase_text="第1天白天公开发言",
+            actor=2,
+            public_actions=[
+                {"action": "check_as_good", "target": 2},
+            ],
+        )
+
+        self.assertIn("本计划必须逐个显式出现：player2/2号", renderer)
+        self.assertIn("target 是当前发言者自己时也不例外", renderer)
+
     def test_renderer_keeps_each_predicate_bound_to_its_target(self):
         renderer = build_strict_classic7_speech_render_prompt(
             phase_text="第1天白天公开发言",

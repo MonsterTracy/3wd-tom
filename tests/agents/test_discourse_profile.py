@@ -315,7 +315,10 @@ def test_baseline_renderer_prompt_remains_byte_exact():
 下面共有 1 项。
 每一项都是独立且必须表达的原子命题。不得省略任何一项。
 不得把某一项的 predicate 转移给另一项的 target。
-可以将多项自然合并为 2–4 句，但所有原子语义必须保留。
+最终正文必须逐个、独立、显式写出每个 target 的 playerN 或 N号，使每个 target 都能被单独识别；target 是当前发言者自己时也不例外。
+即使同一 predicate 涉及 3 个或更多 target，也必须逐个列出。本计划必须逐个显式出现：player4/4号。
+禁止用连续编号范围或集合/聚合指代替代任何 target，例如“N号至M号”“N-M号”“所有玩家”“全部玩家”“大家”“其他所有人”。
+可以将多项自然合并为 2–4 句，但所有原子语义必须保留，且不能在合并时省略任何 target identity。
 1. oppose(player4)
    必须明确表达质疑、反对、不认可 player4 或认为其发言可疑；不得因此自动产生狼人判断或投票意图。
 【输出合同】

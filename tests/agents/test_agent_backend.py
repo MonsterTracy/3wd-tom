@@ -938,6 +938,19 @@ class AgentBackendTest(unittest.TestCase):
             speech,
         )
 
+    def test_range_reference_does_not_satisfy_explicit_plan_coverage(self):
+        with self.assertRaisesRegex(
+            GameplaySpeechQualityError,
+            r"planned player reference\(s\) missing \[3, 4, 5, 6\]",
+        ):
+            validate_gameplay_public_speech(
+                "我查验了1号至7号，结果均为好人，且未获知具体身份。",
+                finish_reason="stop",
+                player_id=2,
+                phase="1_day_speech",
+                planned_player_ids=set(range(1, 8)),
+            )
+
     def test_explicit_player_reference_formats_are_supported(self):
         for reference in (
             "player3", "player 3", "Player3", "玩家3", "玩家 3",

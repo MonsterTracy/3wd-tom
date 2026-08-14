@@ -530,6 +530,12 @@ def build_strict_classic7_speech_render_prompt(
     if not isinstance(public_actions, list):
         raise TypeError("strict speech renderer requires validated public_actions")
     if public_actions:
+        explicit_targets = "、".join(
+            dict.fromkeys(
+                f"player{item['target']}/{item['target']}号"
+                for item in public_actions
+            )
+        )
         obligations = "\n".join(
             f"{index}. {item['action']}(player{item['target']})\n"
             f"   {render_public_action_obligation(item['action'], item['target'], speaker_id=actor)}"
@@ -538,7 +544,10 @@ def build_strict_classic7_speech_render_prompt(
         plan_text = f"""下面共有 {len(public_actions)} 项。
 每一项都是独立且必须表达的原子命题。不得省略任何一项。
 不得把某一项的 predicate 转移给另一项的 target。
-可以将多项自然合并为 2–4 句，但所有原子语义必须保留。
+最终正文必须逐个、独立、显式写出每个 target 的 playerN 或 N号，使每个 target 都能被单独识别；target 是当前发言者自己时也不例外。
+即使同一 predicate 涉及 3 个或更多 target，也必须逐个列出。本计划必须逐个显式出现：{explicit_targets}。
+禁止用连续编号范围或集合/聚合指代替代任何 target，例如“N号至M号”“N-M号”“所有玩家”“全部玩家”“大家”“其他所有人”。
+可以将多项自然合并为 2–4 句，但所有原子语义必须保留，且不能在合并时省略任何 target identity。
 {obligations}"""
     else:
         plan_text = (
