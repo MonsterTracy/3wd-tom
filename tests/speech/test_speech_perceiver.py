@@ -224,6 +224,34 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertIn("不得读取真实角色或环境技能记录", prompt)
         self.assertIn("vote_intent不等于环境实际vote", prompt)
 
+    def test_prompt_requires_explicit_target_in_the_supporting_proposition(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
+        )
+
+        perceiver.parse(1, "基于以上判断，我投这一票。", 1, "speech")
+        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+
+        self.assertIn("同一个明确命题或分句", prompt)
+        self.assertIn("以 playerN 或 N号被明确点名", prompt)
+        self.assertIn("第一人称明确自报具体身份", prompt)
+        self.assertIn("“我是预言家”", prompt)
+        self.assertIn("明确指向当前发言者", prompt)
+        self.assertIn("显式连续编号范围", prompt)
+        self.assertIn("“2号到4号”", prompt)
+        self.assertIn("不是discourse antecedent推断", prompt)
+        self.assertIn("不得从代词、省略宾语", prompt)
+        self.assertIn("前一句、前一个action、discourse context", prompt)
+        self.assertIn("基于以上判断，我投这一票。", prompt)
+        self.assertIn("我就投他。", prompt)
+        self.assertIn("那我投这个人。", prompt)
+        self.assertIn("player2和player3都在发言。那我投他。", prompt)
+        self.assertIn("这一轮我投4号。", prompt)
+        self.assertIn("player1 | vote_intent | player4", prompt)
+
     def test_preserves_distinct_actions_for_same_object(
         self,
     ):

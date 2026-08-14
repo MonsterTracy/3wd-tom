@@ -25,6 +25,7 @@ from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.backends import BackendError
 from werewolf.models.twd_tom.schema import ACTION_NAMES
 from werewolf.registry import Registry
+from werewolf.speech.speech_perceiver import PlannedPublicSpeech
 
 
 def _schema_accepts_plan(schema, payload):
@@ -1347,9 +1348,15 @@ class AgentBackendTest(unittest.TestCase):
             )
             agent.rate_limit = 0
             try:
+                action = agent.act(self._strict_observation())
                 self.assertEqual(
-                    agent.act(self._strict_observation()),
+                    action,
                     ("speech", "我不认可3号。"),
+                )
+                self.assertIsInstance(action[1], PlannedPublicSpeech)
+                self.assertEqual(
+                    action[1].accepted_public_actions,
+                    (("oppose", 3),),
                 )
             finally:
                 agent.close()

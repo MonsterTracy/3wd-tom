@@ -24,6 +24,7 @@ from werewolf.agents.prompt_template_v0 import (
     build_strict_classic7_speech_render_prompt,
 )
 from werewolf.models.twd_tom.public_events import normalize_public_events
+from werewolf.speech.speech_perceiver import PlannedPublicSpeech
 from . import agent_registry as AgentRegistry
 
 
@@ -431,7 +432,18 @@ class GPTAgent(LLMAgent):
                 planned_player_ids=plan.targets,
             )
         final_speech = rendered_content.strip()
-        return final_speech, final_speech, renderer_prompt
+        accepted_public_actions = (
+            plan.public_plan.public_actions
+            if self.gameplay_prompt_profile == (
+                STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
+            )
+            else plan.public_actions
+        )
+        return (
+            final_speech,
+            PlannedPublicSpeech(final_speech, accepted_public_actions),
+            renderer_prompt,
+        )
 
     def extract_answer(self, response):
         pattern = r'\n\n\"(.*?)\"'

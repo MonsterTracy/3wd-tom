@@ -13,6 +13,10 @@ from werewolf.models.tom.reporter import (
     BeliefReporter,
     FORMAL_REPORTER_JSON_INSTRUCTION,
 )
+from werewolf.speech.speech_perceiver import (
+    PlannedPublicSpeech,
+    PublicSpeechSemanticAlignmentError,
+)
 
 
 WITCH_ROLES = [
@@ -608,6 +612,58 @@ def test_zero_triplet_writes_nothing_and_makes_no_reporter_call(tmp_path):
     assert output.read_text() == ""
     assert reporter_backend.calls == []
     assert all(agent.backend.calls == [] for agent in agent_list)
+
+
+def test_alignment_mismatch_prevents_reporter_and_formal_sample(tmp_path):
+    env = ready_env(actions=[])
+    agent_list = agents()
+    output = tmp_path / "mismatch.jsonl"
+    collector, reporter_backend = make_collector(
+        tmp_path,
+        env,
+        agent_list,
+        name="mismatch.jsonl",
+    )
+    speech = PlannedPublicSpeech(
+        "CURRENT-SPEECH",
+        (("point_as_werewolf", 5),),
+    )
+
+    with pytest.raises(PublicSpeechSemanticAlignmentError):
+        env.step(("speech", speech))
+    collector.close()
+
+    assert all(event["event_type"] != "public_speech" for event in env.public_events)
+    assert reporter_backend.calls == []
+    assert collector.samples_written == 0
+    assert output.read_text() == ""
+
+
+def test_matching_alignment_keeps_perceiver_actions_and_hides_plan(tmp_path):
+    parsed_actions = [
+        ["player1", "vote_intent", "player4"],
+        ["player1", "oppose", "player3"],
+    ]
+    env = ready_env(actions=parsed_actions)
+    agent_list = agents()
+    collector, _reporter_backend = make_collector(tmp_path, env, agent_list)
+    speech = PlannedPublicSpeech(
+        "CURRENT-SPEECH",
+        (("oppose", 3), ("vote_intent", 4)),
+    )
+
+    env.step(("speech", speech))
+    sample = collector.record(
+        env, step_idx=1, round_number=1, phase="speech", speaker_id=1
+    )
+    collector.close()
+
+    assert sample["formal_speech_actions"] == parsed_actions
+    assert sample["public_events"][-1]["sp_actions"] == parsed_actions
+    assert sample["public_events"][-1]["raw_text"] == "CURRENT-SPEECH"
+    serialized = json.dumps(sample)
+    assert "accepted_public_actions" not in serialized
+    assert "PlannedPublicSpeech" not in serialized
 
 
 def test_failures_are_invalid_without_retry_repair_or_fallback(tmp_path):

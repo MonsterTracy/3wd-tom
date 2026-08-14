@@ -107,6 +107,72 @@ class SpeechActionValidationError(ValueError):
         return self._raw_response
 
 
+class PublicSpeechSemanticAlignmentError(ValueError):
+    """The rendered speech semantics differ from its accepted plan."""
+
+
+class PlannedPublicSpeech(str):
+    """Carry accepted plan provenance to the environment without publishing it."""
+
+    def __new__(cls, content, accepted_public_actions):
+        if not isinstance(content, str):
+            raise TypeError("planned public speech content must be text")
+        instance = super().__new__(cls, content)
+        instance.accepted_public_actions = tuple(
+            (action, target)
+            for action, target in accepted_public_actions
+        )
+        return instance
+
+
+def validate_public_speech_semantic_alignment(
+    accepted_public_actions,
+    parsed_actions,
+    *,
+    actual_speaker,
+):
+    """Require the actual subject and deduplicated proposition equality."""
+
+    _, speech_action_type = _load_tom_schema()
+    if type(actual_speaker) is not int or not 1 <= actual_speaker <= 7:
+        raise PublicSpeechSemanticAlignmentError(
+            "actual public speaker must be an integer in [1, 7]"
+        )
+    expected_subject = f"player{actual_speaker}"
+    planned_propositions = set()
+    for action, target in accepted_public_actions:
+        normalized = speech_action_type.from_values(1, action, target)
+        planned_propositions.add((normalized.action, normalized.object))
+    parsed_propositions = set()
+    for parsed_action in parsed_actions:
+        if (
+            isinstance(parsed_action, (str, bytes))
+            or len(parsed_action) != 3
+        ):
+            raise PublicSpeechSemanticAlignmentError(
+                "parsed public speech action must be a triplet"
+            )
+        normalized = speech_action_type.from_values(
+            parsed_action[0],
+            parsed_action[1],
+            parsed_action[2],
+        )
+        if normalized.subject != expected_subject:
+            raise PublicSpeechSemanticAlignmentError(
+                "parsed public speech subject does not match actual speaker: "
+                f"expected={expected_subject}, actual={normalized.subject}"
+            )
+        parsed_propositions.add((normalized.action, normalized.object))
+
+    if planned_propositions != parsed_propositions:
+        missing = sorted(planned_propositions - parsed_propositions)
+        extra = sorted(parsed_propositions - planned_propositions)
+        raise PublicSpeechSemanticAlignmentError(
+            "rendered public speech semantics do not match accepted plan: "
+            f"missing={missing}, extra={extra}"
+        )
+
+
 @dataclass(frozen=True)
 class SpeechParseAuditResult:
     """One online parse result with the actual backend response."""
@@ -432,6 +498,10 @@ object 必须是 player1 到 player7。
 
 抽取规则：
 - 只抽取发言直接表达的命题，不得根据常识或其他动作推导。
+- 对普通的带目标动作，目标必须在支持该动作的同一个明确命题或分句中，以 playerN 或 N号被明确点名。
+- 不得从代词、省略宾语、“这个/那个玩家/他/她”、前一句、前一个action、discourse context或多个可能antecedent之一推断目标；动作含义明确但同一支持命题未显式点名目标时，不输出该动作。
+- 第一人称明确自报具体身份（如“我是预言家”）中，“我”明确指向当前发言者，仍必须抽取对当前speaker的 point_as_* ；这不是target推断。
+- 原文明示的显式连续编号范围（如“2号到4号”）仍按范围顺序展开每个目标；这不是discourse antecedent推断。
 - 穷尽抽取所有明确属于上述13类的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
 - 第一人称明确自报具体身份必须抽取。
 - “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级为 point_as_werewolf。
@@ -487,6 +557,18 @@ NONE
 player{speaker} | oppose | player2
 player{speaker} | oppose | player3
 player{speaker} | oppose | player4
+
+输入：基于以上判断，我投这一票。我就投他。那我投这个人。
+输出：
+NONE
+
+输入：player2和player3都在发言。那我投他。
+输出：
+NONE
+
+输入：这一轮我投4号。
+输出：
+player{speaker} | vote_intent | player4
 
 输出协议：
 - 每个动作单独一行，格式严格为：subject | action | object
