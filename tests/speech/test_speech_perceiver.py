@@ -133,10 +133,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             prompt,
         )
         self.assertIn("格式严格为", prompt)
-        self.assertIn(
-            "最多输出7个动作",
-            prompt,
-        )
+        self.assertIn("穷尽输出所有明确动作", prompt)
         self.assertIn(
             "没有可抽取动作时，只输出：NONE",
             prompt,
@@ -165,7 +162,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             "guard",
             "vote_intent",
         ):
-            self.assertNotIn(f"- {action_name}", prompt)
+            self.assertIn(f"- {action_name}", prompt)
         for unsupported_alias in (
             "check_good",
             "checked_good",
@@ -193,7 +190,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             prompt,
         )
 
-    def test_prompt_freezes_formal_seven_action_semantics(
+    def test_prompt_freezes_formal_core_thirteen_semantics(
         self,
     ):
         perceiver = SpeechPerceiver(
@@ -212,9 +209,6 @@ class SpeechPerceiverTest(unittest.TestCase):
             "point_as_guard",
             "support",
             "oppose",
-        ):
-            self.assertIn(f"- {action_name}", prompt)
-        for excluded in (
             "check_as_good",
             "check_as_werewolf",
             "save",
@@ -222,10 +216,13 @@ class SpeechPerceiverTest(unittest.TestCase):
             "guard",
             "vote_intent",
         ):
-            self.assertNotIn(f"- {excluded}", prompt)
-        self.assertIn("好人阵营”都不能产生该动作", prompt)
-        self.assertIn("技能声明", prompt)
-        self.assertIn("投票意图不属于动作", prompt)
+            self.assertIn(f"- {action_name}", prompt)
+        self.assertIn("好人阵营", prompt)
+        self.assertIn("可信", prompt)
+        self.assertIn("都不能产生该动作", prompt)
+        self.assertIn("most-specific-source", prompt)
+        self.assertIn("不得读取真实角色或环境技能记录", prompt)
+        self.assertIn("vote_intent不等于环境实际vote", prompt)
 
     def test_preserves_distinct_actions_for_same_object(
         self,
@@ -269,25 +266,26 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_non_primary_actions_are_dropped_online(
+    def test_core_thirteen_actions_are_kept_online(
         self,
     ):
         actions = SpeechPerceiver._normalize(
             parsed=[["player2", "check_as_good", "player3"]],
             speaker=2,
         )
-        self.assertEqual(actions, [])
+        self.assertEqual(
+            actions,
+            [["player2", "check_as_good", "player3"]],
+        )
 
-    def test_parse_keeps_only_formal_backend_output(
+    def test_parse_keeps_most_specific_check_provenance(
         self,
     ):
         backend = FakeBackend(
             "\n".join(
                 [
                     "player2 | check_as_good | player3",
-                    "player2 | point_as_villager | player3",
                     "player2 | check_as_werewolf | player4",
-                    "player2 | point_as_werewolf | player4",
                 ]
             )
         )
@@ -307,8 +305,8 @@ class SpeechPerceiverTest(unittest.TestCase):
                 phase="speech",
             ),
             [
-                ["player2", "point_as_villager", "player3"],
-                ["player2", "point_as_werewolf", "player4"],
+                ["player2", "check_as_good", "player3"],
+                ["player2", "check_as_werewolf", "player4"],
             ],
         )
 
@@ -375,7 +373,7 @@ class SpeechPerceiverTest(unittest.TestCase):
                     [["player2", action_name, "player2"]],
                 )
 
-    def test_vote_intent_is_excluded_from_prompt_vocabulary(
+    def test_vote_intent_is_in_prompt_vocabulary_without_implied_oppose(
         self,
     ):
         perceiver = SpeechPerceiver(
@@ -391,8 +389,8 @@ class SpeechPerceiverTest(unittest.TestCase):
         )
         prompt = perceiver.backend.calls[0]["messages"][0]["content"]
 
-        self.assertIn("投票意图不属于动作", prompt)
-        self.assertNotIn("- vote_intent", prompt)
+        self.assertIn("- vote_intent", prompt)
+        self.assertIn("vote_intent不等于环境实际vote，也不自动产生oppose", prompt)
 
     def test_merges_protected_self_claim_with_other_llm_actions(
         self,
@@ -431,7 +429,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_protected_self_role_survives_non_primary_backend_output(
+    def test_protected_self_role_merges_with_check_provenance(
         self,
     ):
         backend = FakeBackend(
@@ -456,6 +454,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ),
             [
                 ["player1", "point_as_villager", "player1"],
+                ["player1", "check_as_good", "player1"],
             ],
         )
 
@@ -648,7 +647,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_strict_rejects_non_primary_actions_in_pipe_and_complete_json(
+    def test_strict_accepts_core_thirteen_actions_in_pipe_and_complete_json(
         self,
     ):
         expected = [
@@ -671,13 +670,15 @@ class SpeechPerceiverTest(unittest.TestCase):
                     model_name="test-model",
                 )
 
-                with self.assertRaises(SpeechActionValidationError):
+                self.assertEqual(
                     perceiver.parse_strict(
                         1,
                         "公开发言",
                         1,
                         "speech",
-                    )
+                    ),
+                    expected,
+                )
 
     def test_extracts_first_legacy_json_array_from_text(
         self,

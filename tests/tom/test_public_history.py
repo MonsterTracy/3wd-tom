@@ -173,8 +173,18 @@ def test_private_skill_details_and_bookkeeping_are_not_model_input():
         assert forbidden not in serialized
 
 
-def test_non_primary_speech_action_is_rejected_by_formal_projection():
+def test_core_thirteen_speech_action_is_projected_as_public_semantics():
     source = ledger()
     source[3]["sp_actions"] = [["player1", "vote_intent", "player2"]]
-    with pytest.raises(ValueError, match="unsupported speech action"):
-        build_model_input(episode_context="seer_guard", public_events=source)
+    events = build_model_input(
+        episode_context="seer_guard",
+        public_events=source,
+    )["events"]
+    assert events[1] == {
+        "type": "speech_action",
+        "subject": "player1",
+        "predicate": "vote_intent",
+        "object": "player2",
+        "round": 1,
+        "phase": "discussion",
+    }

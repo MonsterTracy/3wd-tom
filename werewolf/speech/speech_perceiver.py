@@ -416,24 +416,33 @@ object 必须是 player1 到 player7。
 {allowed_actions}
 
 动作语义：
-1. point_as_werewolf：明确判断目标是狼人。
-2. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。“好人”“非狼”“好人阵营”都不能产生该动作。
+1. point_as_werewolf：明确声称或判断目标是狼人；如果狼人结论来自speaker自己的查验声明，改用check_as_werewolf。
+2. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。“好人”“非狼”“好人阵营”“可信”都不能产生该动作。
 3. point_as_seer：明确判断目标是预言家。
 4. point_as_witch：明确判断目标是女巫。
 5. point_as_guard：明确判断目标是守卫。
-6. support：明确支持、认可目标玩家或其观点。
-7. oppose：明确反对、不信任、质疑目标玩家或其观点。
+6. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验好人自动推导。
+7. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
+8. check_as_good：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
+9. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
+10. save：speaker明确公开声称自己救了目标。
+11. poison：speaker明确公开声称自己毒了目标。
+12. guard：speaker明确公开声称自己守护了目标。
+13. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
 
 抽取规则：
 - 只抽取发言直接表达的命题，不得根据常识或其他动作推导。
-- 穷尽抽取所有明确属于上述7类的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突或同一句还包含技能、投票内容，也不得静默漏掉明确角色判断。
+- 穷尽抽取所有明确属于上述13类的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
 - 第一人称明确自报具体身份必须抽取。
 - “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级为 point_as_werewolf。
-- 技能声明，包括查验、救人、毒人和守护，不属于动作。
-- 投票意图不属于动作，也不等于 support 或 oppose；“我要投 player3”“我准备放逐 player3”“今天出 player3”等投票意图单独存在时不得产生 oppose，只有另有“不信、反对、质疑、说法可疑”等明确文本才产生 oppose。
+- most-specific-source：同一个semantic claim只使用最具体predicate，不得从一个specific claim自动派生generic actions。
+- 查验来源的好人/非狼只产生check_as_good，不自动产生point_as_villager或support；查验来源的狼人只产生check_as_werewolf，不自动产生point_as_werewolf、oppose或vote_intent。
+- 只有原文另外、独立地明确表达第二个formal proposition时，才允许为同一目标输出第二个action。
+- save、poison、guard只表示speaker公开声称的技能动作，不自动产生任何身份判断；不得读取真实角色或环境技能记录进行truth validation。
+- vote_intent不等于环境实际vote，也不自动产生oppose；“大家应该关注3号”不构成speaker自己的投票意图。
 - “查验 player5 是好人”等查验结果单独存在时不得产生 support；只有另有“支持、相信、说得对”等明确认可文本才产生 support。
 - 查验结果为“好人”不得产生 point_as_villager、point_as_seer、point_as_witch 或 point_as_guard；只有另外明确说出具体角色判断时才抽取对应 point_as_*。
-- “player4 是预言家”等明确具体角色判断必须抽取，即使同一句还含“经过查验”或投票内容；parser只忠实表示原文，不判断游戏机制是否合理。
+- “player4 是预言家”等明确具体角色判断必须抽取；parser只忠实表示原文，不判断游戏机制是否合理。
 - 转述别人的身份声明或立场，不视为当前发言者自己的立场。
 - “我是好人”和“我不是狼人”都不能产生 point_as_villager。
 - 连续玩家范围必须按原文顺序展开成多个原子三元组。
@@ -456,7 +465,18 @@ player{speaker} | support | player4
 
 输入：昨晚我查验2号是好人，救了3号，今天投4号。
 输出：
-NONE
+player{speaker} | check_as_good | player2
+player{speaker} | save | player3
+player{speaker} | vote_intent | player4
+
+输入：我昨晚查验3号是狼人。
+输出：
+player{speaker} | check_as_werewolf | player3
+
+输入：我是女巫，昨晚毒了5号。
+输出：
+player{speaker} | point_as_witch | player{speaker}
+player{speaker} | poison | player5
 
 输入：3号是好人。
 输出：
@@ -470,7 +490,7 @@ player{speaker} | oppose | player4
 
 输出协议：
 - 每个动作单独一行，格式严格为：subject | action | object
-- 最多输出7个动作，不要重复动作。
+- 穷尽输出所有明确动作，不要重复动作。
 - 没有可抽取动作时，只输出：NONE
 - 不输出 JSON、解释或 Markdown 代码块。
 

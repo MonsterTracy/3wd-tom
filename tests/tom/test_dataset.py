@@ -7,6 +7,7 @@ import torch
 import werewolf.models.tom.dataset as dataset_module
 from werewolf.models.tom.dataset import TomDataset, collate_batch, encode_sample
 from werewolf.models.tom.schema import (
+    ACTION_NAMES,
     ACTION_TO_ID,
     CONFIG_TO_ID,
     EVENT_TO_ID,
@@ -182,6 +183,22 @@ def test_multi_round_prefix_is_complete_chronological_and_ends_at_current_action
     assert item["attention_mask"].all().item()
 
 
+def test_all_core_thirteen_speech_actions_encode_with_exact_ids():
+    sample = short_sample()
+    actions = [
+        ["player1", action, "player2"]
+        for action in ACTION_NAMES
+    ]
+    sample["formal_speech_actions"] = deepcopy(actions)
+    sample["public_events"][-1]["sp_actions"] = deepcopy(actions)
+
+    item = encode_sample(sample)
+
+    assert item["sequence_length"].item() == 14
+    assert item["action_ids"][0].item() == NONE_ACTION_ID
+    assert item["action_ids"][1:].tolist() == list(range(1, 14))
+
+
 def test_night_result_is_lossless_and_peaceful_night_is_a_real_event():
     item = encode_sample(raw_sample())
     assert item["dead_players"][0].tolist() == [False] * 7
@@ -211,6 +228,9 @@ def test_semantic_none_is_distinct_from_padding_for_vote_exile_and_action():
     assert NONE_ACTION_ID != ACTION_TO_ID[PAD_TOKEN]
     assert item["object_ids"][4].item() == PLAYER_TO_ID[NONE_TOKEN]
     assert item["action_ids"][4].item() == NONE_ACTION_ID
+    assert [item["action_ids"][index].item() for index in (0, 3, 4, 5, 6)] == [
+        NONE_ACTION_ID,
+    ] * 5
 
     no_exile = raw_sample()
     no_exile["public_events"][8]["exiled_players"] = []

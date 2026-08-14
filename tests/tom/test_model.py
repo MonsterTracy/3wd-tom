@@ -136,6 +136,25 @@ def test_fixed_architecture_and_schema_cardinalities(model):
     assert model.output_projection.out_features == 49
 
 
+def test_core_thirteen_none_and_padding_action_ids_are_valid(model):
+    assert ACTION_TO_ID["<pad>"] == 0
+    assert ACTION_TO_ID["vote_intent"] == 13
+    assert NONE_ACTION_ID == 14
+    assert model.action_embedding.num_embeddings == 15
+
+    for action_id in (0, 13, 14):
+        inputs = _tensor_inputs(2)
+        inputs["action_ids"].fill_(action_id)
+        with torch.no_grad():
+            logits = model(**inputs)
+            probabilities = torch.softmax(logits, dim=-1)
+        assert logits.shape == (1, 7, 7)
+        torch.testing.assert_close(
+            probabilities.sum(dim=-1),
+            torch.ones((1, 7)),
+        )
+
+
 def test_dataset_collate_feeds_complete_matrix_forward(model):
     batch = collate_batch([encode_sample(_raw_sample())])
     with torch.no_grad():
@@ -210,4 +229,3 @@ def test_dataset_forward_and_loss_backpropagate_to_model_parameters():
     assert torch.isfinite(loss)
     assert model.output_projection.weight.grad is not None
     assert torch.isfinite(model.output_projection.weight.grad).all()
-

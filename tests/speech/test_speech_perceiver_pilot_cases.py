@@ -243,34 +243,52 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
 
-    def test_vote_intent_is_excluded_without_erasing_formal_actions(
+    def test_vote_intent_is_distinct_without_erasing_other_actions(
         self,
     ):
         cases = (
             (
                 "这一轮我倾向投4号。",
-                "NONE",
-                [],
+                "player6 | vote_intent | player4",
+                [["player6", "vote_intent", "player4"]],
             ),
             (
                 "这一轮我投4号。",
-                "NONE",
-                [],
+                "player6 | vote_intent | player4",
+                [["player6", "vote_intent", "player4"]],
             ),
             (
                 "我不信4号，这一轮我倾向投4号。",
-                "player6 | oppose | player4",
-                [["player6", "oppose", "player4"]],
+                (
+                    "player6 | oppose | player4\n"
+                    "player6 | vote_intent | player4"
+                ),
+                [
+                    ["player6", "oppose", "player4"],
+                    ["player6", "vote_intent", "player4"],
+                ],
             ),
             (
                 "我不信4号，这一轮我投4号。",
-                "player6 | oppose | player4",
-                [["player6", "oppose", "player4"]],
+                (
+                    "player6 | oppose | player4\n"
+                    "player6 | vote_intent | player4"
+                ),
+                [
+                    ["player6", "oppose", "player4"],
+                    ["player6", "vote_intent", "player4"],
+                ],
             ),
             (
                 "我觉得4号是狼，这一轮我倾向投4号。",
-                "player6 | point_as_werewolf | player4",
-                [["player6", "point_as_werewolf", "player4"]],
+                (
+                    "player6 | point_as_werewolf | player4\n"
+                    "player6 | vote_intent | player4"
+                ),
+                [
+                    ["player6", "point_as_werewolf", "player4"],
+                    ["player6", "vote_intent", "player4"],
+                ],
             ),
         )
 
@@ -283,11 +301,11 @@ class SpeechPerceiverPilotCasesTest(
                 )
                 self.assertEqual(actions, expected)
                 self.assertIn(
-                    "投票意图不属于动作，也不等于 support 或 oppose",
+                    "vote_intent不等于环境实际vote，也不自动产生oppose",
                     prompt,
                 )
 
-    def test_non_primary_claims_do_not_erase_formal_actions(
+    def test_specific_claims_coexist_only_with_independent_propositions(
         self,
     ):
         cases = (
@@ -304,7 +322,10 @@ class SpeechPerceiverPilotCasesTest(
                     "player1 | check_as_werewolf | player3\n"
                     "player1 | vote_intent | player3"
                 ),
-                [],
+                [
+                    ["player1", "check_as_werewolf", "player3"],
+                    ["player1", "vote_intent", "player3"],
+                ],
             ),
             (
                 1,
@@ -315,13 +336,14 @@ class SpeechPerceiverPilotCasesTest(
                 ),
                 [
                     ["player1", "point_as_seer", "player1"],
+                    ["player1", "check_as_werewolf", "player3"],
                 ],
             ),
             (
                 1,
                 "3号是好人，但为了统一票型今天投3号。",
-                "NONE",
-                [],
+                "player1 | vote_intent | player3",
+                [["player1", "vote_intent", "player3"]],
             ),
             (
                 1,
@@ -331,6 +353,7 @@ class SpeechPerceiverPilotCasesTest(
                     "player1 | support | player3"
                 ),
                 [
+                    ["player1", "check_as_good", "player3"],
                     ["player1", "support", "player3"],
                 ],
             ),
@@ -370,14 +393,26 @@ class SpeechPerceiverPilotCasesTest(
             (
                 5,
                 "我今天的投票意向是放逐 player3。同时，我公开判断 player4 是村民。",
-                "player5 | point_as_villager | player4",
-                [["player5", "point_as_villager", "player4"]],
+                (
+                    "player5 | vote_intent | player3\n"
+                    "player5 | point_as_villager | player4"
+                ),
+                [
+                    ["player5", "vote_intent", "player3"],
+                    ["player5", "point_as_villager", "player4"],
+                ],
             ),
             (
                 6,
                 "我认为 player1 是村民。查验 player5 的结果是好人。",
-                "player6 | point_as_villager | player1",
-                [["player6", "point_as_villager", "player1"]],
+                (
+                    "player6 | point_as_villager | player1\n"
+                    "player6 | check_as_good | player5"
+                ),
+                [
+                    ["player6", "point_as_villager", "player1"],
+                    ["player6", "check_as_good", "player5"],
+                ],
             ),
             (
                 4,
@@ -398,8 +433,14 @@ class SpeechPerceiverPilotCasesTest(
             (
                 7,
                 "经过查验，player4 是预言家，而查验 player2 的结果为好人。",
-                "player7 | point_as_seer | player4",
-                [["player7", "point_as_seer", "player4"]],
+                (
+                    "player7 | point_as_seer | player4\n"
+                    "player7 | check_as_good | player2"
+                ),
+                [
+                    ["player7", "point_as_seer", "player4"],
+                    ["player7", "check_as_good", "player2"],
+                ],
             ),
         )
 
@@ -411,9 +452,9 @@ class SpeechPerceiverPilotCasesTest(
                     response=response,
                 )
                 self.assertEqual(actions, expected)
-                self.assertIn("穷尽抽取所有明确属于上述7类的命题", prompt)
+                self.assertIn("穷尽抽取所有明确属于上述13类的命题", prompt)
                 self.assertIn(
-                    "投票意图不属于动作，也不等于 support 或 oppose",
+                    "vote_intent不等于环境实际vote，也不自动产生oppose",
                     prompt,
                 )
                 self.assertIn("查验结果单独存在时不得产生 support", prompt)

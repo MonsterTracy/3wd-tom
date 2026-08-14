@@ -25,6 +25,12 @@ ACTION_NAMES = (
     "point_as_guard",
     "support",
     "oppose",
+    "check_as_good",
+    "check_as_werewolf",
+    "save",
+    "poison",
+    "guard",
+    "vote_intent",
 )
 ACTION_TO_ID = {
     PAD_TOKEN: 0,
