@@ -115,9 +115,16 @@ def test_same_observation_ab_uses_shared_prompt_and_provider_transports(
     deepseek_request = deepseek.calls[0]
     qwen_prompt = qwen_request["messages"][0]["content"]
     deepseek_prompt = deepseek_request["messages"][0]["content"]
-    assert qwen_prompt == deepseek_prompt
+    semantic_prompt = BeliefReporter.build_prompt(5, observation)
+    assert qwen_prompt == semantic_prompt
+    assert deepseek_prompt == (
+        "Output the response in JSON format only.\n\n"
+        + semantic_prompt
+    )
+    assert "json" in deepseek_prompt.lower()
+    assert deepseek_prompt.endswith(semantic_prompt)
     assert row["prompt_digest"] == hashlib.sha256(
-        qwen_prompt.encode("utf-8")
+        semantic_prompt.encode("utf-8")
     ).hexdigest()
     legal_state = BeliefReporter.legal_state(5, observation)
     canonical_state = json.dumps(

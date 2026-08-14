@@ -54,9 +54,13 @@ class ReporterABAudit:
         prompt: str,
         hard_knowledge: Mapping[str, list[str]],
     ) -> dict[str, Any]:
+        transport_prompt = (
+            "Output the response in JSON format only.\n\n"
+            + prompt
+        )
         try:
             raw = self.deepseek_backend.chat(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": transport_prompt}],
                 model=DEEPSEEK_REPORTER_AB_MODEL,
                 temperature=0.0,
                 max_tokens=PRIVATE_BELIEF_MAX_TOKENS,
