@@ -27,7 +27,6 @@ class Collector:
         seed: int | None,
         episode_context: str,
         reporter,
-        reporter_ab=None,
     ) -> None:
         if not isinstance(game_id, str) or not game_id.strip():
             raise ValueError("game_id must be non-empty text")
@@ -41,7 +40,6 @@ class Collector:
         self.seed = seed
         self.episode_context = normalize_episode_context(episode_context)
         self.reporter = reporter
-        self.reporter_ab = reporter_ab
         self._output = path.open("a", encoding="utf-8")
         self.samples_written = 0
 
@@ -115,18 +113,7 @@ class Collector:
         reports = []
         for observer_id in observer_ids:
             observation = env.get_observation_for(observer_id)
-            report = self.reporter.report(observer_id, observation)
-            reports.append(report)
-            if self.reporter_ab is not None:
-                self.reporter_ab.record(
-                    game_id=self.game_id,
-                    step_idx=step_idx,
-                    speaker_id=speaker_id,
-                    observer_id=observer_id,
-                    phase=phase,
-                    observation=observation,
-                    qwen_result=report,
-                )
+            reports.append(self.reporter.report(observer_id, observation))
 
         public_events = deepcopy(list(env.public_events[: speech_index + 1]))
         canonical_prefix = json.dumps(
@@ -164,8 +151,6 @@ class Collector:
     def close(self) -> None:
         if not self._output.closed:
             self._output.close()
-        if self.reporter_ab is not None:
-            self.reporter_ab.close()
 
 
 __all__ = ["Collector"]

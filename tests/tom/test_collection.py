@@ -1,13 +1,18 @@
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
-from run_random import build_tom_collector, eval
+import run_random
+from run_random import build_arg_parser, build_tom_collector, eval
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.helper.log_utils import Log
 from werewolf.models.tom.collection import Collector
-from werewolf.models.tom.reporter import BeliefReporter
+from werewolf.models.tom.reporter import (
+    BeliefReporter,
+    FORMAL_REPORTER_JSON_INSTRUCTION,
+)
 
 
 WITCH_ROLES = [
@@ -38,9 +43,14 @@ class Backend:
 
     def chat(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+        response = (
+            self.response.pop(0)
+            if isinstance(self.response, list)
+            else self.response
+        )
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class Agent:
@@ -103,18 +113,24 @@ def ready_env(*, guard=False, actions=FORMAL_ACTION):
 
 
 def make_collector(tmp_path, env, agent_list, *, name="raw.jsonl"):
-    return build_tom_collector(
+    reporter_backend = Backend([
+        agent.backend.response
+        for agent in agent_list
+    ])
+    collector = build_tom_collector(
         env=env,
-        agent_list=agent_list,
+        reporter_backend=reporter_backend,
         output_path=tmp_path / name,
         game_id="game-1",
         seed=17,
     )
+    return collector, reporter_backend
 
 
-def prompt_for(agent):
-    assert len(agent.backend.calls) == 1
-    return agent.backend.calls[0]["messages"][0]["content"]
+def prompt_for(reporter_backend, call_index):
+    outbound = reporter_backend.calls[call_index]["messages"][0]["content"]
+    assert outbound.startswith(FORMAL_REPORTER_JSON_INSTRUCTION)
+    return outbound.removeprefix(FORMAL_REPORTER_JSON_INSTRUCTION)
 
 
 def legal_observation(observer_id, identity, extra_logs=()):
@@ -136,14 +152,10 @@ def legal_observation(observer_id, identity, extra_logs=()):
 
 
 def reporter_result(observation, response):
-    agent_list = agents({observation["observer_id"]: response})
-    dispatches = [
-        {"backend": agent.backend, "model_name": agent.model_name}
-        for agent in agent_list
-    ]
+    backend = Backend(response)
     observer_id = observation["observer_id"]
-    result = BeliefReporter(dispatches).report(observer_id, observation)
-    return result, agent_list[observer_id - 1].backend
+    result = BeliefReporter(backend).report(observer_id, observation)
+    return result, backend
 
 
 @pytest.fixture
@@ -396,36 +408,97 @@ def test_conflicting_hard_knowledge_raises_explicit_error(seer_observation):
         BeliefReporter.derive_hard_knowledge(3, seer_observation)
 
 
-def test_reporter_request_uses_qwen_thinking_suppression():
+def test_reporter_request_uses_formal_deepseek_transport():
     env = ready_env()
-    agent_list = agents(
-        {1: '{"suspected_werewolves":["player1","player2"]}'}
+    backend = Backend(
+        '{"suspected_werewolves":["player1","player2"]}'
     )
-    dispatches = [
-        {"backend": agent.backend, "model_name": agent.model_name}
-        for agent in agent_list
-    ]
-    result = BeliefReporter(dispatches).report(
+    observation = env.get_observation_for(1)
+    semantic_prompt = BeliefReporter.build_prompt("player1", observation)
+    result = BeliefReporter(backend).report(
         "player1",
-        env.get_observation_for(1),
+        observation,
     )
 
     assert result["valid"] is True
-    request = agent_list[0].backend.calls[0]
+    request = backend.calls[0]
+    assert request["model"] == "deepseek-v4-flash"
+    assert request["temperature"] == 0.0
+    assert request["response_format"] == {"type": "json_object"}
     assert request["extra_body"] == {
-        "chat_template_kwargs": {"enable_thinking": False}
+        "thinking": {"type": "disabled"}
     }
-    assert "thinking" not in request["extra_body"]
-    schema = request["response_format"]["json_schema"]
-    assert schema["strict"] is True
-    assert schema["schema"]["properties"]["suspected_werewolves"] == {
-        "type": "array",
-        "minItems": 0,
-        "maxItems": 7,
-        "items": {
-            "type": "string",
-            "enum": [f"player{player_id}" for player_id in range(1, 8)],
-        },
+    assert request["messages"] == [{
+        "role": "user",
+        "content": FORMAL_REPORTER_JSON_INSTRUCTION + semantic_prompt,
+    }]
+    assert "chat_template_kwargs" not in request["extra_body"]
+    assert len(backend.calls) == 1
+
+
+def test_formal_reporter_backend_is_only_built_for_tom_collection(
+    monkeypatch,
+):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    def forbidden_backend(**_kwargs):
+        raise AssertionError("DeepSeek backend must not be constructed")
+
+    monkeypatch.setattr(
+        run_random,
+        "OpenAICompatibleBackend",
+        forbidden_backend,
+    )
+    assert run_random._build_formal_tom_reporter_backend(None) is None
+
+
+def test_missing_formal_reporter_key_fails_before_runtime_start(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    args = SimpleNamespace(
+        tom_sample_path=str(tmp_path / "formal.jsonl"),
+        log_save_path=None,
+        config=str(tmp_path / "must-not-be-read.yaml"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="DEEPSEEK_API_KEY is required for --tom_sample_path",
+    ):
+        run_random.main_cli(args)
+
+    assert args.log_save_path is None
+
+
+def test_formal_reporter_backend_configuration_and_ab_cli_cleanup(
+    monkeypatch,
+):
+    captured = {}
+    sentinel = object()
+
+    def fake_backend(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "environment-secret")
+    monkeypatch.setattr(run_random, "OpenAICompatibleBackend", fake_backend)
+
+    assert (
+        run_random._build_formal_tom_reporter_backend("formal.jsonl")
+        is sentinel
+    )
+    assert captured == {
+        "api_key": "environment-secret",
+        "base_url": "https://api.deepseek.com",
+        "default_model": "deepseek-v4-flash",
+        "max_retries": 0,
+        "supports_json_schema": False,
+    }
+    assert "tom_reporter_ab_path" not in {
+        action.dest
+        for action in build_arg_parser()._actions
     }
 
 
@@ -463,7 +536,7 @@ def test_post_speech_observations_are_private_aware_for_both_configs(
 ):
     env = ready_env(guard=guard)
     agent_list = agents()
-    collector = make_collector(tmp_path, env, agent_list)
+    collector, reporter_backend = make_collector(tmp_path, env, agent_list)
 
     env.step(("speech", "CURRENT-SPEECH"))
     sample = collector.record(
@@ -473,16 +546,20 @@ def test_post_speech_observations_are_private_aware_for_both_configs(
 
     assert sample["episode_context"] == context
     assert sample["formal_speech_actions"] == FORMAL_ACTION
-    assert "CURRENT-SPEECH" in prompt_for(agent_list[0])
-    assert "FUTURE-SPEECH" not in prompt_for(agent_list[0])
-    assert "werewolf_team_info" in prompt_for(agent_list[0])
-    assert "werewolf_team_info" not in prompt_for(agent_list[2])
-    assert "skill_seer" in prompt_for(agent_list[2])
-    assert "skill_seer" not in prompt_for(agent_list[4])
+    assert "CURRENT-SPEECH" in prompt_for(reporter_backend, 0)
+    assert "FUTURE-SPEECH" not in prompt_for(reporter_backend, 0)
+    assert "werewolf_team_info" in prompt_for(reporter_backend, 0)
+    assert "werewolf_team_info" not in prompt_for(reporter_backend, 2)
+    assert "skill_seer" in prompt_for(reporter_backend, 2)
+    assert "skill_seer" not in prompt_for(reporter_backend, 4)
     private_event = "skill_guard" if guard else "skill_witch"
-    assert private_event in prompt_for(agent_list[3])
-    assert private_event not in prompt_for(agent_list[4])
-    assert "god_view" not in "".join(prompt_for(agent) for agent in agent_list)
+    assert private_event in prompt_for(reporter_backend, 3)
+    assert private_event not in prompt_for(reporter_backend, 4)
+    assert "god_view" not in "".join(
+        prompt_for(reporter_backend, index)
+        for index in range(7)
+    )
+    assert all(agent.backend.calls == [] for agent in agent_list)
     assert sample["public_events"][-1]["event_type"] == "public_speech"
     assert all(event["event_type"] != "turn_start" for event in sample["public_events"][-1:])
 
@@ -491,7 +568,7 @@ def test_alive_only_queries_post_speech_alive_observers(tmp_path):
     env = ready_env()
     env.alive = [1, 0, 1, 1, 0, 1, 1]
     agent_list = agents()
-    collector = make_collector(tmp_path, env, agent_list)
+    collector, reporter_backend = make_collector(tmp_path, env, agent_list)
     env.step(("speech", "CURRENT-SPEECH"))
 
     sample = collector.record(
@@ -505,14 +582,20 @@ def test_alive_only_queries_post_speech_alive_observers(tmp_path):
     assert [report["observer_id"] for report in sample["observer_reports"]] == (
         sample["alive_observers"]
     )
-    assert [len(agent.backend.calls) for agent in agent_list] == [1, 0, 1, 1, 0, 1, 1]
+    assert len(reporter_backend.calls) == 5
+    assert all(agent.backend.calls == [] for agent in agent_list)
 
 
 def test_zero_triplet_writes_nothing_and_makes_no_reporter_call(tmp_path):
     env = ready_env(actions=[])
     agent_list = agents()
     output = tmp_path / "zero.jsonl"
-    collector = make_collector(tmp_path, env, agent_list, name="zero.jsonl")
+    collector, reporter_backend = make_collector(
+        tmp_path,
+        env,
+        agent_list,
+        name="zero.jsonl",
+    )
     env.step(("speech", "NO-FORMAL-ACTION"))
 
     result = collector.record(
@@ -523,6 +606,7 @@ def test_zero_triplet_writes_nothing_and_makes_no_reporter_call(tmp_path):
     assert result is None
     assert collector.samples_written == 0
     assert output.read_text() == ""
+    assert reporter_backend.calls == []
     assert all(agent.backend.calls == [] for agent in agent_list)
 
 
@@ -536,7 +620,7 @@ def test_failures_are_invalid_without_retry_repair_or_fallback(tmp_path):
         }
     )
     env = ready_env()
-    collector = make_collector(tmp_path, env, agent_list)
+    collector, reporter_backend = make_collector(tmp_path, env, agent_list)
     env.step(("speech", "CURRENT-SPEECH"))
 
     sample = collector.record(
@@ -563,7 +647,8 @@ def test_failures_are_invalid_without_retry_repair_or_fallback(tmp_path):
             "suspected_werewolves": [], "error": None,
         },
     ]
-    assert all(len(agent.backend.calls) == 1 for agent in agent_list)
+    assert len(reporter_backend.calls) == 7
+    assert all(agent.backend.calls == [] for agent in agent_list)
 
 
 def snapshot_env(env):
@@ -581,7 +666,7 @@ def snapshot_env(env):
 def test_collection_does_not_mutate_environment_agents_or_gameplay(tmp_path):
     env = ready_env()
     agent_list = agents()
-    collector = make_collector(tmp_path, env, agent_list)
+    collector, _reporter_backend = make_collector(tmp_path, env, agent_list)
     env.step(("speech", "CURRENT-SPEECH"))
     before_env = snapshot_env(env)
     before_memory = [deepcopy(agent.memory) for agent in agent_list]
@@ -598,11 +683,7 @@ def test_collection_does_not_mutate_environment_agents_or_gameplay(tmp_path):
 
 
 def test_collector_does_not_read_role_truth_outside_legal_observation(tmp_path):
-    agent_list = agents()
-    dispatches = [
-        {"backend": agent.backend, "model_name": agent.model_name}
-        for agent in agent_list
-    ]
+    reporter_backend = Backend()
     legal_logs = [
         Log(
             viewer=[5], source=0, target=[1, 2, 3, 4, 5, 6, 7],
@@ -635,7 +716,7 @@ def test_collector_does_not_read_role_truth_outside_legal_observation(tmp_path):
 
     collector = Collector(
         tmp_path / "truth.jsonl", game_id="g", seed=None,
-        episode_context="seer_witch", reporter=BeliefReporter(dispatches),
+        episode_context="seer_witch", reporter=BeliefReporter(reporter_backend),
     )
     sample = collector.record(
         BoundaryEnv(), step_idx=1, round_number=1, phase="speech", speaker_id=1
@@ -643,7 +724,7 @@ def test_collector_does_not_read_role_truth_outside_legal_observation(tmp_path):
     collector.close()
 
     assert sample["alive_observers"] == ["player6"]
-    assert "TRUTH-CANARY" not in prompt_for(agent_list[5])
+    assert "TRUTH-CANARY" not in prompt_for(reporter_backend, 0)
     assert "roles" not in sample
 
 
@@ -702,7 +783,7 @@ def test_runtime_hook_is_after_commit_and_before_next_gameplay_action():
 def test_saved_sample_has_cutoff_identity_and_no_hidden_dump(tmp_path):
     env = ready_env()
     agent_list = agents({1: '{"suspected_werewolves":["player1","player2"]}'})
-    collector = make_collector(tmp_path, env, agent_list)
+    collector, reporter_backend = make_collector(tmp_path, env, agent_list)
     env.step(("speech", "CURRENT-SPEECH"))
     sample = collector.record(
         env, step_idx=4, round_number=1, phase="speech", speaker_id=1
@@ -718,6 +799,8 @@ def test_saved_sample_has_cutoff_identity_and_no_hidden_dump(tmp_path):
     assert sample["observer_reports"][0]["suspected_werewolves"] == [
         "player1", "player2"
     ]
+    assert len(reporter_backend.calls) == 7
+    assert all(agent.backend.calls == [] for agent in agent_list)
     serialized = json.dumps(sample)
     assert "true_roles" not in serialized
     assert "agent internal" not in serialized

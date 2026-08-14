@@ -14,7 +14,6 @@ import os
 import random
 import time
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -32,11 +31,10 @@ from werewolf.backends import (
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
 from werewolf.models.tom.collection import Collector as TomCollector
-from werewolf.models.tom.reporter import BeliefReporter
-from werewolf.models.tom.reporter_ab import (
-    DEEPSEEK_REPORTER_AB_BASE_URL,
-    DEEPSEEK_REPORTER_AB_MODEL,
-    ReporterABAudit,
+from werewolf.models.tom.reporter import (
+    BeliefReporter,
+    FORMAL_REPORTER_BASE_URL,
+    FORMAL_REPORTER_MODEL,
 )
 from werewolf.models.public_belief_matrix.collection import (
     PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
@@ -777,12 +775,10 @@ def build_twd_tom_sample_collector(
 def build_tom_collector(
     *,
     env,
-    agent_list,
+    reporter_backend,
     output_path,
     game_id,
     seed,
-    reporter_ab_path=None,
-    reporter_ab_backend=None,
 ):
     """Build the single formal post-speech collection path."""
 
@@ -792,49 +788,27 @@ def build_tom_collector(
         episode_context = "seer_witch"
     else:
         raise ValueError("formal ToM requires seer_guard or seer_witch")
-    if (
-        reporter_ab_path is not None
-        and Path(output_path).resolve() == Path(reporter_ab_path).resolve()
-    ):
-        raise ValueError(
-            "formal output_path and reporter_ab_path must be different files"
-        )
-    dispatches = [
-        {
-            "backend": getattr(agent, "backend", None),
-            "model_name": getattr(agent, "model_name", None),
-        }
-        for agent in agent_list
-    ]
-    if reporter_ab_path is None:
-        if reporter_ab_backend is not None:
-            raise ValueError("reporter_ab_backend requires reporter_ab_path")
-        reporter_ab = None
-    else:
-        reporter_ab = ReporterABAudit(
-            reporter_ab_path,
-            deepseek_backend=reporter_ab_backend,
-        )
     return TomCollector(
         output_path,
         game_id=game_id,
         seed=seed,
         episode_context=episode_context,
-        reporter=BeliefReporter(dispatches),
-        reporter_ab=reporter_ab,
+        reporter=BeliefReporter(reporter_backend),
     )
 
 
-def _build_tom_reporter_ab_backend():
+def _build_formal_tom_reporter_backend(tom_sample_path):
+    if tom_sample_path is None:
+        return None
     api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not isinstance(api_key, str) or not api_key.strip():
         raise ValueError(
-            "DEEPSEEK_API_KEY is required for --tom_reporter_ab_path"
+            "DEEPSEEK_API_KEY is required for --tom_sample_path"
         )
     return OpenAICompatibleBackend(
         api_key=api_key.strip(),
-        base_url=DEEPSEEK_REPORTER_AB_BASE_URL,
-        default_model=DEEPSEEK_REPORTER_AB_MODEL,
+        base_url=FORMAL_REPORTER_BASE_URL,
+        default_model=FORMAL_REPORTER_MODEL,
         max_retries=0,
         supports_json_schema=False,
     )
@@ -881,6 +855,11 @@ def _write_role_assignment(
 
 def main_cli(args):
     """CLI implementation."""
+
+    tom_sample_path = getattr(args, "tom_sample_path", None)
+    formal_reporter_backend = _build_formal_tom_reporter_backend(
+        tom_sample_path
+    )
 
     if args.log_save_path is None:
         run_name = time.strftime(
@@ -1004,10 +983,6 @@ def main_cli(args):
         "twd_tom_sample_path",
         None,
     )
-    tom_sample_path = getattr(args, "tom_sample_path", None)
-    tom_reporter_ab_path = getattr(args, "tom_reporter_ab_path", None)
-    if tom_reporter_ab_path is not None and tom_sample_path is None:
-        raise ValueError("--tom_reporter_ab_path requires --tom_sample_path")
 
     game_id = os.path.basename(
         os.path.normpath(
@@ -1026,19 +1001,12 @@ def main_cli(args):
                 )
             )
         if tom_sample_path is not None:
-            reporter_ab_backend = (
-                _build_tom_reporter_ab_backend()
-                if tom_reporter_ab_path is not None
-                else None
-            )
             tom_collector = build_tom_collector(
                 env=env,
-                agent_list=agent_list,
+                reporter_backend=formal_reporter_backend,
                 output_path=tom_sample_path,
                 game_id=game_id,
                 seed=getattr(args, "random_seed", None),
-                reporter_ab_path=tom_reporter_ab_path,
-                reporter_ab_backend=reporter_ab_backend,
             )
         if shadow_options is not None:
             checkpoint_path, device, output_path = shadow_options
@@ -1109,13 +1077,6 @@ def build_arg_parser() -> (
         type=str,
         default=None,
         help="optional JSONL path for formal post-speech ToM samples",
-    )
-
-    parser.add_argument(
-        "--tom_reporter_ab_path",
-        type=str,
-        default=None,
-        help="optional JSONL path for same-observation Reporter A/B audit",
     )
 
     parser.add_argument(

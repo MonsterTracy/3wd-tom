@@ -11,7 +11,13 @@ from werewolf.models.tom.schema import PLAYER_NAMES, normalize_player
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     STATUS_SEMANTIC_ERROR,
-    private_belief_response_format,
+)
+
+
+FORMAL_REPORTER_BASE_URL = "https://api.deepseek.com"
+FORMAL_REPORTER_MODEL = "deepseek-v4-flash"
+FORMAL_REPORTER_JSON_INSTRUCTION = (
+    "Output the response in JSON format only.\n\n"
 )
 
 
@@ -28,23 +34,10 @@ def _log_payload(log: Any) -> dict[str, Any]:
 class BeliefReporter:
     """Make one stateless backend call from an observer's legal state."""
 
-    def __init__(self, dispatches: Sequence[Mapping[str, Any]]) -> None:
-        if isinstance(dispatches, (str, bytes)) or len(dispatches) != 7:
-            raise ValueError("dispatches must contain exactly seven entries")
-        checked = []
-        for dispatch in dispatches:
-            if not isinstance(dispatch, Mapping):
-                raise TypeError("each reporter dispatch must be a mapping")
-            if set(dispatch) != {"backend", "model_name"}:
-                raise ValueError("reporter dispatch requires backend and model_name")
-            backend = dispatch["backend"]
-            model_name = dispatch["model_name"]
-            if backend is None or not hasattr(backend, "chat"):
-                raise TypeError("reporter backend must provide chat()")
-            if not isinstance(model_name, str) or not model_name.strip():
-                raise ValueError("reporter model_name must be non-empty text")
-            checked.append(dict(dispatch))
-        self._dispatches = tuple(checked)
+    def __init__(self, backend) -> None:
+        if backend is None or not hasattr(backend, "chat"):
+            raise TypeError("reporter backend must provide chat()")
+        self._backend = backend
 
     @staticmethod
     def legal_state(
@@ -221,25 +214,16 @@ Return only: {{"suspected_werewolves":[...]}}"""
         observer = normalize_player(observer_id)
         try:
             prompt = self.build_prompt(observer, observation)
-            dispatch = self._dispatches[PLAYER_NAMES.index(observer)]
-            backend = dispatch["backend"]
-            raw = backend.chat(
-                messages=[{"role": "user", "content": prompt}],
-                model=dispatch["model_name"],
+            raw = self._backend.chat(
+                messages=[{
+                    "role": "user",
+                    "content": FORMAL_REPORTER_JSON_INSTRUCTION + prompt,
+                }],
+                model=FORMAL_REPORTER_MODEL,
                 temperature=0.0,
                 max_tokens=PRIVATE_BELIEF_MAX_TOKENS,
-                response_format=private_belief_response_format(
-                    supports_json_schema=getattr(
-                        backend,
-                        "supports_json_schema",
-                        False,
-                    )
-                ),
-                extra_body={
-                    "chat_template_kwargs": {
-                        "enable_thinking": False,
-                    }
-                },
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
             )
         except Exception:
             return self._result(observer, valid=False, error="reporter_error")
@@ -279,4 +263,9 @@ Return only: {{"suspected_werewolves":[...]}}"""
         }
 
 
-__all__ = ["BeliefReporter"]
+__all__ = [
+    "BeliefReporter",
+    "FORMAL_REPORTER_BASE_URL",
+    "FORMAL_REPORTER_JSON_INSTRUCTION",
+    "FORMAL_REPORTER_MODEL",
+]
