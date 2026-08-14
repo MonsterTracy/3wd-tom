@@ -117,6 +117,70 @@ def prompt_for(agent):
     return agent.backend.calls[0]["messages"][0]["content"]
 
 
+def legal_observation(observer_id, identity, extra_logs=()):
+    return {
+        "observer_id": observer_id,
+        "current_act_idx": 1,
+        "identity": identity,
+        "game_log": [
+            Log(
+                viewer=list(range(1, 8)), source=0, target=0,
+                content={"Werewolf": 2, "Seer": 1, "Villager": 4},
+                day=0, time="night", event="game_setting",
+            ),
+            *deepcopy(list(extra_logs)),
+        ],
+        "phase": "1_day_speech",
+        "authoritative_public_state": {"alive_players": list(range(1, 8))},
+    }
+
+
+def reporter_result(observation, response):
+    agent_list = agents({observation["observer_id"]: response})
+    dispatches = [
+        {"backend": agent.backend, "model_name": agent.model_name}
+        for agent in agent_list
+    ]
+    observer_id = observation["observer_id"]
+    result = BeliefReporter(dispatches).report(observer_id, observation)
+    return result, agent_list[observer_id - 1].backend
+
+
+@pytest.fixture
+def wolf_observation():
+    return legal_observation(
+        4,
+        "Werewolf",
+        [
+            Log(
+                viewer=[4, 6], source=0, target=[4, 6],
+                content={"wolf_team": [4, 6]}, day=0,
+                time="night", event="werewolf_team_info",
+            )
+        ],
+    )
+
+
+@pytest.fixture
+def seer_observation():
+    return legal_observation(
+        3,
+        "Seer",
+        [
+            Log(
+                viewer=[3], source=3, target=2,
+                content={"cheked_identity": "good"}, day=0,
+                time="night", event="skill_seer",
+            ),
+            Log(
+                viewer=[3], source=3, target=5,
+                content={"cheked_identity": "bad"}, day=1,
+                time="night", event="skill_seer",
+            ),
+        ],
+    )
+
+
 def test_reporter_prompt_freezes_subjective_hard_knowledge_contract():
     env = ready_env()
     observation = env.get_observation_for(1)
@@ -146,9 +210,197 @@ def test_reporter_prompt_freezes_subjective_hard_knowledge_contract():
     assert "不得使用 god view、真实角色表、其他玩家私人信息或未来信息" in prompt
 
 
+def test_reporter_prompt_contains_structured_hard_knowledge(wolf_observation):
+    prompt = BeliefReporter.build_prompt("player4", wolf_observation)
+    marker = "authoritative_observer_hard_knowledge: "
+    summary = json.loads(prompt.split(marker, 1)[1].splitlines()[0])
+
+    assert summary == {
+        "known_werewolves": ["player4", "player6"],
+        "known_non_werewolves": [
+            "player1", "player2", "player3", "player5", "player7",
+        ],
+        "unknown_players": [],
+    }
+    assert prompt.index(marker) < prompt.index("legal_post_speech_observation:")
+    assert "unknown_players 不会自动成为 suspected_werewolves" in prompt
+
+
+def test_wolf_hard_knowledge_uses_self_team_and_public_count(wolf_observation):
+    assert BeliefReporter.derive_hard_knowledge(4, wolf_observation) == {
+        "known_werewolves": ["player4", "player6"],
+        "known_non_werewolves": [
+            "player1", "player2", "player3", "player5", "player7",
+        ],
+        "unknown_players": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("response", "valid"),
+    [
+        ('{"suspected_werewolves":["player4","player6"]}', True),
+        ('{"suspected_werewolves":[]}', False),
+        (
+            '{"suspected_werewolves":["player2","player4","player6"]}',
+            False,
+        ),
+        ('{"suspected_werewolves":["player4"]}', False),
+    ],
+)
+def test_wolf_reports_enforce_hard_knowledge_without_retry(
+    wolf_observation, response, valid
+):
+    result, backend = reporter_result(wolf_observation, response)
+
+    assert result["valid"] is valid
+    assert result["error"] == (None if valid else "semantic_error")
+    assert result["suspected_werewolves"] == (
+        ["player4", "player6"] if valid else None
+    )
+    assert len(backend.calls) == 1
+
+
+def test_seer_hard_knowledge_and_semantics(seer_observation):
+    hard_knowledge = BeliefReporter.derive_hard_knowledge(3, seer_observation)
+    assert hard_knowledge == {
+        "known_werewolves": ["player5"],
+        "known_non_werewolves": ["player2", "player3"],
+        "unknown_players": ["player1", "player4", "player6", "player7"],
+    }
+
+    valid, _ = reporter_result(
+        seer_observation,
+        '{"suspected_werewolves":["player5"]}',
+    )
+    empty, _ = reporter_result(seer_observation, '{"suspected_werewolves":[]}')
+    includes_good, _ = reporter_result(
+        seer_observation,
+        '{"suspected_werewolves":["player2","player5"]}',
+    )
+    assert (valid["valid"], empty["valid"], includes_good["valid"]) == (
+        True, False, False,
+    )
+    assert empty["error"] == includes_good["error"] == "semantic_error"
+
+
+@pytest.mark.parametrize(
+    ("response", "valid"),
+    [
+        ('{"suspected_werewolves":[]}', True),
+        ('{"suspected_werewolves":["player3"]}', True),
+        ('{"suspected_werewolves":["player7"]}', False),
+    ],
+)
+def test_villager_self_is_known_nonwolf_but_unknowns_remain_subjective(
+    response, valid
+):
+    observation = legal_observation(7, "Villager")
+    assert BeliefReporter.derive_hard_knowledge(7, observation) == {
+        "known_werewolves": [],
+        "known_non_werewolves": ["player7"],
+        "unknown_players": [
+            "player1", "player2", "player3", "player4", "player5", "player6",
+        ],
+    }
+    result, _ = reporter_result(observation, response)
+    assert result["valid"] is valid
+
+
+def test_hard_knowledge_ignores_god_view_and_speech_claims():
+    observation = legal_observation(
+        7,
+        "Villager",
+        [
+            Log(
+                viewer=[7], source=0, target=0,
+                content={4: "Werewolf", 6: "Werewolf"}, day=0,
+                time="night", event="god_view",
+            ),
+            Log(
+                viewer=list(range(1, 8)), source=2, target=list(range(1, 8)),
+                content={
+                    "speech_content": "player4 and player6 are Werewolves",
+                    "parsed_claims": [["player2", "point_as_werewolf", "player4"]],
+                },
+                day=1, time="day", event="speech",
+            ),
+            Log(
+                viewer=list(range(1, 8)), source=0, target=4,
+                content={"expelled": 4}, day=1,
+                time="day", event="end_vote",
+            ),
+            Log(
+                viewer=list(range(1, 8)), source=0, target=[6],
+                content={"dead_list": [6]}, day=2,
+                time="night", event="end_night",
+            ),
+        ],
+    )
+
+    assert BeliefReporter.derive_hard_knowledge(7, observation) == {
+        "known_werewolves": [],
+        "known_non_werewolves": ["player7"],
+        "unknown_players": [
+            "player1", "player2", "player3", "player4", "player5", "player6",
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("observer_id", "identity", "event", "content"),
+    [
+        (4, "Witch", "kill_decision", {"kill_decision": 5}),
+        (4, "Witch", "skill_witch", {"poison": 5}),
+        (4, "Guard", "skill_guard", {"protected": 5}),
+    ],
+)
+def test_other_roles_do_not_infer_roles_from_skill_targets(
+    observer_id, identity, event, content
+):
+    observation = legal_observation(
+        observer_id,
+        identity,
+        [
+            Log(
+                viewer=[observer_id], source=observer_id, target=5,
+                content=content, day=1, time="night", event=event,
+            )
+        ],
+    )
+
+    assert BeliefReporter.derive_hard_knowledge(
+        observer_id,
+        observation,
+    ) == {
+        "known_werewolves": [],
+        "known_non_werewolves": [f"player{observer_id}"],
+        "unknown_players": [
+            player
+            for player in (f"player{value}" for value in range(1, 8))
+            if player != f"player{observer_id}"
+        ],
+    }
+
+
+def test_conflicting_hard_knowledge_raises_explicit_error(seer_observation):
+    seer_observation["game_log"].append(
+        Log(
+            viewer=[3], source=3, target=3,
+            content={"cheked_identity": "bad"}, day=2,
+            time="night", event="skill_seer",
+        )
+    )
+
+    with pytest.raises(ValueError, match="conflicting observer hard knowledge"):
+        BeliefReporter.derive_hard_knowledge(3, seer_observation)
+
+
 def test_reporter_request_uses_qwen_thinking_suppression():
     env = ready_env()
-    agent_list = agents()
+    agent_list = agents(
+        {1: '{"suspected_werewolves":["player1","player2"]}'}
+    )
     dispatches = [
         {"backend": agent.backend, "model_name": agent.model_name}
         for agent in agent_list
@@ -449,7 +701,7 @@ def test_runtime_hook_is_after_commit_and_before_next_gameplay_action():
 
 def test_saved_sample_has_cutoff_identity_and_no_hidden_dump(tmp_path):
     env = ready_env()
-    agent_list = agents({1: '{"suspected_werewolves":["player5","player2"]}'})
+    agent_list = agents({1: '{"suspected_werewolves":["player1","player2"]}'})
     collector = make_collector(tmp_path, env, agent_list)
     env.step(("speech", "CURRENT-SPEECH"))
     sample = collector.record(
@@ -464,7 +716,7 @@ def test_saved_sample_has_cutoff_identity_and_no_hidden_dump(tmp_path):
         sample["public_events"][-1]["event_idx"]
     )
     assert sample["observer_reports"][0]["suspected_werewolves"] == [
-        "player2", "player5"
+        "player1", "player2"
     ]
     serialized = json.dumps(sample)
     assert "true_roles" not in serialized
