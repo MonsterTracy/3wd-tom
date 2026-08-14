@@ -27,25 +27,26 @@ names.
 
 ```mermaid
 flowchart LR
-    PC["Legal private context"] --> PL["Private Planner"]
-    PS["Authoritative public state"] --> PL
-    PL --> PP["Validated PublicSpeechPlan"]
-    PP --> RP["Renderer prompt"]
-    RP --> R["Renderer"]
-    R --> FV["Final speech validator"]
-    FV --> SP["Committed public speech"]
-    SP --> P["SpeechPerceiver"]
-    P --> SA["Structured sp_actions"]
-    SP --> EV["public_speech event"]
+    O["Legal player observation"] --> G["Gameplay LLM<br/>one direct call"]
+    G --> S["Natural-language public speech"]
+    S --> P["SpeechPerceiver.parse_strict()"]
+    P --> SA["Validated Core-13 sp_actions"]
+    S --> EV["Commit public_speech<br/>raw_text + sp_actions"]
     SA --> EV
+    EV --> T["Post-speech ToM collection"]
 ```
 
-The strict speech path is orchestrated by `GPTAgent`. The plan schema and hard
-validation live with the LLM agent contract; prompt construction lives in
-`prompt_template_v0.py`. The Renderer receives the validated public plan and
-public phase context, not the Planner's private prompt. The online
-`SpeechPerceiver.parse()` remains tolerant so parser failure does not stop a
-game; strict parsing is reserved for offline audit tools.
+`GPTAgent` builds one minimal direct-speech prompt from the current player's
+legal observation and makes one Gameplay LLM call. There is no active Planner,
+`PublicSpeechPlan`, Renderer, `PLAN_RENDER` mode, `gameplay_prompt_profile`, or
+Planner/SpeechPerceiver alignment gate. The returned natural-language string is
+passed unchanged to online `SpeechPerceiver.parse_strict()`. Valid Core-13
+actions are committed, and a successful empty list is legal semantic NONE.
+Backend, protocol, schema, or subject failures remain explicit rather than
+being converted to `[]`; parsing and validation finish before `raw_text` and
+`sp_actions` are committed. Existing post-speech ToM collection then consumes
+the committed event. Core-13 remains the downstream representation, and raw
+natural-language speech does not directly enter the ToM backbone.
 
 ## Belief supervision flow
 

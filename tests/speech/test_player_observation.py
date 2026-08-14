@@ -2,9 +2,6 @@ from copy import deepcopy
 import unittest
 
 from werewolf.agents.llm_agent import LLMAgent
-from werewolf.agents.prompt_template_v0 import (
-    build_strict_classic7_speech_plan_prompt,
-)
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
 )
@@ -352,43 +349,15 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 5, 6, 7],
         )
 
-        prompt = LLMAgent(
-            gameplay_prompt_profile="strict_classic7"
-        ).format_observation(
-            observations[0],
-            suggestible_player_ids=(1, 5, 6, 7),
-        )
-        before_private, remainder = prompt.split(
-            "【你合法知道的私有信息】",
-            1,
-        )
-        authoritative = before_private.split(
-            "【权威公共状态】",
-            1,
-        )[1]
-        for label in (
-            "【当前阶段】",
-            "【昨夜公开结果】",
-            "【此前放逐】",
-            "【当前存活】",
-            "【当前可公开建议放逐】",
-        ):
-            self.assertEqual(prompt.count(label), 1)
-        self.assertIn("【昨夜公开结果】player4 昨夜死亡", authoritative)
-        self.assertIn("player3 已于第1天放逐", authoritative)
-        self.assertIn("【当前存活】player1, player2, player5, player6, player7", authoritative)
-        self.assertIn("【当前可公开建议放逐】player1, player5, player6, player7", authoritative)
-        self.assertNotIn("player1 已死亡", authoritative)
-        self.assertNotIn("player3 仍存活", authoritative)
+        prompt = LLMAgent().format_observation(observations[1])
+        self.assertIn("昨夜死亡：4号", prompt)
+        self.assertIn("3号（第1天）", prompt)
+        self.assertIn("当前存活玩家：1号、2号、5号、6号、7号", prompt)
         self.assertNotIn("player0", prompt)
-        self.assertNotIn("狼人", authoritative)
-        self.assertNotIn("查验", authoritative)
-        self.assertIn("【所有玩家此前的公开主张】", remainder)
         self.assertIn(
-            "player5：player1 已死亡，player3 仍存活，应该投 player4。",
-            remainder,
+            "player1 已死亡，player3 仍存活，应该投 player4。",
+            prompt,
         )
-        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
 
     def test_invalid_player_id_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -431,15 +400,6 @@ class PlayerObservationTest(unittest.TestCase):
                 seer_observation["game_log"]
             ),
         )
-        strict_rules = build_strict_classic7_speech_plan_prompt(
-            seer_observation,
-            suggestible_player_ids=tuple(
-                seer_observation["authoritative_public_state"][
-                    "suggestible_exile_targets"
-                ]
-            ),
-        )
-        self.assertIn("(尚无已完成查验)", strict_rules)
 
     def test_seer_candidates_exclude_self_and_keep_other_alive_players(self):
         self.env.phase = "skill_seer"
@@ -500,17 +460,6 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertIn("查验了4号的身份是好人", formatted)
         self.assertNotIn("player0", formatted)
         self.assertNotIn("0号", formatted)
-        self.assertIn(
-            "player4=好人",
-            build_strict_classic7_speech_plan_prompt(
-                seer_observation,
-                suggestible_player_ids=tuple(
-                    seer_observation["authoritative_public_state"][
-                        "suggestible_exile_targets"
-                    ]
-                ),
-            ),
-        )
 
 
 if __name__ == "__main__":

@@ -1,30 +1,11 @@
-import json
 import time
-import re
 from werewolf.agents.llm_agent import (
     GameplayActionValidationError,
     LLMAgent,
-    PublicSpeechPlanValidationError,
-    canonical_suggestible_player_ids,
-    discourse_public_speech_plan_response_format,
     night_action_response_format,
-    public_evidence_player_ids,
-    public_speech_plan_response_format,
     validate_gameplay_public_speech,
-    validate_discourse_public_speech_plan,
-    validate_public_speech_plan,
 )
 from werewolf.backends import BackendError
-from werewolf.agents.prompt_template_v0 import (
-    CON,
-    STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
-    _render_authoritative_public_phase,
-    build_strict_classic7_discourse_speech_render_prompt,
-    build_strict_classic7_speech_render_prompt,
-)
-from werewolf.models.twd_tom.public_events import normalize_public_events
-from werewolf.speech.speech_perceiver import PlannedPublicSpeech
 from . import agent_registry as AgentRegistry
 
 
@@ -34,9 +15,6 @@ _CONSTRAINED_NIGHT_PHASES = (
     "skill_guard",
     "skill_witch",
 )
-MAX_SPEECH_PLAN_ATTEMPTS = 2
-
-
 @AgentRegistry.register(["gpt", "gpt-4", "GPT-4", "gpt4", "o1", "gpt4o", "gpt4o-mini", 'deepseek'])
 class GPTAgent(LLMAgent):
     def __init__(self,
@@ -45,11 +23,9 @@ class GPTAgent(LLMAgent):
                  tokenizer=None,
                  temperature=1.0,
                  log_file=None,
-                 gameplay_prompt_profile="legacy",
                  gameplay_max_tokens=None):
         super().__init__(backend=backend, model_name=model_name, tokenizer=tokenizer,
                          temperature=temperature, log_file=log_file,
-                         gameplay_prompt_profile=gameplay_prompt_profile,
                          gameplay_max_tokens=gameplay_max_tokens)
         self.rate_limit = 6
         self.temperature = temperature
@@ -60,28 +36,6 @@ class GPTAgent(LLMAgent):
             night_phase in phase
             for night_phase in _CONSTRAINED_NIGHT_PHASES
         )
-        is_strict_speech = (
-            'speech' in phase
-            and self.gameplay_prompt_profile in {
-                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-                STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
-            }
-        )
-        suggestible_player_ids = None
-        if is_strict_speech:
-            suggestible_player_ids = canonical_suggestible_player_ids(
-                observation.get("authoritative_public_state")
-            )
-        if (
-            is_strict_speech
-            and self.gameplay_prompt_profile
-            == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-        ):
-            public_events = normalize_public_events(
-                observation.get("canonical_public_events")
-            )
-            observation = dict(observation)
-            observation["canonical_public_events"] = public_events
         night_candidate_snapshot = None
         if is_constrained_night_action:
             night_candidate_snapshot = (
@@ -91,7 +45,6 @@ class GPTAgent(LLMAgent):
             )
         prompt = self.format_observation(
             observation,
-            suggestible_player_ids=suggestible_player_ids,
             action_candidates=night_candidate_snapshot,
         )
         valid_action = list(self.nlp_action_to_env_action.keys())  
@@ -102,43 +55,29 @@ class GPTAgent(LLMAgent):
         if request_max_tokens is None and is_o1:
             request_max_tokens = 32000
         if 'speech' in phase:
-            if is_strict_speech:
-                raw_action, checked_action, prompt = (
-                    self._generate_strict_public_speech(
-                        observation=observation,
-                        planner_prompt=prompt,
-                        suggestible_player_ids=suggestible_player_ids,
-                        temperature=request_temperature,
-                        max_tokens=request_max_tokens,
-                    )
-                )
-            else:
-                messages = [{'role': 'user', 'content': prompt}]
-                raw_action, metadata = self._chat_with_metadata(
-                    messages,
-                    temperature=request_temperature,
-                    max_tokens=request_max_tokens,
-                )
-                validate_gameplay_public_speech(
-                    raw_action,
-                    finish_reason=metadata["finish_reason"],
-                    player_id=observation.get("current_act_idx"),
-                    phase=phase,
-                )
-                raw_action = raw_action.strip()
-                checked_action = self.extract_answer(raw_action)
-            gen_times = 0
+            messages = [{'role': 'user', 'content': prompt}]
+            raw_action, metadata = self._chat_with_metadata(
+                messages,
+                player_log_context={
+                    "stage": "public_speech",
+                    "observation": observation,
+                },
+                temperature=request_temperature,
+                max_tokens=request_max_tokens,
+                extra_body={
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    }
+                },
+            )
+            validate_gameplay_public_speech(
+                raw_action,
+                finish_reason=metadata["finish_reason"],
+                player_id=observation.get("current_act_idx"),
+                phase=phase,
+            )
+            checked_action = raw_action
             env_action = ('speech', checked_action)
-
-            if self.has_log and not is_strict_speech:
-                self.logger.info(phase,
-                                 extra={"prompt": prompt,
-                                        "response": checked_action,
-                                        "action": raw_action,
-                                        "player_id": observation['current_act_idx'],
-                                        "role": observation['identity'],
-                                        "phase": phase,
-                                        "gen_times": gen_times})
         else: 
             retry_count = 0
             raw_action = None
@@ -244,210 +183,3 @@ class GPTAgent(LLMAgent):
                                         "phase": phase,
                                         "gen_times": retry_count - 1})
         return env_action
-
-    def _generate_strict_public_speech(
-        self,
-        *,
-        observation,
-        planner_prompt,
-        suggestible_player_ids,
-        temperature,
-        max_tokens,
-    ):
-        player_id = observation.get("current_act_idx")
-        speaker_role = observation.get("identity")
-        phase = observation.get("phase")
-        game_context = getattr(
-            getattr(self.backend, "session", None),
-            "game_id",
-            None,
-        )
-        planner_messages = [{"role": "user", "content": planner_prompt}]
-        planner_response_format = (
-            discourse_public_speech_plan_response_format(
-                supports_json_schema=getattr(
-                    self.backend,
-                    "supports_json_schema",
-                    False,
-                ),
-                suggestible_player_ids=suggestible_player_ids,
-                speaker_id=player_id,
-                speaker_role=speaker_role,
-                public_event_indices=tuple(
-                    event["event_idx"]
-                    for event in observation["canonical_public_events"]
-                ),
-            )
-            if self.gameplay_prompt_profile
-            == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-            else public_speech_plan_response_format(
-                supports_json_schema=getattr(
-                    self.backend,
-                    "supports_json_schema",
-                    False,
-                ),
-                suggestible_player_ids=suggestible_player_ids,
-                speaker_id=player_id,
-                speaker_role=speaker_role,
-            )
-        )
-        context = (
-            f"game={game_context or 'unavailable'}, "
-            f"player={player_id}, phase={phase}"
-        )
-        event_by_index = None
-        for attempt_index in range(MAX_SPEECH_PLAN_ATTEMPTS):
-            try:
-                plan_content, plan_metadata = self._chat_with_metadata(
-                    planner_messages,
-                    player_log_context={
-                        "stage": "speech_plan",
-                        "observation": observation,
-                        "gen_times": attempt_index,
-                    },
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format=planner_response_format,
-                )
-                if plan_metadata["finish_reason"] == "length":
-                    raise PublicSpeechPlanValidationError(
-                        f"planner response was truncated ({context})"
-                    )
-                try:
-                    plan_payload = json.loads(plan_content)
-                except (TypeError, json.JSONDecodeError) as exc:
-                    raise PublicSpeechPlanValidationError(
-                        f"planner response is not valid JSON ({context})"
-                    ) from exc
-                if self.gameplay_prompt_profile == (
-                    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-                ):
-                    public_events = normalize_public_events(
-                        observation["canonical_public_events"]
-                    )
-                    event_by_index = {
-                        event["event_idx"]: event for event in public_events
-                    }
-                    plan = validate_discourse_public_speech_plan(
-                        plan_payload,
-                        suggestible_player_ids=suggestible_player_ids,
-                        player_id=player_id,
-                        speaker_role=speaker_role,
-                        phase=phase,
-                        public_event_indices=tuple(event_by_index),
-                        game_context=game_context,
-                    )
-                else:
-                    plan = validate_public_speech_plan(
-                        plan_payload,
-                        suggestible_player_ids=suggestible_player_ids,
-                        player_id=player_id,
-                        speaker_role=speaker_role,
-                        phase=phase,
-                        game_context=game_context,
-                    )
-            except PublicSpeechPlanValidationError as exc:
-                if attempt_index + 1 == MAX_SPEECH_PLAN_ATTEMPTS:
-                    raise PublicSpeechPlanValidationError(
-                        "speech planner exhausted "
-                        f"{MAX_SPEECH_PLAN_ATTEMPTS} attempts; "
-                        f"last validation error: {exc}"
-                    ) from exc
-                continue
-            break
-
-        if self.gameplay_prompt_profile == (
-            STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-        ):
-            selected_public_evidence = [
-                event_by_index[index]
-                for index in plan.public_evidence_refs
-            ]
-            evidence_player_ids = public_evidence_player_ids(
-                selected_public_evidence
-            )
-            renderer_prompt = build_strict_classic7_discourse_speech_render_prompt(
-                phase_text=_render_authoritative_public_phase(
-                    observation["authoritative_public_state"]
-                ),
-                actor=player_id,
-                public_actions=plan.actions_as_list(),
-                selected_public_evidence=selected_public_evidence,
-            )
-            if self.has_log:
-                self.logger.info(
-                    "speech_discourse_plan_validated",
-                    extra={
-                        "game_id": game_context,
-                        "player_id": player_id,
-                        "phase": phase,
-                        "public_actions": plan.actions_as_list(),
-                        "public_evidence_refs": list(
-                            plan.public_evidence_refs
-                        ),
-                        "selected_public_evidence": (
-                            selected_public_evidence
-                        ),
-                    },
-                )
-        else:
-            renderer_prompt = build_strict_classic7_speech_render_prompt(
-                phase_text=_render_authoritative_public_phase(
-                    observation["authoritative_public_state"]
-                ),
-                actor=player_id,
-                public_actions=plan.as_list(),
-            )
-        rendered_content, render_metadata = self._chat_with_metadata(
-            [{"role": "user", "content": renderer_prompt}],
-            player_log_context={
-                "stage": "speech_render",
-                "observation": observation,
-            },
-            temperature=0.0,
-            max_tokens=max_tokens,
-            extra_body={
-                "chat_template_kwargs": {
-                    "enable_thinking": False,
-                }
-            },
-        )
-        if self.gameplay_prompt_profile == (
-            STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-        ):
-            validate_gameplay_public_speech(
-                rendered_content,
-                finish_reason=render_metadata["finish_reason"],
-                player_id=player_id,
-                phase=phase,
-                planned_player_ids=plan.targets,
-                additional_allowed_player_ids=evidence_player_ids,
-            )
-        else:
-            validate_gameplay_public_speech(
-                rendered_content,
-                finish_reason=render_metadata["finish_reason"],
-                player_id=player_id,
-                phase=phase,
-                planned_player_ids=plan.targets,
-            )
-        final_speech = rendered_content.strip()
-        accepted_public_actions = (
-            plan.public_plan.public_actions
-            if self.gameplay_prompt_profile == (
-                STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-            )
-            else plan.public_actions
-        )
-        return (
-            final_speech,
-            PlannedPublicSpeech(final_speech, accepted_public_actions),
-            renderer_prompt,
-        )
-
-    def extract_answer(self, response):
-        pattern = r'\n\n\"(.*?)\"'
-        matches = re.findall(pattern, response, re.DOTALL)
-        if matches:
-            response = matches[0]
-        return response

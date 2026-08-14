@@ -1,8 +1,3 @@
-import json
-
-from werewolf.models.twd_tom.schema import ACTION_NAMES
-
-
 class Const(object):
     class ConstError(TypeError):
         pass
@@ -17,600 +12,92 @@ class Const(object):
 
 CON = Const()
 
-LEGACY_GAMEPLAY_PROMPT_PROFILE = "legacy"
-STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
-    "strict_classic7"
-)
-STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE = (
-    "strict_classic7_discourse_v1"
-)
+def _format_player_ids(player_ids):
+    if not isinstance(player_ids, list) or any(
+        type(player_id) is not int or not 1 <= player_id <= 7
+        for player_id in player_ids
+    ):
+        raise TypeError("public player list must contain player IDs in [1, 7]")
+    return "、".join(f"{player_id}号" for player_id in player_ids) or "无"
 
 
-def _render_authoritative_public_phase(public_state):
-    """Render the player-free phase view from authoritative public state."""
+def build_direct_public_speech_prompt(observation, *, legal_history):
+    """Build the sole direct-speech prompt from one legal observation."""
 
-    required_fields = {"day", "day_or_night", "phase"}
-    if not isinstance(public_state, dict) or not required_fields <= public_state.keys():
-        raise TypeError("incomplete authoritative public phase")
-    phase_names = {
-        "speech": "公开发言",
-        "speech_pk": "平票公开发言",
-        "vote": "投票",
-        "vote_pk": "平票投票",
-        "skill_wolf": "狼人行动",
-        "skill_seer": "预言家行动",
-        "skill_witch": "女巫行动",
-        "skill_guard": "守卫行动",
-        "end_game": "游戏结束",
-    }
-    return "第{day}天{period}{phase}".format(
-        day=public_state["day"],
-        period="白天" if public_state["day_or_night"] == "day" else "夜晚",
-        phase=phase_names.get(public_state["phase"], str(public_state["phase"])),
-    )
-
-
-def _render_authoritative_public_state(
-    public_state,
-    *,
-    suggestible_player_ids=None,
-):
-    """Render the sole canonical public-state block for strict speech."""
-
-    required_fields = {
+    if not isinstance(observation, dict):
+        raise TypeError("speech observation must be a mapping")
+    player_id = observation.get("current_act_idx")
+    identity = observation.get("identity")
+    phase = observation.get("phase")
+    public_state = observation.get("authoritative_public_state")
+    if type(player_id) is not int or not 1 <= player_id <= 7:
+        raise ValueError("current speech player must be in [1, 7]")
+    if identity not in CON.identity_chinese:
+        raise ValueError("unsupported speech identity")
+    if not isinstance(phase, str) or "speech" not in phase:
+        raise ValueError("direct speech prompt requires a speech phase")
+    required_state = {
         "day",
         "day_or_night",
         "phase",
         "last_night_result",
         "prior_exiles",
         "alive_players",
-        "suggestible_exile_targets",
     }
-    if not isinstance(public_state, dict) or not required_fields <= public_state.keys():
+    if not isinstance(public_state, dict) or not required_state <= public_state.keys():
         raise TypeError("incomplete authoritative public state")
-    last_night_result = public_state["last_night_result"]
-    prior_exiles = public_state["prior_exiles"]
-    alive_players = public_state["alive_players"]
-    suggestible_targets = (
-        public_state["suggestible_exile_targets"]
-        if suggestible_player_ids is None
-        else suggestible_player_ids
-    )
-    if (
-        (
-            last_night_result is not None
-            and (
-                not isinstance(last_night_result, dict)
-                or not isinstance(last_night_result.get("dead_players"), list)
-            )
-        )
-        or not isinstance(prior_exiles, list)
-        or not isinstance(alive_players, list)
-        or not isinstance(suggestible_targets, (list, tuple))
-    ):
-        raise TypeError("invalid authoritative public state")
+    if not isinstance(legal_history, str):
+        raise TypeError("legal_history must be text")
 
+    last_night_result = public_state["last_night_result"]
     if last_night_result is None:
         last_night_text = "尚无已公开的昨夜结果"
-    else:
+    elif (
+        isinstance(last_night_result, dict)
+        and isinstance(last_night_result.get("dead_players"), list)
+    ):
         dead_players = last_night_result["dead_players"]
         last_night_text = (
-            ", ".join(f"player{player_id}" for player_id in dead_players)
-            + " 昨夜死亡"
+            f"昨夜死亡：{_format_player_ids(dead_players)}"
             if dead_players
             else "昨夜无人死亡"
         )
-    exiles_text = "\n".join(
-        f"- player{item['player_id']} 已于第{item['day']}天放逐"
+    else:
+        raise TypeError("invalid last_night_result")
+
+    prior_exiles = public_state["prior_exiles"]
+    if not isinstance(prior_exiles, list) or any(
+        not isinstance(item, dict)
+        or type(item.get("player_id")) is not int
+        or type(item.get("day")) is not int
         for item in prior_exiles
-    ) or "- 此前无人被放逐"
-    phase_text = _render_authoritative_public_phase(public_state)
-    alive_text = ", ".join(f"player{player_id}" for player_id in alive_players) or "(无)"
-    targets_text = ", ".join(
-        f"player{player_id}" for player_id in suggestible_targets
-    ) or "(无)"
-    return f"""【权威公共状态】
-【当前阶段】{phase_text}
-【昨夜公开结果】{last_night_text}
-【此前放逐】
-{exiles_text}
-【当前存活】{alive_text}
-【当前可公开建议放逐】{targets_text}"""
-
-
-def build_strict_classic7_speech_plan_prompt(
-    observation,
-    *,
-    suggestible_player_ids,
-):
-    """Build the private planner prompt from one legally filtered view."""
-
-    if not isinstance(suggestible_player_ids, tuple):
-        raise TypeError("suggestible_player_ids must be a tuple")
-    if not isinstance(
-        observation,
-        dict,
     ):
-        raise TypeError(
-            "strict speech observation "
-            "must be a dictionary"
-        )
-    actor = observation.get(
-        "current_act_idx"
-    )
-    if (
-        isinstance(actor, bool)
-        or not isinstance(actor, int)
-        or not 1 <= actor <= 7
-    ):
-        raise ValueError(
-            "strict speech requires "
-            "current_act_idx in [1, 7]"
-        )
-    identity = observation.get(
-        "identity"
-    )
-    if identity not in {
-        "Werewolf",
-        "Villager",
-        "Seer",
-        "Witch",
-        "Guard",
-    }:
-        raise ValueError(
-            "strict speech requires "
-            "a supported classic7 identity"
-        )
-    game_log = observation.get(
-        "game_log"
-    )
-    if not isinstance(
-        game_log,
-        list,
-    ):
-        raise TypeError(
-            "strict speech requires "
-            "a game_log list"
-        )
-    public_state = observation.get(
-        "authoritative_public_state"
-    )
-    if not isinstance(public_state, dict):
-        raise TypeError(
-            "strict speech requires authoritative_public_state"
-        )
-    authoritative_state_text = _render_authoritative_public_state(
-        public_state,
-        suggestible_player_ids=suggestible_player_ids,
-    )
+        raise TypeError("invalid prior_exiles")
+    exiles_text = "、".join(
+        f"{item['player_id']}号（第{item['day']}天）"
+        for item in prior_exiles
+    ) or "无"
+    alive_text = _format_player_ids(public_state["alive_players"])
+    period = "白天" if public_state["day_or_night"] == "day" else "夜晚"
+    phase_text = "平票公开发言" if "speech_pk" in phase else "公开发言"
+    history_text = legal_history.strip() or "暂无"
 
-    if identity == "Werewolf":
-        wolf_team = []
-        night_decisions = []
-        for log in game_log:
-            if getattr(log, "event", None) == "werewolf_team_info":
-                wolf_team.extend(
-                    getattr(log, "content", {}).get("wolf_team", [])
-                )
-            elif getattr(log, "event", None) == "kill_decision":
-                target = getattr(log, "target", None)
-                if isinstance(target, int) and 1 <= target <= 7:
-                    night_decisions.append(target)
-        team_text = ", ".join(
-            f"player{player_id}" for player_id in sorted(set(wolf_team))
-        ) or "(无合法可见狼队信息)"
-        decision_text = ", ".join(
-            f"player{player_id}" for player_id in night_decisions
-        ) or "(尚无已完成狼刀决策)"
-        role_rules = f"""你的真实私有身份是狼人。
-- 真实狼队信息（仅用于内部策略）：{team_text}。
-- 已完成的真实夜间刀人决策（仅用于内部策略）：{decision_text}。
-- 绝不能公开说自己是狼人，也不能直接公开狼人队友身份。
-- 绝不能直接公开狼队夜间讨论、狼刀真实决策或夜间技能信息。
-- 不得使用“因为系统告诉我”“我的真实队友是”等内部状态泄露式表达。
-- 可以按策略假跳其他身份、隐藏信息或作出虚假公开声明，但不要逐字复制系统内部描述。"""
-    elif identity == "Villager":
-        role_rules = """你的真实私有身份是普通村民。
-- 你没有查验、解药、毒药或守护能力。
-- 这是内部真实状态；公开发言时可以按策略假跳身份或作出虚假技能声明。"""
-    elif identity == "Seer":
-        checks = []
-        for log in game_log:
-            if getattr(
-                log,
-                "event",
-                None,
-            ) != "skill_seer":
-                continue
-            result = getattr(
-                log,
-                "content",
-                {},
-            ).get(
-                "cheked_identity"
-            )
-            target = getattr(
-                log,
-                "target",
-                None,
-            )
-            if (
-                result in {
-                    "good",
-                    "bad",
-                }
-                and isinstance(
-                    target,
-                    int,
-                )
-                and 1 <= target <= 7
-            ):
-                checks.append(
-                    "player"
-                    f"{target}="
-                    + (
-                        "狼人"
-                        if result == "bad"
-                        else "好人"
-                    )
-                )
-        check_text = (
-            ", ".join(checks)
-            if checks
-            else "(尚无已完成查验)"
-        )
-        role_rules = f"""你的真实私有身份是预言家。
-- 已真实发生的查验结果：{check_text}
-- 这些是内部真实状态；公开时可以披露、隐藏、歪曲或虚构身份和技能声明。
-- 你没有真实的解药、毒药或守护能力，也不知道狼人队友。"""
-    elif identity == "Witch":
-        heal_used = False
-        poison_used = False
-        night_kill_targets = []
-        for log in game_log:
-            event = getattr(
-                log,
-                "event",
-                None,
-            )
-            content = getattr(
-                log,
-                "content",
-                {},
-            )
-            target = getattr(
-                log,
-                "target",
-                None,
-            )
-            if event == "skill_witch":
-                heal_used = (
-                    heal_used
-                    or "heal" in content
-                )
-                poison_used = (
-                    poison_used
-                    or "poison" in content
-                )
-            elif (
-                event == "kill_decision"
-                and isinstance(
-                    target,
-                    int,
-                )
-                and 1 <= target <= 7
-            ):
-                night_kill_targets.append(
-                    f"player{target}"
-                )
-        kill_text = (
-            ", ".join(
-                night_kill_targets
-            )
-            if night_kill_targets
-            else "(无当前合法可见目标)"
-        )
-        role_rules = f"""你的合法私有身份是女巫。
-- 解药真实状态：{"已使用" if heal_used else "未使用"}。
-- 毒药真实状态：{"已使用" if poison_used else "未使用"}。
-- 合法可见的历史夜间击杀目标：{kill_text}。
-- 这些是内部真实状态；公开时可以披露、隐藏、歪曲或虚构身份和技能声明。
-- 女巫没有真实的查验或守护能力，也不知道狼人队友。"""
-    else:
-        guarded = [
-            getattr(
-                log,
-                "target",
-                None,
-            )
-            for log in game_log
-            if getattr(
-                log,
-                "event",
-                None,
-            )
-            == "skill_guard"
-        ]
-        guarded_text = ", ".join(
-            f"player{target}"
-            for target in guarded
-            if isinstance(target, int)
-            and 1 <= target <= 7
-        ) or "(尚无已完成守护)"
-        role_rules = f"""你的真实私有身份是守卫。
-- 已真实发生的守护目标：{guarded_text}
-- 这些是内部真实状态；公开时可以披露、隐藏、歪曲或虚构身份和技能声明。
-- 你没有真实的查验、解药或毒药，也不知道狼人队友。"""
+    return f"""{CON.game_description}
 
-    public_claims = []
-    for log in game_log:
-        if getattr(log, "event", None) not in {"speech", "speech_pk"}:
-            continue
-        source = getattr(log, "source", None)
-        if not isinstance(source, int) or not 1 <= source <= 7:
-            continue
-        speech = getattr(log, "content", {}).get("speech_content")
-        if isinstance(speech, str) and speech.strip():
-            public_claims.append(f"- player{source}：{speech}")
-    claims_text = "\n".join(public_claims) or "- (尚无玩家公开主张)"
+你是{player_id}号玩家，你的身份是{CON.identity_chinese[identity]}。
 
-    action_names = ", ".join(ACTION_NAMES)
-    return f"""你是 strict gameplay 的 Private Planner。
-当前 speaker：player{actor}
+当前状态：第{public_state['day']}天{period}，{phase_text}。
+当前存活玩家：{alive_text}。
+昨夜公开结果：{last_night_text}。
+此前被放逐玩家：{exiles_text}。
 
-{authoritative_state_text}
+你按时间顺序合法看到的游戏记录：
+{history_text}
 
-【你合法知道的私有信息】
-私有信息只用于制定策略。不要逐字复制系统描述、字段名、内部状态或控制元数据。
-你可以按策略撒谎、假跳、隐藏信息或虚构公开身份与技能声明。
-
-{role_rules}
-
-【所有玩家此前的公开主张】
-这些只是玩家发言，可能是真话、谎言、误解或策略性表达；若与权威公共状态冲突，以权威公共状态为准。
-{claims_text}
-
-【计划合同】
-- 只规划当前玩家准备公开声称或表达什么；计划不是事实标签。
-- 可以假跳、撒谎、隐藏或歪曲，但不要输出最终自然语言发言或解释。
-- 只能使用这些正式 action：{action_names}。
-- 只输出 public_actions；禁止 reasoning、strategy、notes、summary 或其他自由文本字段。
-- vote_intent 只能指向“当前可公开建议放逐”中的玩家，可以不输出 vote_intent。
-- 不要把历史旧投票目标直接复制成当前目标；已死亡或放逐玩家不得成为 vote_intent。
-- 其他历史技能声明可以指向过去玩家，因为它们只是准备公开表达的声称。
-- check_as_good / check_as_werewolf 表示 speaker 公开声称查验来源，形成预言家 persona；save / poison 表示公开声称女巫技能来源，形成女巫 persona；guard 表示公开声称守卫技能来源，形成守卫 persona。
-- 这些技能声明不是普通支持、反对或身份判断 action；不得为了增加动作多样性而随意使用。
-- 真实身份不对应时仍可把技能声明用于有策略意义的公开身份 bluff；不要按真实身份过滤 public claim，但同一计划必须维持连贯的公开 persona。
-- 技能声明本身已经隐含对应 public persona，不要求同时冗余输出 point_as_seer(self)、point_as_witch(self) 或 point_as_guard(self)。
-- 同一计划不得同时采用多个互斥 skill persona；查验、救人/毒人、守护这三类技能来源不得跨类并存。
-- 同一个 target 不得同时被 point_as_* 明确判断为两个不同角色。
-- 若明确用 point_as_* 自报角色，同一计划中的技能声明必须符合该公开身份：预言家只能查验，女巫只能救人或毒人，守卫只能守护，村民或狼人不得声称技能；没有明确自报角色时仍可用技能声明进行 bluff。
-- 只保留少量关键 action，避免复述完整历史；空 public_actions 合法。
-- 只输出符合请求 JSON Schema 的对象。"""
-
-
-def build_strict_classic7_discourse_speech_plan_prompt(
-    observation,
-    *,
-    suggestible_player_ids,
-    public_events,
-):
-    """Add canonical public evidence selection to the strict private planner."""
-
-    base_prompt = build_strict_classic7_speech_plan_prompt(
-        observation,
-        suggestible_player_ids=suggestible_player_ids,
-    )
-    contract_marker = "【计划合同】"
-    if base_prompt.count(contract_marker) != 1:
-        raise ValueError(
-            "strict speech plan prompt must contain contract marker exactly once"
-        )
-    baseline_output_clause = (
-        "- 只输出 public_actions；禁止 reasoning、strategy、notes、summary "
-        "或其他自由文本字段。"
-    )
-    if base_prompt.count(baseline_output_clause) != 1:
-        raise ValueError(
-            "strict speech plan output clause must appear exactly once"
-        )
-    discourse_output_clause = (
-        "- 只输出 public_actions 和 public_evidence_refs；禁止 reason、"
-        "rationale、analysis、thought、notes、summary、evidence_text、"
-        "strategy 或其他自由文本字段。"
-    )
-    public_history = _render_discourse_public_evidence(public_events)
-    prompt = base_prompt.replace(
-        baseline_output_clause,
-        discourse_output_clause,
-        1,
-    )
-    evidence_section = f"""【可引用的因果公开事件】
-下列 event_idx 是唯一允许引用的公开历史。observable_public_fact 是已发生的公开事实；public_claim 只是玩家公开声称，不是权威真值。只选择与本轮表达相关的事件；不要撰写证据摘要。
-{public_history}
-
+现在轮到{player_id}号玩家公开发言。
+只输出本轮要公开说出的自然语言发言。不要输出分析、推理、策略、计划、JSON、标签或控制字段。
 """
-    return prompt.replace(
-        contract_marker,
-        evidence_section + contract_marker,
-        1,
-    )
 
-
-def _render_discourse_public_evidence(public_events):
-    """Label public events as observable facts or non-authoritative claims."""
-
-    represented = []
-    for event in public_events:
-        if event.get("event_type") == "public_speech":
-            represented.append(
-                {
-                    "epistemic_type": "public_claim",
-                    "claimant": event.get("speaker"),
-                    "truth_status": "not_authoritative_truth",
-                    "event": event,
-                }
-            )
-        elif event.get("token_type") == "speech_action":
-            represented.append(
-                {
-                    "epistemic_type": "public_claim",
-                    "claimant": event.get("subject"),
-                    "truth_status": "not_authoritative_truth",
-                    "event": event,
-                }
-            )
-        else:
-            represented.append(
-                {
-                    "epistemic_type": "observable_public_fact",
-                    "event": event,
-                }
-            )
-    return json.dumps(
-        represented,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-_PUBLIC_ACTION_REALIZATION_TEMPLATES = {
-    "point_as_werewolf": "必须明确公开判断 player{target} 是狼人。",
-    "point_as_villager": "必须明确公开判断 player{target} 是村民；这是角色判断，不得表述为查验得出村民身份。",
-    "point_as_seer": "必须明确公开判断 player{target} 是预言家；这是角色判断，不得表述为查验得出预言家身份。",
-    "point_as_witch": "必须明确公开判断 player{target} 是女巫；这是角色判断，不得表述为查验得出女巫身份。",
-    "point_as_guard": "必须明确公开判断 player{target} 是守卫；这是角色判断，不得表述为查验得出守卫身份。",
-    "support": "必须明确表达支持、认可或赞同 player{target}；不得因此自动产生任何角色判断。",
-    "oppose": "必须明确表达质疑、反对、不认可 player{target} 或认为其发言可疑；不得因此自动产生狼人判断或投票意图。",
-    "check_as_good": "必须明确公开声称查验 player{target} 的结果仅为好人；不得说查验得出其具体身份是村民、预言家、女巫或守卫，也不得额外产生任何 point_as_* 判断。",
-    "check_as_werewolf": "必须明确公开声称查验 player{target} 的结果为狼人；不得额外产生 point_as_werewolf(player{target})。",
-    "save": "必须明确公开声称救了 player{target}。",
-    "poison": "必须明确公开声称毒了 player{target}。",
-    "guard": "必须明确公开声称守护了 player{target}。",
-    "vote_intent": "必须明确表达当前准备投票给或放逐 player{target}。",
-}
-
-
-def render_public_action_obligation(action, target, *, speaker_id):
-    """Render one validated public action as an atomic speech obligation."""
-
-    obligation = _PUBLIC_ACTION_REALIZATION_TEMPLATES[action].format(
-        target=target
-    )
-    if target != speaker_id:
-        return obligation
-    if action.startswith("point_as_"):
-        role = {
-            "point_as_werewolf": "狼人",
-            "point_as_villager": "村民",
-            "point_as_seer": "预言家",
-            "point_as_witch": "女巫",
-            "point_as_guard": "守卫",
-        }[action]
-        return (
-            f"必须明确公开声称自己（player{target}/{target}号）是{role}；"
-            f"最终文本必须明确出现 player{target} 或 {target}号，"
-            f"可以自然表达为“我是{target}号{role}”。"
-        )
-    return (
-        obligation
-        + f" 这是对当前发言者自己的命题，可以使用第一人称，"
-        f"但最终文本必须明确出现 player{target} 或 {target}号。"
-    )
-
-
-def build_strict_classic7_speech_render_prompt(
-    *,
-    phase_text,
-    actor,
-    public_actions,
-):
-    """Build a public renderer prompt with no private or raw-history input."""
-
-    if isinstance(actor, bool) or not isinstance(actor, int) or not 1 <= actor <= 7:
-        raise ValueError("strict speech renderer requires actor in [1, 7]")
-    if not isinstance(phase_text, str) or not phase_text.strip():
-        raise TypeError("strict speech renderer requires phase text")
-    if not isinstance(public_actions, list):
-        raise TypeError("strict speech renderer requires validated public_actions")
-    if public_actions:
-        explicit_targets = "、".join(
-            dict.fromkeys(
-                f"player{item['target']}/{item['target']}号"
-                for item in public_actions
-            )
-        )
-        obligations = "\n".join(
-            f"{index}. {item['action']}(player{item['target']})\n"
-            f"   {render_public_action_obligation(item['action'], item['target'], speaker_id=actor)}"
-            for index, item in enumerate(public_actions, start=1)
-        )
-        plan_text = f"""下面共有 {len(public_actions)} 项。
-每一项都是独立且必须表达的原子命题。不得省略任何一项。
-不得把某一项的 predicate 转移给另一项的 target。
-最终正文必须逐个、独立、显式写出每个 target 的 playerN 或 N号，使每个 target 都能被单独识别；target 是当前发言者自己时也不例外。
-即使同一 predicate 涉及 3 个或更多 target，也必须逐个列出。本计划必须逐个显式出现：{explicit_targets}。
-禁止用连续编号范围或集合/聚合指代替代任何 target，例如“N号至M号”“N-M号”“所有玩家”“全部玩家”“大家”“其他所有人”。
-可以将多项自然合并为 2–4 句，但所有原子语义必须保留，且不能在合并时省略任何 target identity。
-{obligations}"""
-    else:
-        plan_text = (
-            "当前没有需要公开表达的特定玩家判断或行动计划。"
-            "生成简短、非目标化的观望发言，不点名其他玩家。"
-        )
-    return f"""【当前发言者】player{actor}
-【当前阶段】{phase_text}
-【必须逐项表达的公开计划】
-{plan_text}
-【输出合同】
-- 只输出 2–4 句中文公开发言正文，建议不超过 200 个汉字。
-- 只将上面的公开表达义务表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
-- 不得新增计划外玩家、角色判断、技能结果或投票目标。
-- 不输出 JSON、Markdown、标题或分析。"""
-
-
-def build_strict_classic7_discourse_speech_render_prompt(
-    *,
-    phase_text,
-    actor,
-    public_actions,
-    selected_public_evidence,
-):
-    """Render validated actions with only explicitly selected public evidence."""
-
-    baseline = build_strict_classic7_speech_render_prompt(
-        phase_text=phase_text,
-        actor=actor,
-        public_actions=public_actions,
-    )
-    baseline_player_rules = """- 只将上面的公开表达义务表述成自然语言，不补充计划之外的游戏事实、玩家或判断。
-- 不得新增计划外玩家、角色判断、技能结果或投票目标。"""
-    if baseline.count(baseline_player_rules) != 1:
-        raise ValueError(
-            "strict speech renderer player rules must appear exactly once"
-        )
-    discourse_player_rules = """- 只将 public_actions 中的原子游戏语义表述成自然语言，不补充计划之外的角色判断、技能结果或投票目标。
-- 可以为引用或比较下方已选择的公开证据而提到证据中显式出现的玩家；这些玩家不得因此获得任何新的原子游戏语义。"""
-    baseline = baseline.replace(
-        baseline_player_rules,
-        discourse_player_rules,
-        1,
-    )
-    evidence_text = _render_discourse_public_evidence(
-        selected_public_evidence
-    )
-    return baseline + f"""
-【仅可使用的已验证公开证据】
-{evidence_text}
-【discourse 合同】
-- 生成简洁、具体、自然的公开发言；可以基于上述证据解释为什么支持、反对或怀疑计划中的玩家。
-- observable_public_fact 可以作为已发生的公开事实；public_claim 及其中的 sp_actions 只能表述为对应玩家曾公开说过或声称过，不能当作权威真值。
-- 可以比较所选 public_claim、指出公开可见的不一致，或提出基于所选公开历史的自然追问。
-- selected evidence 中的玩家只能作为公开历史参与者被引用；任何角色判断、查验、救/毒/守或投票意图仍必须由 public_actions 明确授权。
-- 最终发言必须完整实现全部 public_actions，且不得新增计划外角色判断、查验结果、救/毒/守声明或投票目标。
-- 例如只有 oppose(player4) 时，可以说公开说法不一致、目前不信任 player4，但不得升级为 player4 是狼人。
-- 不得引用未列出的历史，不得输出 planner response、JSON、分析或控制字段。"""
 
 CON.game_description = """你现在正在玩一局7人狼人杀游戏。
 

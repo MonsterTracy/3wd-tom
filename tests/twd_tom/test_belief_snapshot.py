@@ -152,6 +152,14 @@ def test_reporter_mutates_only_detached_observation_and_context():
         "game_log": [],
         "phase": "1_day_speech_pk",
         "valid_action": [],
+        "authoritative_public_state": {
+            "day": 1,
+            "day_or_night": "day",
+            "phase": "speech_pk",
+            "last_night_result": {"day": 0, "dead_players": []},
+            "prior_exiles": [],
+            "alive_players": [1, 2, 3, 4, 5, 6, 7],
+        },
     }
     observation_before = deepcopy(observation)
     snapshot = _snapshot((1,))

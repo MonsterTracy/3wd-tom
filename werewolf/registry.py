@@ -38,10 +38,6 @@ class Registry(BaseModel):
             "model_name": model_name,
             "tokenizer": kwargs.get("tokenizer"),
             "temperature": kwargs.get("temperature", 1.0),
-            "gameplay_prompt_profile": kwargs.get(
-                "gameplay_prompt_profile",
-                "legacy",
-            ),
         }
         if "gameplay_max_tokens" in kwargs:
             agent_params["gameplay_max_tokens"] = kwargs[
@@ -78,9 +74,6 @@ class Registry(BaseModel):
                                   tokenizer=agent_param.get("tokenizer"),
                                   temperature=agent_param["temperature"],
                                   log_file=log_file,
-                                  gameplay_prompt_profile=agent_param[
-                                      "gameplay_prompt_profile"
-                                  ],
                                   gameplay_max_tokens=agent_param.get(
                                       "gameplay_max_tokens"
                                   ))

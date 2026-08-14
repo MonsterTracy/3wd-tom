@@ -4,7 +4,7 @@
 
 | Path | Responsibility |
 |---|---|
-| `werewolf/agents/` | Agent abstractions, Planner/Renderer orchestration, prompt and action contracts |
+| `werewolf/agents/` | Agent abstractions, direct public-speech generation and SpeechPerceiver orchestration, prompt and action contracts |
 | `werewolf/backends/` | Named OpenAI-compatible backend loading and request handling |
 | `werewolf/envs/` | Seven-player game state, observations, valid actions, phases, and public events |
 | `werewolf/speech/` | Online/offline speech parsing and playing-agent belief reports |

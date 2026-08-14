@@ -336,7 +336,6 @@ def test_server_qwen_config_is_offline_and_uses_one_loopback_route(
             "model": model,
             "model_params": {
                 "temperature": 1.0,
-                "gameplay_prompt_profile": "strict_classic7",
                 "gameplay_max_tokens": 512,
             },
             "sample_ratio": 1.0,
@@ -455,7 +454,6 @@ def test_server_qwen35_config_validates_five_game_collection_plan(
             "model": model,
             "model_params": {
                 "temperature": 1.0,
-                "gameplay_prompt_profile": "strict_classic7",
                 "gameplay_max_tokens": 512,
             },
             "sample_ratio": 1.0,
@@ -518,12 +516,7 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
     def handler(request):
         payload = json.loads(request.content)
         calls.append((str(request.url), payload))
-        content = (
-            '{"public_actions":[]}'
-            if payload.get("response_format", {}).get("type") == "json_schema"
-            else "这是公开发言。"
-        )
-        return _success_response(request, content=content)
+        return _success_response(request, content="这是公开发言。")
 
     _mock_openai_clients(monkeypatch, handler)
     normalized = normalize_runtime_config(_server_qwen_config())
@@ -570,17 +563,15 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
         }
     )
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert {url for url, _payload in calls} == {
         "http://127.0.0.1:8000/v1/chat/completions"
     }
-    assert [payload["max_tokens"] for _url, payload in calls] == [512, 512]
+    assert [payload["max_tokens"] for _url, payload in calls] == [512]
     assert [payload["model"] for _url, payload in calls] == [
         "qwen2.5-7b-instruct",
-        "qwen2.5-7b-instruct",
     ]
-    assert calls[0][1]["response_format"]["type"] == "json_schema"
-    assert "response_format" not in calls[1][1]
+    assert "response_format" not in calls[0][1]
 
 
 @pytest.mark.parametrize(

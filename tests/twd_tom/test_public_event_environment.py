@@ -14,10 +14,10 @@ ROLES = [
 
 
 class Parser:
-    def parse(self, **_kwargs):
+    def parse_strict(self, *, speaker, **_kwargs):
         return [
-            ["player1", "support", "player2"],
-            ["player1", "oppose", "player3"],
+            [f"player{speaker}", "support", "player2"],
+            [f"player{speaker}", "oppose", "player3"],
         ]
 
 
@@ -60,8 +60,8 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
         "speaker": speaker,
         "raw_text": "final public text",
         "sp_actions": [
-            ["player1", "support", "player2"],
-            ["player1", "oppose", "player3"],
+            [speaker, "support", "player2"],
+            [speaker, "oppose", "player3"],
         ],
     }
     assert len(
@@ -73,9 +73,9 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
     ) == 1
 
 
-def test_empty_death_and_empty_speech_remain_explicit_events():
+def test_empty_death_and_empty_speech_semantics_remain_explicit_events():
     class EmptyParser:
-        def parse(self, **_kwargs):
+        def parse_strict(self, **_kwargs):
             return []
 
     env = _env(EmptyParser())
@@ -85,13 +85,14 @@ def test_empty_death_and_empty_speech_remain_explicit_events():
         "event_type": "death_announcement",
         "dead_players": [],
     }
-    env.step(("speech", ""))
+    raw_speech = "我暂时没有明确判断。"
+    env.step(("speech", raw_speech))
     speech = next(
         event
         for event in env.public_events
         if event["event_type"] == "public_speech"
     )
-    assert speech["raw_text"] == ""
+    assert speech["raw_text"] == raw_speech
     assert speech["sp_actions"] == []
 
 

@@ -4,8 +4,8 @@
 
 3WD-ToM is a research codebase for collecting, modeling, and evaluating
 observer-specific beliefs in a fixed seven-player Werewolf game. The project
-combines a controlled language-game environment, private planning and public
-speech generation, structured speech perception, belief self-reporting, and
+combines a controlled language-game environment, direct public speech
+generation, structured speech perception, belief self-reporting, and
 first- and second-order Theory-of-Mind (ToM) training.
 
 The current collection generator is frozen as **Collection V2.7** at commit
@@ -66,14 +66,13 @@ cutoff or injects future information into model inputs.
 ```mermaid
 flowchart LR
     E["Werewolf environment"] --> O["Private observation"]
-    O --> P["Private Planner"]
-    P --> PP["PublicSpeechPlan"]
-    PP --> R["Renderer"]
-    R --> V["Final speech validator"]
-    V --> S["Public speech"]
-    S --> SP["SpeechPerceiver"]
-    S --> FH["Frozen full public-event history<br/>raw_text + sp_actions"]
-    SP --> FH
+    O --> G["Gameplay LLM<br/>one direct call"]
+    G --> S["Natural-language public speech"]
+    S --> SP["SpeechPerceiver.parse_strict()"]
+    SP --> V["Validated Core-13 sp_actions"]
+    S --> C["Commit public_speech<br/>raw_text + sp_actions"]
+    V --> C
+    C --> FH["Frozen full public-event history"]
 
     O --> BR["Ordinary private-conditioned reporter"]
     FH --> BR
@@ -89,6 +88,14 @@ flowchart LR
     D --> M["ToM backbone"]
     M --> L["Masked soft-target loss / evaluation"]
 ```
+
+Public speech has no active Planner, `PublicSpeechPlan`, Renderer, speech mode,
+or Planner/SpeechPerceiver alignment gate. A successful strict parse may
+produce an empty `sp_actions` list; this is legal semantic NONE. Backend,
+protocol, schema, and subject failures are explicit, and parsing plus
+validation completes before the speech is committed. Core-13 remains a
+downstream representation: raw natural-language speech is not passed directly
+to the ToM backbone.
 
 See [docs/architecture.md](docs/architecture.md) for the gameplay, speech,
 belief, and training flows.

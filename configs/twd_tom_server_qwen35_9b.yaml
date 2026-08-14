@@ -31,7 +31,6 @@ agent_config:
       model: "qwen3.5-9b"
       model_params:
         temperature: 1.0
-        gameplay_prompt_profile: strict_classic7
         gameplay_max_tokens: 512
       sample_ratio: 1.0
 

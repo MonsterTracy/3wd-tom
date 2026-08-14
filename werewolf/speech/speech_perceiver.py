@@ -107,70 +107,58 @@ class SpeechActionValidationError(ValueError):
         return self._raw_response
 
 
-class PublicSpeechSemanticAlignmentError(ValueError):
-    """The rendered speech semantics differ from its accepted plan."""
-
-
-class PlannedPublicSpeech(str):
-    """Carry accepted plan provenance to the environment without publishing it."""
-
-    def __new__(cls, content, accepted_public_actions):
-        if not isinstance(content, str):
-            raise TypeError("planned public speech content must be text")
-        instance = super().__new__(cls, content)
-        instance.accepted_public_actions = tuple(
-            (action, target)
-            for action, target in accepted_public_actions
-        )
-        return instance
-
-
-def validate_public_speech_semantic_alignment(
-    accepted_public_actions,
+def validate_public_speech_actions(
     parsed_actions,
     *,
     actual_speaker,
 ):
-    """Require the actual subject and deduplicated proposition equality."""
+    """Validate parsed Core-13 triplets and their actual public speaker."""
 
     _, speech_action_type = _load_tom_schema()
     if type(actual_speaker) is not int or not 1 <= actual_speaker <= 7:
-        raise PublicSpeechSemanticAlignmentError(
-            "actual public speaker must be an integer in [1, 7]"
-        )
+        raise SpeechActionValidationError([{
+            "candidate": actual_speaker,
+            "reason": "actual public speaker must be an integer in [1, 7]",
+        }])
+    if not isinstance(parsed_actions, list):
+        raise SpeechActionValidationError([{
+            "candidate": parsed_actions,
+            "reason": "parsed public speech actions must be a list",
+        }])
     expected_subject = f"player{actual_speaker}"
-    planned_propositions = set()
-    for action, target in accepted_public_actions:
-        normalized = speech_action_type.from_values(1, action, target)
-        planned_propositions.add((normalized.action, normalized.object))
-    parsed_propositions = set()
+    normalized_actions = []
+    seen = set()
     for parsed_action in parsed_actions:
         if (
             isinstance(parsed_action, (str, bytes))
+            or not isinstance(parsed_action, Sequence)
             or len(parsed_action) != 3
         ):
-            raise PublicSpeechSemanticAlignmentError(
-                "parsed public speech action must be a triplet"
-            )
-        normalized = speech_action_type.from_values(
-            parsed_action[0],
-            parsed_action[1],
-            parsed_action[2],
-        )
+            raise SpeechActionValidationError([{
+                "candidate": parsed_action,
+                "reason": "parsed public speech action must be a triplet",
+            }])
+        try:
+            normalized = speech_action_type.from_values(*parsed_action)
+        except (TypeError, ValueError, KeyError) as exc:
+            raise SpeechActionValidationError([{
+                "candidate": parsed_action,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }]) from exc
         if normalized.subject != expected_subject:
-            raise PublicSpeechSemanticAlignmentError(
-                "parsed public speech subject does not match actual speaker: "
-                f"expected={expected_subject}, actual={normalized.subject}"
-            )
-        parsed_propositions.add((normalized.action, normalized.object))
-
-    if planned_propositions != parsed_propositions:
-        missing = sorted(planned_propositions - parsed_propositions)
-        extra = sorted(parsed_propositions - planned_propositions)
-        raise PublicSpeechSemanticAlignmentError(
-            "rendered public speech semantics do not match accepted plan: "
-            f"missing={missing}, extra={extra}"
-        )
+            raise SpeechActionValidationError([{
+                "candidate": parsed_action,
+                "reason": (
+                    "parsed public speech subject does not match actual speaker: "
+                    f"expected={expected_subject}, actual={normalized.subject}"
+                ),
+            }])
+        canonical = normalized.to_list()
+        key = tuple(canonical)
+        if key not in seen:
+            seen.add(key)
+            normalized_actions.append(canonical)
+    return normalized_actions
 
 
 @dataclass(frozen=True)
@@ -299,9 +287,8 @@ class SpeechPerceiver:
     ) -> list[list[str]]:
         """Parse one speech while exposing configuration and parser errors.
 
-        This entry point is for offline audits and reparsing only. The online
-        environment continues to call :meth:`parse`, which remains fail-closed
-        so a parser outage cannot interrupt a game.
+        The online environment uses this entry point so parser and protocol
+        failures cannot be conflated with a valid empty action list.
         """
 
         actions, _raw_response = (
@@ -980,7 +967,7 @@ player{speaker}: {speech}"""
         *,
         strict: bool = False,
     ) -> list[list[str]]:
-        """Validate actions and force the subject to the real speaker."""
+        """Validate actions; strict mode also preserves and checks subject."""
 
         _, speech_action_type = (
             _load_tom_schema()
@@ -1047,20 +1034,21 @@ player{speaker}: {speech}"""
             for atomic_object in object_players:
                 try:
                     if strict:
-                        speech_action_type.from_values(
+                        action = speech_action_type.from_values(
                             subject=raw_subject,
                             action=action_name,
                             object_=atomic_object,
                         )
-
-                    action = (
-                        speech_action_type
-                        .from_values(
+                        if action.subject != f"player{speaker}":
+                            raise ValueError(
+                                "speech action subject does not match actual speaker"
+                            )
+                    else:
+                        action = speech_action_type.from_values(
                             subject=speaker,
                             action=action_name,
                             object_=atomic_object,
                         )
-                    )
                 except (
                     TypeError,
                     ValueError,

@@ -29,7 +29,7 @@ class ScriptedSpeechPerceiver:
     def __init__(self):
         self.calls = []
 
-    def parse(self, *, speaker, speech, day, phase):
+    def parse_strict(self, *, speaker, speech, day, phase):
         self.calls.append(
             {
                 "speaker": speaker,

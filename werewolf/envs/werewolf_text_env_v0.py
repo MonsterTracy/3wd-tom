@@ -8,9 +8,8 @@ import json
 
 from werewolf.helper.log_utils import Log
 from werewolf.speech.speech_perceiver import (
-    PlannedPublicSpeech,
     SpeechPerceiver,
-    validate_public_speech_semantic_alignment,
+    validate_public_speech_actions,
 )
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.models.twd_tom.public_events import normalize_public_event
@@ -348,29 +347,19 @@ class WerewolfTextEnvV0(gym.Env):
             reward, done, info = self.end_night()
         elif self.phase == 'speech' or self.phase == 'speech_pk':
             assert action_type == 'speech' or action_type == 'speech_pk'
-            accepted_public_actions = None
-            if isinstance(action_content, PlannedPublicSpeech):
-                accepted_public_actions = action_content.accepted_public_actions
-                action_content = str(action_content)
-            try:
-                sp_actions = self.speech_perceiver.parse(
-                    speaker=self.current_act_idx + 1,
-                    speech=action_content,
-                    day=self.day,
-                    phase=self.phase,
+            if not isinstance(action_content, str) or not action_content.strip():
+                raise ValueError("public speech must be non-empty text")
+            actual_speaker = self.current_act_idx + 1
+            sp_actions = self.speech_perceiver.parse_strict(
+                speaker=actual_speaker,
+                speech=action_content,
+                day=self.day,
+                phase=self.phase,
             )
-            except Exception:
-                sp_actions = []
-
-            if not isinstance(sp_actions, list):
-                sp_actions = []
-
-            if accepted_public_actions is not None:
-                validate_public_speech_semantic_alignment(
-                    accepted_public_actions,
-                    sp_actions,
-                    actual_speaker=self.current_act_idx + 1,
-                )
+            sp_actions = validate_public_speech_actions(
+                sp_actions,
+                actual_speaker=actual_speaker,
+            )
 
             self.game_log.append(
                 Log(
