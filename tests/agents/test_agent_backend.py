@@ -7,7 +7,7 @@ import unittest
 
 from run_random import eval as run_game
 from werewolf.agents import agent_registry
-from werewolf.agents.gpt_agent import GPTAgent
+from werewolf.agents.gpt_agent import GPTAgent, MAX_SPEECH_PLAN_ATTEMPTS
 from werewolf.agents.llm_agent import (
     GameplayActionValidationError,
     GameplaySpeechQualityError,
@@ -17,6 +17,9 @@ from werewolf.agents.llm_agent import (
     public_speech_plan_json_schema,
     validate_gameplay_public_speech,
     validate_public_speech_plan,
+)
+from werewolf.agents.prompt_template_v0 import (
+    build_strict_classic7_speech_plan_prompt,
 )
 from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.backends import BackendError
@@ -575,6 +578,180 @@ class AgentBackendTest(unittest.TestCase):
             ).as_list(),
             bluff,
         )
+
+    def test_skill_claim_persona_contract_preserves_public_bluff(self):
+        common = {
+            "suggestible_player_ids": (2, 3, 4, 5, 6, 7),
+            "player_id": 1,
+            "phase": "1_day_speech",
+        }
+        invalid_cases = (
+            (
+                "Villager self-claim with Seer skill",
+                "Villager",
+                [
+                    {"action": "point_as_villager", "target": 1},
+                    {"action": "check_as_good", "target": 2},
+                ],
+            ),
+            (
+                "Witch self-claim with Seer skill",
+                "Witch",
+                [
+                    {"action": "point_as_witch", "target": 1},
+                    {"action": "check_as_good", "target": 2},
+                ],
+            ),
+            (
+                "Seer self-claim with Witch skill",
+                "Seer",
+                [
+                    {"action": "point_as_seer", "target": 1},
+                    {"action": "poison", "target": 2},
+                ],
+            ),
+            (
+                "Guard self-claim with Witch skill",
+                "Guard",
+                [
+                    {"action": "point_as_guard", "target": 1},
+                    {"action": "save", "target": 2},
+                ],
+            ),
+        )
+        for label, true_role, actions in invalid_cases:
+            with self.subTest(label=label), self.assertRaises(
+                PublicSpeechPlanValidationError
+            ):
+                validate_public_speech_plan(
+                    {"public_actions": actions},
+                    speaker_role=true_role,
+                    **common,
+                )
+
+        valid_cases = (
+            (
+                "Seer persona uses check",
+                "Seer",
+                [
+                    {"action": "point_as_seer", "target": 1},
+                    {"action": "check_as_good", "target": 2},
+                ],
+            ),
+            (
+                "Villager bluffs as Seer",
+                "Villager",
+                [
+                    {"action": "point_as_seer", "target": 1},
+                    {"action": "check_as_good", "target": 2},
+                ],
+            ),
+            (
+                "Werewolf bluffs as Seer",
+                "Werewolf",
+                [
+                    {"action": "point_as_seer", "target": 1},
+                    {"action": "check_as_werewolf", "target": 2},
+                ],
+            ),
+            (
+                "Witch persona uses both Witch skills",
+                "Witch",
+                [
+                    {"action": "point_as_witch", "target": 1},
+                    {"action": "save", "target": 2},
+                    {"action": "poison", "target": 3},
+                ],
+            ),
+            (
+                "Guard persona uses guard",
+                "Guard",
+                [
+                    {"action": "point_as_guard", "target": 1},
+                    {"action": "guard", "target": 2},
+                ],
+            ),
+            (
+                "implicit Seer persona needs no self-role action",
+                "Villager",
+                [{"action": "check_as_good", "target": 2}],
+            ),
+        )
+        for label, true_role, actions in valid_cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    validate_public_speech_plan(
+                        {"public_actions": actions},
+                        speaker_role=true_role,
+                        **common,
+                    ).as_list(),
+                    actions,
+                )
+
+    def test_public_speech_plan_rejects_cross_skill_personas(self):
+        invalid_cases = (
+            [
+                {"action": "check_as_good", "target": 2},
+                {"action": "poison", "target": 3},
+            ],
+            [
+                {"action": "check_as_werewolf", "target": 2},
+                {"action": "guard", "target": 3},
+            ],
+            [
+                {"action": "save", "target": 2},
+                {"action": "guard", "target": 3},
+            ],
+        )
+        for actions in invalid_cases:
+            with self.subTest(actions=actions), self.assertRaisesRegex(
+                PublicSpeechPlanValidationError,
+                "incompatible public personas",
+            ):
+                validate_public_speech_plan(
+                    {"public_actions": actions},
+                    suggestible_player_ids=(2, 3, 4, 5, 6, 7),
+                    player_id=1,
+                    speaker_role="Villager",
+                    phase="1_day_speech",
+                )
+
+    def test_public_speech_plan_accepts_good_and_wolf_checks_as_one_persona(self):
+        actions = [
+            {"action": "check_as_good", "target": 2},
+            {"action": "check_as_werewolf", "target": 3},
+        ]
+
+        self.assertEqual(
+            validate_public_speech_plan(
+                {"public_actions": actions},
+                suggestible_player_ids=(2, 3, 4, 5, 6, 7),
+                player_id=1,
+                speaker_role="Villager",
+                phase="1_day_speech",
+            ).as_list(),
+            actions,
+        )
+
+    def test_planner_prompt_explains_skill_persona_and_retry_contract(self):
+        prompt = build_strict_classic7_speech_plan_prompt(
+            self._strict_observation(),
+            suggestible_player_ids=(2, 3, 4, 5, 6, 7),
+        )
+
+        self.assertIn(
+            "check_as_good / check_as_werewolf 表示 speaker 公开声称查验来源",
+            prompt,
+        )
+        self.assertIn("save / poison 表示公开声称女巫技能来源", prompt)
+        self.assertIn("guard 表示公开声称守卫技能来源", prompt)
+        self.assertIn("不是普通支持、反对或身份判断 action", prompt)
+        self.assertIn("不得为了增加动作多样性而随意使用", prompt)
+        self.assertIn("有策略意义的公开身份 bluff", prompt)
+        self.assertIn("不要按真实身份过滤 public claim", prompt)
+        self.assertIn("不要求同时冗余输出 point_as_seer(self)", prompt)
+        self.assertIn("不得同时采用多个互斥 skill persona", prompt)
+        self.assertEqual(MAX_SPEECH_PLAN_ATTEMPTS, 2)
 
     def test_seed_510_duplicate_plan_reaches_renderer_once(self):
         observation = self._strict_observation()

@@ -378,6 +378,11 @@ def build_strict_classic7_speech_plan_prompt(
 - vote_intent 只能指向“当前可公开建议放逐”中的玩家，可以不输出 vote_intent。
 - 不要把历史旧投票目标直接复制成当前目标；已死亡或放逐玩家不得成为 vote_intent。
 - 其他历史技能声明可以指向过去玩家，因为它们只是准备公开表达的声称。
+- check_as_good / check_as_werewolf 表示 speaker 公开声称查验来源，形成预言家 persona；save / poison 表示公开声称女巫技能来源，形成女巫 persona；guard 表示公开声称守卫技能来源，形成守卫 persona。
+- 这些技能声明不是普通支持、反对或身份判断 action；不得为了增加动作多样性而随意使用。
+- 真实身份不对应时仍可把技能声明用于有策略意义的公开身份 bluff；不要按真实身份过滤 public claim，但同一计划必须维持连贯的公开 persona。
+- 技能声明本身已经隐含对应 public persona，不要求同时冗余输出 point_as_seer(self)、point_as_witch(self) 或 point_as_guard(self)。
+- 同一计划不得同时采用多个互斥 skill persona；查验、救人/毒人、守护这三类技能来源不得跨类并存。
 - 同一个 target 不得同时被 point_as_* 明确判断为两个不同角色。
 - 若明确用 point_as_* 自报角色，同一计划中的技能声明必须符合该公开身份：预言家只能查验，女巫只能救人或毒人，守卫只能守护，村民或狼人不得声称技能；没有明确自报角色时仍可用技能声明进行 bluff。
 - 只保留少量关键 action，避免复述完整历史；空 public_actions 合法。

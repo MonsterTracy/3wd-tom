@@ -410,6 +410,17 @@ def validate_public_speech_plan(
         "Witch": frozenset({"save", "poison"}),
         "Guard": frozenset({"guard"}),
     }
+    claimed_skill_personas = [
+        role
+        for role, allowed_skills in allowed_skills_by_claimed_role.items()
+        if allowed_skills
+        and any(action in allowed_skills for action, _target in validated)
+    ]
+    if len(claimed_skill_personas) > 1:
+        reject(
+            "skill claims imply incompatible public personas: "
+            f"{claimed_skill_personas}"
+        )
     if claimed_self_role is not None:
         public_skill_actions = {
             "check_as_good",
