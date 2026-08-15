@@ -27,25 +27,21 @@ names.
 
 ```mermaid
 flowchart LR
-    PC["Legal private context"] --> PL["Private Planner"]
-    PS["Authoritative public state"] --> PL
-    PL --> PP["Validated PublicSpeechPlan"]
-    PP --> RP["Renderer prompt"]
-    RP --> R["Renderer"]
-    R --> FV["Final speech validator"]
-    FV --> SP["Committed public speech"]
+    PC["Legal private context"] --> B["Transient belief"]
+    PS["Authoritative public state"] --> B
+    B --> SP["Direct public speech"]
     SP --> P["SpeechPerceiver"]
     P --> SA["Structured sp_actions"]
     SP --> EV["public_speech event"]
     SA --> EV
 ```
 
-The strict speech path is orchestrated by `GPTAgent`. The plan schema and hard
-validation live with the LLM agent contract; prompt construction lives in
-`prompt_template_v0.py`. The Renderer receives the validated public plan and
-public phase context, not the Planner's private prompt. The online
-`SpeechPerceiver.parse()` remains tolerant so parser failure does not stop a
-game; strict parsing is reserved for offline audit tools.
+The strict speech path is orchestrated by `GPTAgent`. A fresh transient belief
+is generated from the legally filtered observation, then a second model call
+produces natural-language public speech directly. Prompt construction lives in
+`prompt_template_v0.py`. The online `SpeechPerceiver.parse()` remains tolerant
+and runs only after speech generation, so parser failure does not stop a game;
+strict parsing is reserved for offline audit tools.
 
 ## Belief supervision flow
 

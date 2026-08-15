@@ -66,11 +66,8 @@ cutoff or injects future information into model inputs.
 ```mermaid
 flowchart LR
     E["Werewolf environment"] --> O["Private observation"]
-    O --> P["Private Planner"]
-    P --> PP["PublicSpeechPlan"]
-    PP --> R["Renderer"]
-    R --> V["Final speech validator"]
-    V --> S["Public speech"]
+    O --> B["Transient belief"]
+    B --> S["Direct public speech"]
     S --> SP["SpeechPerceiver"]
     S --> FH["Frozen full public-event history<br/>raw_text + sp_actions"]
     SP --> FH

@@ -518,9 +518,19 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
     def handler(request):
         payload = json.loads(request.content)
         calls.append((str(request.url), payload))
+        response_name = payload.get("response_format", {}).get(
+            "json_schema", {}
+        ).get("name")
         content = (
-            '{"public_actions":[]}'
-            if payload.get("response_format", {}).get("type") == "json_schema"
+            json.dumps({
+                "belief": "当前信息有限。",
+                "concise": "继续观察。",
+                "roles": {
+                    f"player{player_id}": "unknown"
+                    for player_id in range(2, 8)
+                },
+            }, ensure_ascii=False)
+            if response_name == "belief_report"
             else "这是公开发言。"
         )
         return _success_response(request, content=content)

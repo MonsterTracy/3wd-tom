@@ -19,9 +19,6 @@ from typing import Any
 import yaml
 
 from werewolf.agents import agent_registry
-from werewolf.agents.prompt_template_v0 import (
-    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
-)
 from werewolf.backends import (
     OpenAICompatibleBackend,
     create_backend,
@@ -172,20 +169,7 @@ def eval(
             else nullcontext()
         )
         with audit_context:
-            agent_observation = obs
-            acting_agent = agent_list[current_act_idx - 1]
-            if getattr(
-                acting_agent,
-                "gameplay_prompt_profile",
-                None,
-            ) == STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE:
-                agent_observation = deepcopy(obs)
-                agent_observation["canonical_public_events"] = deepcopy(
-                    env.public_events
-                )
-            action = agent_list[
-                current_act_idx - 1
-            ].act(agent_observation)
+            action = agent_list[current_act_idx - 1].act(obs)
 
         obs, _, done, info = env.step(
             action

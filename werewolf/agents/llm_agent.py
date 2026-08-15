@@ -9,15 +9,12 @@ from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
     CON,
     LEGACY_GAMEPLAY_PROMPT_PROFILE,
+    STRICT_CLASSIC7_GAME_DESCRIPTION,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
-    build_strict_classic7_discourse_speech_plan_prompt,
-    build_strict_classic7_speech_plan_prompt,
 )
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import JsonFormatter, CustomLoggerAdapter
-from werewolf.models.twd_tom.schema import ACTION_NAMES
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     private_belief_response_format,
@@ -57,263 +54,135 @@ class GameplayActionValidationError(ValueError):
     """A gameplay action response is not an authoritative candidate."""
 
 
-class PublicSpeechPlanValidationError(ValueError):
-    """A private planner response violates the public-plan contract."""
+class BeliefValidationError(ValueError):
+    """A transient gameplay belief response violates its contract."""
 
 
-_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS = frozenset({
-    "point_as_werewolf",
-    "check_as_werewolf",
-})
-MAX_PUBLIC_EVIDENCE_REFS = 3
+BELIEF_ROLES = ("Werewolf", "Seer", "Witch", "Villager", "unknown")
 
 
 @dataclass(frozen=True)
-class PublicSpeechPlan:
-    """Validated public claims represented only by formal speech actions."""
+class BeliefReport:
+    belief: str
+    concise: str
+    roles: dict[str, str]
 
-    public_actions: tuple[tuple[str, int], ...]
-
-    @property
-    def targets(self):
-        return frozenset(target for _action, target in self.public_actions)
-
-    def as_list(self):
-        return [
-            {"action": action, "target": target}
-            for action, target in self.public_actions
-        ]
-
-
-@dataclass(frozen=True)
-class DiscoursePublicSpeechPlan:
-    """Validated strict plan plus bounded references to public evidence."""
-
-    public_plan: PublicSpeechPlan
-    public_evidence_refs: tuple[int, ...]
-
-    @property
-    def targets(self):
-        return self.public_plan.targets
-
-    def actions_as_list(self):
-        return self.public_plan.as_list()
-
-
-def _stable_unique_public_action_pairs(action_pairs):
-    unique_pairs = []
-    seen = set()
-    for pair in action_pairs:
-        if pair in seen:
-            continue
-        seen.add(pair)
-        unique_pairs.append(pair)
-    return tuple(unique_pairs)
-
-
-def canonical_suggestible_player_ids(authoritative_public_state):
-    if not isinstance(authoritative_public_state, dict):
-        raise TypeError("authoritative public state is missing")
-    candidates = authoritative_public_state.get("suggestible_exile_targets")
-    if not isinstance(candidates, list):
-        raise TypeError("authoritative candidate set is missing")
-    canonical = tuple(candidates)
-    if (
-        any(
-            isinstance(candidate, bool)
-            or not isinstance(candidate, int)
-            or not 1 <= candidate <= 7
-            for candidate in canonical
-        )
-        or len(canonical) != len(set(canonical))
-    ):
-        raise ValueError("authoritative candidate set is invalid")
-    return canonical
-
-
-def _is_true_wolf_self_identity_disclosure(
-    *, action, target, speaker_id, speaker_role
-):
-    return (
-        speaker_role == "Werewolf"
-        and action in _SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS
-        and target == speaker_id
-    )
-
-
-def public_speech_plan_json_schema(
-    *, suggestible_player_ids, speaker_id, speaker_role
-):
-    if not isinstance(suggestible_player_ids, tuple):
-        raise TypeError("suggestible_player_ids must be a tuple")
-    if isinstance(speaker_id, bool) or not isinstance(speaker_id, int) or not 1 <= speaker_id <= 7:
-        raise ValueError("speaker_id must be an integer in [1, 7]")
-    other_actions = [
-        action
-        for action in ACTION_NAMES
-        if action not in {
-            "vote_intent",
-            "oppose",
-            *_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS,
+    def as_dict(self):
+        return {
+            "belief": self.belief,
+            "concise": self.concise,
+            "roles": dict(self.roles),
         }
-    ]
-    if speaker_role not in _PRIVATE_ROLE_EVENTS:
-        raise ValueError(f"unsupported speaker_role: {speaker_role!r}")
-    action_branches = []
-    if suggestible_player_ids:
-        action_branches.append({
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["action", "target"],
-            "properties": {
-                "action": {"const": "vote_intent"},
-                "target": {
-                    "type": "integer",
-                    "enum": list(suggestible_player_ids),
-                },
-            },
-        })
-    action_branches.append({
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["action", "target"],
-        "properties": {
-            "action": {"const": "oppose"},
-            "target": {
-                "type": "integer",
-                "enum": [
-                    player_id
-                    for player_id in range(1, 8)
-                    if player_id != speaker_id
-                ],
-            },
-        },
-    })
-    action_branches.append({
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["action", "target"],
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": sorted(_SELF_WOLF_IDENTITY_DISCLOSURE_ACTIONS),
-            },
-            "target": {
-                "type": "integer",
-                "enum": [
-                    player_id
-                    for player_id in range(1, 8)
-                    if not _is_true_wolf_self_identity_disclosure(
-                        action="point_as_werewolf",
-                        target=player_id,
-                        speaker_id=speaker_id,
-                        speaker_role=speaker_role,
-                    )
-                ],
-            },
-        },
-    })
-    action_branches.append({
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["action", "target"],
-        "properties": {
-            "action": {"type": "string", "enum": other_actions},
-            "target": {"type": "integer", "enum": list(range(1, 8))},
-        },
-    })
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["public_actions"],
-        "properties": {
-            "public_actions": {
-                "type": "array",
-                "items": {"oneOf": action_branches},
-            },
-        },
-    }
 
 
-def public_speech_plan_response_format(
-    *, supports_json_schema, suggestible_player_ids, speaker_id, speaker_role
-):
+def belief_response_format(*, supports_json_schema, player_id):
     if supports_json_schema is not True:
-        raise BackendError(
-            "strict speech planner requires backend JSON Schema support"
-        )
+        raise BackendError("belief generation requires backend JSON Schema support")
+    if isinstance(player_id, bool) or not isinstance(player_id, int) or not 1 <= player_id <= 7:
+        raise ValueError("player_id must be an integer in [1, 7]")
+    other_players = [
+        f"player{candidate}"
+        for candidate in range(1, 8)
+        if candidate != player_id
+    ]
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "public_speech_plan",
+            "name": "belief_report",
             "strict": True,
-            "schema": public_speech_plan_json_schema(
-                suggestible_player_ids=suggestible_player_ids,
-                speaker_id=speaker_id,
-                speaker_role=speaker_role,
-            ),
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["belief", "concise", "roles"],
+                "properties": {
+                    "belief": {"type": "string", "minLength": 1},
+                    "concise": {"type": "string", "minLength": 1},
+                    "roles": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": other_players,
+                        "properties": {
+                            player: {
+                                "type": "string",
+                                "enum": list(BELIEF_ROLES),
+                            }
+                            for player in other_players
+                        },
+                    },
+                },
+            },
         },
     }
 
 
-def discourse_public_speech_plan_json_schema(
-    *,
-    suggestible_player_ids,
-    speaker_id,
-    speaker_role,
-    public_event_indices,
-):
-    schema = deepcopy(
-        public_speech_plan_json_schema(
-            suggestible_player_ids=suggestible_player_ids,
-            speaker_id=speaker_id,
-            speaker_role=speaker_role,
-        )
+def parse_belief_response(raw_response, *, player_id, phase):
+    context = f"player={player_id}, phase={phase}"
+    try:
+        payload = json.loads(raw_response)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BeliefValidationError(
+            f"belief response is not valid JSON ({context})"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {"belief", "concise", "roles"}:
+        raise BeliefValidationError(f"belief fields do not match contract ({context})")
+    if any(not isinstance(payload[field], str) or not payload[field].strip() for field in ("belief", "concise")):
+        raise BeliefValidationError(f"belief text fields must be non-empty ({context})")
+    expected_players = {
+        f"player{candidate}"
+        for candidate in range(1, 8)
+        if candidate != player_id
+    }
+    roles = payload["roles"]
+    if not isinstance(roles, dict) or set(roles) != expected_players:
+        raise BeliefValidationError(f"roles must contain only the other players ({context})")
+    if any(role not in BELIEF_ROLES for role in roles.values()):
+        raise BeliefValidationError(f"roles contain an unsupported value ({context})")
+    return BeliefReport(
+        belief=payload["belief"].strip(),
+        concise=payload["concise"].strip(),
+        roles=dict(roles),
     )
-    schema["required"] = [
-        "public_actions",
-        "public_evidence_refs",
-    ]
-    schema["properties"].update(
-        {
-            "public_evidence_refs": {
-                "type": "array",
-                "maxItems": MAX_PUBLIC_EVIDENCE_REFS,
-                "items": {
-                    "type": "integer",
-                    "enum": list(public_event_indices),
-                },
-            },
-        }
-    )
-    return schema
 
 
-def discourse_public_speech_plan_response_format(
-    *,
-    supports_json_schema,
-    suggestible_player_ids,
-    speaker_id,
-    speaker_role,
-    public_event_indices,
-):
+def vote_response_format(*, supports_json_schema, legal_targets):
     if supports_json_schema is not True:
-        raise BackendError(
-            "strict discourse speech planner requires backend JSON Schema support"
-        )
+        raise BackendError("vote generation requires backend JSON Schema support")
+    if not isinstance(legal_targets, tuple) or not legal_targets:
+        raise ValueError("legal_targets must be a non-empty tuple")
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "discourse_public_speech_plan",
+            "name": "vote",
             "strict": True,
-            "schema": discourse_public_speech_plan_json_schema(
-                suggestible_player_ids=suggestible_player_ids,
-                speaker_id=speaker_id,
-                speaker_role=speaker_role,
-                public_event_indices=public_event_indices,
-            ),
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["target"],
+                "properties": {
+                    "target": {"type": "integer", "enum": list(legal_targets)},
+                },
+            },
         },
     }
+
+
+def parse_vote_response(raw_response, *, legal_targets, phase):
+    try:
+        payload = json.loads(raw_response)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise GameplayActionValidationError(
+            f"vote response is not valid JSON (phase={phase!r})"
+        ) from exc
+    if not isinstance(payload, dict) or set(payload) != {"target"}:
+        raise GameplayActionValidationError(
+            f"vote response must contain only target (phase={phase!r})"
+        )
+    target = payload["target"]
+    if isinstance(target, bool) or not isinstance(target, int) or target not in legal_targets:
+        raise GameplayActionValidationError(
+            f"vote target is not an authoritative candidate (phase={phase!r}, target={target!r})"
+        )
+    return target
 
 
 def night_action_response_format(
@@ -343,166 +212,6 @@ def night_action_response_format(
             },
         },
     }
-
-
-def validate_public_speech_plan(
-    payload,
-    *,
-    suggestible_player_ids,
-    player_id,
-    speaker_role,
-    phase,
-    game_context=None,
-):
-    context = f"game={game_context or 'unavailable'}, player={player_id}, phase={phase}"
-
-    def reject(reason):
-        raise PublicSpeechPlanValidationError(f"{reason} ({context})")
-
-    if not isinstance(suggestible_player_ids, tuple):
-        reject("suggestible_player_ids must be a tuple")
-    if speaker_role not in _PRIVATE_ROLE_EVENTS:
-        reject(f"unsupported speaker_role: {speaker_role!r}")
-    if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
-        reject("plan must contain only public_actions")
-    public_actions = payload["public_actions"]
-    if not isinstance(public_actions, list):
-        reject("public_actions must be an array")
-    validated = []
-    for item in public_actions:
-        if not isinstance(item, dict) or set(item) != {"action", "target"}:
-            reject("every public action must contain only action and target")
-        action = item["action"]
-        target = item["target"]
-        if action not in ACTION_NAMES:
-            reject(f"unsupported public action: {action!r}")
-        if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 7:
-            reject(f"invalid public action target: {target!r}")
-        validated.append((action, target))
-
-    validated = _stable_unique_public_action_pairs(validated)
-    seen = set(validated)
-
-    role_attributions = {
-        "point_as_werewolf": "Werewolf",
-        "point_as_villager": "Villager",
-        "point_as_seer": "Seer",
-        "point_as_witch": "Witch",
-        "point_as_guard": "Guard",
-    }
-    attributed_role_by_target = {}
-    for action, target in validated:
-        role = role_attributions.get(action)
-        if role is None:
-            continue
-        prior_role = attributed_role_by_target.setdefault(target, role)
-        if prior_role != role:
-            reject(
-                f"player{target} cannot be attributed both "
-                f"{prior_role} and {role}"
-            )
-
-    claimed_self_role = attributed_role_by_target.get(player_id)
-    allowed_skills_by_claimed_role = {
-        "Werewolf": frozenset(),
-        "Villager": frozenset(),
-        "Seer": frozenset({"check_as_good", "check_as_werewolf"}),
-        "Witch": frozenset({"save", "poison"}),
-        "Guard": frozenset({"guard"}),
-    }
-    claimed_skill_personas = [
-        role
-        for role, allowed_skills in allowed_skills_by_claimed_role.items()
-        if allowed_skills
-        and any(action in allowed_skills for action, _target in validated)
-    ]
-    if len(claimed_skill_personas) > 1:
-        reject(
-            "skill claims imply incompatible public personas: "
-            f"{claimed_skill_personas}"
-        )
-    if claimed_self_role is not None:
-        public_skill_actions = {
-            "check_as_good",
-            "check_as_werewolf",
-            "save",
-            "poison",
-            "guard",
-        }
-        incompatible_skills = [
-            action
-            for action, _target in validated
-            if action in public_skill_actions
-            and action not in allowed_skills_by_claimed_role[claimed_self_role]
-        ]
-        if incompatible_skills:
-            reject(
-                f"self-claim as {claimed_self_role} is incompatible with "
-                f"skill claim(s) {incompatible_skills}"
-            )
-
-    for action, target in validated:
-        if action == "vote_intent" and target not in suggestible_player_ids:
-            reject(f"vote_intent target player{target} is not currently suggestible")
-    if ("oppose", player_id) in seen:
-        reject(f"oppose cannot target the current speaker player{player_id}")
-    for action, target in validated:
-        if _is_true_wolf_self_identity_disclosure(
-            action=action,
-            target=target,
-            speaker_id=player_id,
-            speaker_role=speaker_role,
-        ):
-            reject(f"{action} cannot disclose the true Werewolf speaker's identity")
-    return PublicSpeechPlan(validated)
-
-
-def validate_discourse_public_speech_plan(
-    payload,
-    *,
-    suggestible_player_ids,
-    player_id,
-    speaker_role,
-    phase,
-    public_event_indices,
-    game_context=None,
-):
-    context = f"game={game_context or 'unavailable'}, player={player_id}, phase={phase}"
-
-    def reject(reason):
-        raise PublicSpeechPlanValidationError(f"{reason} ({context})")
-
-    expected_fields = {
-        "public_actions",
-        "public_evidence_refs",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected_fields:
-        reject("discourse plan fields do not match the contract")
-    references = payload["public_evidence_refs"]
-    if not isinstance(references, list):
-        reject("public_evidence_refs must be an array")
-    if len(references) > MAX_PUBLIC_EVIDENCE_REFS:
-        reject("public_evidence_refs exceeds the maximum of 3")
-    if any(isinstance(ref, bool) or not isinstance(ref, int) for ref in references):
-        reject("public_evidence_refs must contain integer event indices")
-    if len(references) != len(set(references)):
-        reject("public_evidence_refs cannot contain duplicates")
-    allowed_indices = set(public_event_indices)
-    unknown = [ref for ref in references if ref not in allowed_indices]
-    if unknown:
-        reject(f"public_evidence_refs are not causal public events: {unknown}")
-    public_plan = validate_public_speech_plan(
-        {"public_actions": payload["public_actions"]},
-        suggestible_player_ids=suggestible_player_ids,
-        player_id=player_id,
-        speaker_role=speaker_role,
-        phase=phase,
-        game_context=game_context,
-    )
-    return DiscoursePublicSpeechPlan(
-        public_plan=public_plan,
-        public_evidence_refs=tuple(references),
-    )
 
 
 _CHINESE_PLAYER_NUMBERS = {
@@ -564,32 +273,12 @@ def _extract_explicit_player_references(content, *, speaker_id, context):
     return referenced_players
 
 
-def public_evidence_player_ids(selected_public_evidence):
-    """Extract explicit player IDs from validated canonical public events."""
-
-    evidence_text = json.dumps(
-        selected_public_evidence,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return frozenset(
-        _extract_explicit_player_references(
-            evidence_text,
-            speaker_id=None,
-            context="selected public evidence",
-        )
-    )
-
-
 def validate_gameplay_public_speech(
     content,
     *,
     finish_reason=None,
     player_id=None,
     phase=None,
-    planned_player_ids=None,
-    additional_allowed_player_ids=None,
 ):
     """Validate only high-confidence gameplay speech failures."""
 
@@ -603,7 +292,7 @@ def validate_gameplay_public_speech(
             f"truncated gameplay public speech ({context})"
         )
 
-    referenced_players = _extract_explicit_player_references(
+    _extract_explicit_player_references(
         content,
         speaker_id=player_id,
         context=context,
@@ -615,10 +304,18 @@ def validate_gameplay_public_speech(
             f"structured gameplay public speech output ({context})"
         )
     forbidden_control_text = (
+        "GAME / ROLE",
+        "KNOWN INFORMATION",
+        "AUTHORITATIVE INFORMATION",
+        "PUBLIC CONVERSATION",
+        "CURRENT PRIVATE BELIEF",
+        "FRESH PRIVATE BELIEF",
+        "BELIEF OUTPUT",
+        "Environment authoritative public state",
+        "Authoritative public history (chronological)",
+        "Private facts legally visible to this player",
+        "Actual role supplied by the Environment",
         "【权威公共状态】",
-        "【你合法知道的私有信息】",
-        "【所有玩家此前的公开主张】",
-        "【公开发言要求】",
         "system prompt",
         "系统提示词",
         "current_act_idx",
@@ -629,23 +326,6 @@ def validate_gameplay_public_speech(
         raise GameplaySpeechQualityError(
             f"internal control text in gameplay public speech ({context})"
         )
-    if (
-        planned_player_ids is not None
-        or additional_allowed_player_ids is not None
-    ):
-        planned = set(planned_player_ids or ())
-        additional_allowed = set(additional_allowed_player_ids or ())
-        allowed = planned | additional_allowed | {player_id}
-        unexpected = referenced_players - allowed
-        if unexpected:
-            raise GameplaySpeechQualityError(
-                f"unplanned player reference(s) {sorted(unexpected)} ({context})"
-            )
-        missing = planned - referenced_players
-        if missing:
-            raise GameplaySpeechQualityError(
-                f"planned player reference(s) missing {sorted(missing)} ({context})"
-            )
     return content
 
 class LLMAgent(Agent):
@@ -677,7 +357,6 @@ class LLMAgent(Agent):
         if gameplay_prompt_profile not in {
             LEGACY_GAMEPLAY_PROMPT_PROFILE,
             STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-            STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
         }:
             raise ValueError(
                 "unsupported gameplay_prompt_profile: "
@@ -915,7 +594,6 @@ class LLMAgent(Agent):
         self,
         observation,
         *,
-        suggestible_player_ids=None,
         action_candidates=None,
     ):
         phase = observation['phase']
@@ -938,7 +616,13 @@ class LLMAgent(Agent):
                     if action_candidates is not None
                     else CON.skill_prompt
                 )
-                prompt = template.format(game_description=CON.game_description,
+                game_description = (
+                    STRICT_CLASSIC7_GAME_DESCRIPTION
+                    if self.gameplay_prompt_profile
+                    == STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+                    else CON.game_description
+                )
+                prompt = template.format(game_description=game_description,
                                          player_identity_info=identity_info, logs=logs,
                                          valid_actions=valid_actions_str)
             else:
@@ -947,37 +631,17 @@ class LLMAgent(Agent):
                                                 valid_actions=valid_actions_str)
         elif 'speech' in phase:
             identity = observation['identity']
-            if self.gameplay_prompt_profile in {
-                STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
-                STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE,
-            }:
-                if self.gameplay_prompt_profile == (
-                    STRICT_CLASSIC7_DISCOURSE_GAMEPLAY_PROMPT_PROFILE
-                ):
-                    prompt = build_strict_classic7_discourse_speech_plan_prompt(
-                        observation,
-                        suggestible_player_ids=suggestible_player_ids,
-                        public_events=observation["canonical_public_events"],
-                    )
-                else:
-                    prompt = (
-                        build_strict_classic7_speech_plan_prompt(
-                            observation,
-                            suggestible_player_ids=suggestible_player_ids,
-                        )
-                    )
-            else:
-                identity_info = CON.player_identity_info.format(
-                    player_idx=observation['current_act_idx'],
-                    identity=CON.identity_chinese[identity],
-                    identity_ability=CON.identity_abilities[identity],
-                )
-                logs = self.format_log(observation['game_log'])
-                prompt = CON.speech_prompt.format(
-                    game_description=CON.game_description,
-                    player_identity_info=identity_info,
-                    logs=logs,
-                )
+            identity_info = CON.player_identity_info.format(
+                player_idx=observation['current_act_idx'],
+                identity=CON.identity_chinese[identity],
+                identity_ability=CON.identity_abilities[identity],
+            )
+            logs = self.format_log(observation['game_log'])
+            prompt = CON.speech_prompt.format(
+                game_description=CON.game_description,
+                player_identity_info=identity_info,
+                logs=logs,
+            )
         else:
             raise ValueError
         return prompt
@@ -1076,19 +740,6 @@ class LLMAgent(Agent):
 
         return logs
 
-    def _normalize_vote_target_value(self, value):
-        if isinstance(value, int):
-            return value if value >= 0 else None
-
-        text = str(value).strip().strip("\"'")
-        if text.lower() in ("否", "弃票", "不投", "不投票", "abstain", "0"):
-            return 0
-
-        match = re.search(r'\d+', text)
-        if match:
-            return int(match.group(0))
-        return None
-
     def _extract_json_like(self, raw_text):
         text = str(raw_text).strip().strip("- ").strip()
         fenced = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
@@ -1132,7 +783,10 @@ class LLMAgent(Agent):
                 f"(phase={phase!r}, response={raw_response!r})"
             )
 
-        payload = self._extract_json_like(raw_response)
+        try:
+            payload = json.loads(raw_response)
+        except (TypeError, json.JSONDecodeError):
+            reject("response must be strict JSON")
         if not isinstance(payload, dict):
             reject("root must be an object")
         if set(payload) != {"action_index"}:
@@ -1154,6 +808,19 @@ class LLMAgent(Agent):
         if matched_action != selected_action:
             reject("selected action failed authoritative membership")
         return matched_action, env_action
+
+    def _normalize_vote_target_value(self, value):
+        if isinstance(value, int):
+            return value if value >= 0 else None
+
+        text = str(value).strip().strip("\"'")
+        if text.lower() in ("否", "弃票", "不投", "不投票", "abstain", "0"):
+            return 0
+
+        match = re.search(r'\d+', text)
+        if match:
+            return int(match.group(0))
+        return None
 
     def parse_vote_target(self, raw_action):
         if raw_action is None:
@@ -1180,7 +847,6 @@ class LLMAgent(Agent):
     def choose_fallback_vote(self, observation, self_player_id=None):
         if self_player_id is None:
             self_player_id = observation.get("current_act_idx")
-
         positive_candidates = []
         non_self_candidates = []
         for action_name, target in observation.get("valid_action", observation.get("valid_actions", [])):
@@ -1207,7 +873,8 @@ class LLMAgent(Agent):
             return fallback_action
 
         non_abstain_actions = [
-            action for action in valid_action
+            action
+            for action in valid_action
             if self.parse_vote_target(action) not in (None, 0)
         ]
         if non_abstain_actions:
@@ -1218,21 +885,26 @@ class LLMAgent(Agent):
             return abstain_action
         return valid_action[0] if valid_action else abstain_action
 
-    def parse_vote_action(self, raw_action, observation, valid_action):
-        cleaned_action = str(raw_action).strip().strip("- ")
-        if cleaned_action in valid_action:
-            return cleaned_action
-
-        vote_target = self.parse_vote_target(cleaned_action)
-        if vote_target is None:
-            return None
-
-        action = self.vote_target_to_action_str(vote_target)
-        if action in valid_action:
-            return action
-        if vote_target == 0:
-            return self.choose_fallback_vote_action(observation, valid_action)
-        return None
+    def freeze_legal_vote_candidates(self, valid_actions, *, phase):
+        expected_action = "vote_pk" if "vote_pk" in phase else "vote"
+        candidates = []
+        seen_targets = set()
+        for action_type, target in valid_actions:
+            if action_type != expected_action or isinstance(target, bool):
+                continue
+            if not isinstance(target, int) or not 0 <= target <= 7:
+                continue
+            if target in seen_targets:
+                raise GameplayActionValidationError(
+                    f"duplicate authoritative vote target {target} (phase={phase!r})"
+                )
+            seen_targets.add(target)
+            candidates.append((target, (action_type, target)))
+        if not candidates:
+            raise GameplayActionValidationError(
+                f"no legal vote candidates (phase={phase!r})"
+            )
+        return tuple(candidates)
 
     def freeze_authoritative_action_candidates(self, valid_actions):
         self.get_valid_actions_str(valid_actions)

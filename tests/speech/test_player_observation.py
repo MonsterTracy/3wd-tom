@@ -3,7 +3,7 @@ import unittest
 
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.prompt_template_v0 import (
-    build_strict_classic7_speech_plan_prompt,
+    build_belief_prompt,
 )
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
@@ -95,6 +95,37 @@ class PlayerObservationTest(unittest.TestCase):
             0,
         )
 
+    def test_werewolf_night_candidates_exclude_wolves(self):
+        observation = self.env.get_observation_for(1)
+
+        self.assertEqual(
+            observation["valid_action"],
+            [
+                ("kill", 0),
+                ("kill", 3),
+                ("kill", 4),
+                ("kill", 5),
+                ("kill", 6),
+                ("kill", 7),
+            ],
+        )
+        self.assertNotIn(("kill", 1), observation["valid_action"])
+        self.assertNotIn(("kill", 2), observation["valid_action"])
+
+    def test_witch_night_candidates_cover_pass_poison_and_legal_heal(self):
+        self.env.phase = "skill_witch"
+        self.env.current_act_idx = self.env.WITCH_IDX
+        self.env.werewolf_kill_decision["0_night_skill_wolf"] = 4
+
+        observation = self.env.get_observation_for(4)
+
+        self.assertEqual(observation["valid_action"][0], ("witch_pass", 0))
+        self.assertEqual(
+            observation["valid_action"][1:8],
+            [("witch_poison", player_id) for player_id in range(1, 8)],
+        )
+        self.assertEqual(observation["valid_action"][8], ("witch_heal", 5))
+
     def test_normal_vote_candidates_are_alive_and_non_self(self):
         self.env.phase = "vote"
         self.env.day = 1
@@ -115,7 +146,7 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 3, 4],
         )
 
-    def test_normal_vote_parser_and_environment_reject_self_vote(self):
+    def test_normal_vote_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -123,15 +154,17 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.alive = [1, 1, 1, 1, 0, 0, 0]
         observation = self.env.get_observation_for(2)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '2'}",
-                observation,
-                valid_actions,
-            )
+        self.assertEqual(
+            agent.freeze_legal_vote_candidates(
+                observation["valid_action"],
+                phase=observation["phase"],
+            ),
+            (
+                (0, ("vote", 0)),
+                (1, ("vote", 1)),
+                (3, ("vote", 3)),
+                (4, ("vote", 4)),
+            ),
         )
         with self.assertRaisesRegex(ValueError, "invalid normal vote action"):
             self.env.step(("vote", 2))
@@ -164,7 +197,7 @@ class PlayerObservationTest(unittest.TestCase):
                 )
                 self.assertEqual(self.env.vote_pk_players, [5, 6, 0, 2])
 
-    def test_vote_pk_parser_and_environment_reject_self_vote(self):
+    def test_vote_pk_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote_pk"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -173,23 +206,17 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.vote_pk_players = [5, 6, 0, 2]
         observation = self.env.get_observation_for(3)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '3'}",
-                observation,
-                valid_actions,
-            )
-        )
         self.assertEqual(
-            agent.parse_vote_action(
-                "{'投票': '6'}",
-                observation,
-                valid_actions,
+            agent.freeze_legal_vote_candidates(
+                observation["valid_action"],
+                phase=observation["phase"],
             ),
-            "{'投票': '6'}",
+            (
+                (0, ("vote_pk", 0)),
+                (6, ("vote_pk", 6)),
+                (7, ("vote_pk", 7)),
+                (1, ("vote_pk", 1)),
+            ),
         )
         with self.assertRaisesRegex(ValueError, "invalid PK vote action"):
             self.env.step(("vote_pk", 3))
@@ -352,14 +379,9 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 5, 6, 7],
         )
 
-        prompt = LLMAgent(
-            gameplay_prompt_profile="strict_classic7"
-        ).format_observation(
-            observations[0],
-            suggestible_player_ids=(1, 5, 6, 7),
-        )
+        prompt = build_belief_prompt(observations[0])
         before_private, remainder = prompt.split(
-            "【你合法知道的私有信息】",
+            "Private facts legally visible to this player:",
             1,
         )
         authoritative = before_private.split(
@@ -383,12 +405,12 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("player0", prompt)
         self.assertNotIn("狼人", authoritative)
         self.assertNotIn("查验", authoritative)
-        self.assertIn("【所有玩家此前的公开主张】", remainder)
+        self.assertIn("PUBLIC CONVERSATION", remainder)
         self.assertIn(
             "player5：player1 已死亡，player3 仍存活，应该投 player4。",
             remainder,
         )
-        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
+        self.assertIn("truthful, deceptive, mistaken or strategic", remainder)
 
     def test_invalid_player_id_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -431,14 +453,7 @@ class PlayerObservationTest(unittest.TestCase):
                 seer_observation["game_log"]
             ),
         )
-        strict_rules = build_strict_classic7_speech_plan_prompt(
-            seer_observation,
-            suggestible_player_ids=tuple(
-                seer_observation["authoritative_public_state"][
-                    "suggestible_exile_targets"
-                ]
-            ),
-        )
+        strict_rules = build_belief_prompt(seer_observation)
         self.assertIn("(尚无已完成查验)", strict_rules)
 
     def test_seer_candidates_exclude_self_and_keep_other_alive_players(self):
@@ -502,14 +517,7 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("0号", formatted)
         self.assertIn(
             "player4=好人",
-            build_strict_classic7_speech_plan_prompt(
-                seer_observation,
-                suggestible_player_ids=tuple(
-                    seer_observation["authoritative_public_state"][
-                        "suggestible_exile_targets"
-                    ]
-                ),
-            ),
+            build_belief_prompt(seer_observation),
         )
 
 

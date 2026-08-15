@@ -8,9 +8,7 @@ import json
 
 from werewolf.helper.log_utils import Log
 from werewolf.speech.speech_perceiver import (
-    PlannedPublicSpeech,
     SpeechPerceiver,
-    validate_public_speech_semantic_alignment,
 )
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.models.twd_tom.public_events import normalize_public_event
@@ -348,10 +346,6 @@ class WerewolfTextEnvV0(gym.Env):
             reward, done, info = self.end_night()
         elif self.phase == 'speech' or self.phase == 'speech_pk':
             assert action_type == 'speech' or action_type == 'speech_pk'
-            accepted_public_actions = None
-            if isinstance(action_content, PlannedPublicSpeech):
-                accepted_public_actions = action_content.accepted_public_actions
-                action_content = str(action_content)
             try:
                 sp_actions = self.speech_perceiver.parse(
                     speaker=self.current_act_idx + 1,
@@ -364,13 +358,6 @@ class WerewolfTextEnvV0(gym.Env):
 
             if not isinstance(sp_actions, list):
                 sp_actions = []
-
-            if accepted_public_actions is not None:
-                validate_public_speech_semantic_alignment(
-                    accepted_public_actions,
-                    sp_actions,
-                    actual_speaker=self.current_act_idx + 1,
-                )
 
             self.game_log.append(
                 Log(

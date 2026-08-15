@@ -278,12 +278,22 @@ def test_gameplay_limit_and_finish_reason_are_audited(
     )
 
 
-def test_strict_plan_and_renderer_are_two_distinguishable_gameplay_calls(
+def test_strict_belief_and_speech_are_two_distinguishable_gameplay_calls(
     tmp_path,
 ):
     session, writer = _new_session(tmp_path)
     fake = FakeBackend(
-        responses=['{"public_actions":[]}', "我继续听大家发言。"],
+        responses=[
+            json.dumps({
+                "belief": "当前信息有限。",
+                "concise": "继续观察。",
+                "roles": {
+                    f"player{player_id}": "unknown"
+                    for player_id in range(2, 8)
+                },
+            }, ensure_ascii=False),
+            "我继续听大家发言。",
+        ],
         usage={"finish_reason": "stop"},
         supports_json_schema=True,
     )
