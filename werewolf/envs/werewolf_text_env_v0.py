@@ -234,7 +234,6 @@ class WerewolfTextEnvV0(gym.Env):
             assert type(action_content) == int and -1 <= action_content < self.n_player 
             if action_content >= 0:
                 assert self.alive[action_content] == 1
-                assert action_content not in self.WOLF_IDX
 
             self.single_werewolf_kill_target[self.WOLF_IDX.index(self.current_act_idx)][
                 self.get_phase(self.day, self.day_or_night, self.phase)] = action_content
@@ -672,7 +671,7 @@ class WerewolfTextEnvV0(gym.Env):
             valid_action = [('kill', -1)] + [
                 ('kill', idx)
                 for idx, is_live in enumerate(self.alive)
-                if is_live == 1 and idx not in self.WOLF_IDX
+                if is_live == 1
             ]
 
         elif self.phase == 'skill_seer':

@@ -42,6 +42,28 @@ class VotePromptConsistencyTest(unittest.TestCase):
             self.assertNotIn(forbidden, prompt)
 
 
+class WerewolfNightRulePromptTest(unittest.TestCase):
+    def test_prompt_states_any_alive_player_is_a_legal_target(self):
+        agent = LLMAgent()
+        observation = {
+            "phase": "0_night_skill_wolf",
+            "identity": "Werewolf",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": [("kill", target) for target in range(8)],
+        }
+        candidates = agent.freeze_authoritative_action_candidates(
+            observation["valid_action"]
+        )
+        prompt = agent.format_observation(
+            observation,
+            action_candidates=candidates,
+        )
+
+        self.assertIn("每晚可选择任意一名存活玩家作为猎杀目标", prompt)
+        self.assertNotIn("每晚选择一个村民猎杀", prompt)
+
+
 
 def _speech_observation(*, identity="Seer", game_log=None):
     return {

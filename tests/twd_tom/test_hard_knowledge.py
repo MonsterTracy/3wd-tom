@@ -1,5 +1,6 @@
 import pytest
 
+from werewolf.agents.llm_agent import LLMAgent
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 
 
@@ -13,11 +14,60 @@ ROLES = [
     "Villager",
 ]
 
+WOLF_TARGET_ROLES = [
+    "Werewolf",
+    "Seer",
+    "Witch",
+    "Werewolf",
+    "Villager",
+    "Villager",
+    "Villager",
+]
+
 
 def _env():
     env = WerewolfTextEnvV0(log_save_path=None)
     env.reset(roles=ROLES)
     return env
+
+
+def _wolf_target_env():
+    env = WerewolfTextEnvV0(log_save_path=None)
+    env.reset(roles=WOLF_TARGET_ROLES)
+    return env
+
+
+def _select_indexed_wolf_action(env, target):
+    observation = env.get_observation()
+    agent = LLMAgent()
+    snapshot = agent.freeze_authoritative_action_candidates(
+        observation["valid_action"]
+    )
+    action_index = next(
+        index
+        for index, (_display, action) in enumerate(snapshot)
+        if action == ("kill", target)
+    )
+    _display, action = agent.parse_night_action_selection(
+        f'{{"action_index": {action_index}}}',
+        snapshot,
+        phase=observation["phase"],
+    )
+    return snapshot, action
+
+
+def _finish_wolf_choices(env, first_target, second_target):
+    _first_snapshot, first_action = _select_indexed_wolf_action(
+        env,
+        first_target,
+    )
+    env.step(first_action)
+    _second_snapshot, second_action = _select_indexed_wolf_action(
+        env,
+        second_target,
+    )
+    env.step(second_action)
+    return env.get_phase(0, "night", "skill_wolf")
 
 
 def test_villager_and_werewolf_hard_knowledge():
@@ -166,10 +216,66 @@ def test_death_log_does_not_add_identity_knowledge():
     )
 
 
-def test_wolves_cannot_target_themselves_or_teammate():
-    env = _env()
+def test_wolf_candidates_include_every_alive_player_and_snapshot_order():
+    env = _wolf_target_env()
+    observation = env.get_observation_for(1)
+    assert observation["valid_action"] == [
+        ("kill", target)
+        for target in range(8)
+    ]
+
+    agent = LLMAgent()
+    snapshot = agent.freeze_authoritative_action_candidates(
+        observation["valid_action"]
+    )
+    assert [action for _display, action in snapshot] == observation[
+        "valid_action"
+    ]
+    for action_index in (0, 1, 4, 7):
+        _display, action = agent.parse_night_action_selection(
+            f'{{"action_index": {action_index}}}',
+            snapshot,
+            phase=observation["phase"],
+        )
+        assert action == observation["valid_action"][action_index]
+
+
+def test_wolf_self_target_executes_through_indexed_action_path():
+    env = _wolf_target_env()
+    phase_id = _finish_wolf_choices(env, 1, 1)
+    assert env.single_werewolf_kill_target[0][phase_id] == 0
+    assert env.werewolf_kill_decision[phase_id] == 0
+
+    env.step(("check", 0))
+    env.step(("witch_pass", 0))
+    assert env.alive[0] == 0
+
+
+def test_wolf_teammate_target_executes_through_indexed_action_path():
+    env = _wolf_target_env()
+    phase_id = _finish_wolf_choices(env, 4, 4)
+    assert env.single_werewolf_kill_target[0][phase_id] == 3
+    assert env.werewolf_kill_decision[phase_id] == 3
+
+    env.step(("check", 0))
+    env.step(("witch_pass", 0))
+    assert env.alive[3] == 0
+
+
+def test_normal_non_wolf_target_and_existing_team_resolution_are_unchanged():
+    env = _wolf_target_env()
+    phase_id = _finish_wolf_choices(env, 5, 5)
+    assert env.werewolf_kill_decision[phase_id] == 4
+
+    env = _wolf_target_env()
+    phase_id = _finish_wolf_choices(env, 5, 6)
+    assert env.werewolf_kill_decision[phase_id] == 5
+
+
+def test_dead_player_remains_illegal_wolf_target():
+    env = _wolf_target_env()
+    env.alive[4] = 0
     valid = env.get_observation_for(1)["valid_action"]
-    assert ("kill", 1) not in valid
-    assert ("kill", 2) not in valid
+    assert ("kill", 5) not in valid
     with pytest.raises(AssertionError):
-        env.step(("kill", 2))
+        env.step(("kill", 5))
