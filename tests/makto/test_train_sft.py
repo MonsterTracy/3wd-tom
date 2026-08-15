@@ -276,8 +276,10 @@ def test_lora_target_discovery_accepts_only_language_linear4bit_modules():
 
 
 class FakeAdapterModel(torch.nn.Module):
-    def __init__(self, *, unsafe=False):
+    def __init__(self, *, unsafe=False, parameter_counts=(123, 1000)):
         super().__init__()
+        self.parameter_counts = parameter_counts
+        self.parameter_count_calls = 0
         self.model = torch.nn.Module()
         self.model.language_model = torch.nn.Module()
         self.model.language_model.block = torch.nn.Module()
@@ -289,13 +291,18 @@ class FakeAdapterModel(torch.nn.Module):
             requires_grad=unsafe,
         )
 
+    def get_nb_trainable_parameters(self):
+        self.parameter_count_calls += 1
+        return self.parameter_counts
+
 
 def test_trainable_parameters_must_be_language_lora_only():
     safe = FakeAdapterModel()
     stats = assert_only_lora_trainable(safe, "model.language_model")
-    assert stats["trainable_params"] == 4
-    assert stats["all_params"] == 8
-    assert stats["trainable_percent"] == 50.0
+    assert stats["trainable_params"] == 123
+    assert stats["all_params"] == 1000
+    assert stats["trainable_percent"] == 12.3
+    assert safe.parameter_count_calls == 1
 
     unsafe = FakeAdapterModel(unsafe=True)
     with pytest.raises(TrainingContractError, match="non-LoRA parameter"):

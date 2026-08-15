@@ -401,12 +401,12 @@ def assert_only_lora_trainable(
                 f"forbidden trainable parameter {name}: {forbidden}"
             )
 
-    trainable_params = sum(
-        parameter.numel()
-        for parameter in model.parameters()
-        if parameter.requires_grad
-    )
-    all_params = sum(parameter.numel() for parameter in model.parameters())
+    get_parameter_counts = getattr(model, "get_nb_trainable_parameters", None)
+    if not callable(get_parameter_counts):
+        raise TrainingContractError(
+            "PEFT model must provide get_nb_trainable_parameters()"
+        )
+    trainable_params, all_params = get_parameter_counts()
     if all_params <= 0:
         raise TrainingContractError("model has no parameters")
     return {
