@@ -255,7 +255,7 @@ class AgentBackendTest(unittest.TestCase):
             ),
             (
                 "vote",
-                "{'投票': '2'}",
+                '{"action_index":0}',
                 {
                     "phase": "1_day_vote",
                     "identity": "Villager",
@@ -271,9 +271,11 @@ class AgentBackendTest(unittest.TestCase):
             with self.subTest(name=name):
                 backend = (
                     MetadataBackend([response])
-                    if name == "speech"
+                    if name in {"speech", "vote"}
                     else RecordingBackend([response])
                 )
+                if name == "vote":
+                    backend.supports_json_schema = True
                 agent = GPTAgent(
                     backend=backend,
                     model_name="agent-model",
@@ -305,60 +307,194 @@ class AgentBackendTest(unittest.TestCase):
                         {"chat_template_kwargs": {"enable_thinking": False}},
                     )
 
-    def test_vote_retries_three_times_then_keeps_existing_fallback(self):
-        backend = RecordingBackend(["bad", "still bad", "also bad"])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            temperature=0.6,
-            gameplay_max_tokens=512,
+    def test_vote_action_index_maps_first_middle_and_last_candidates(self):
+        valid_actions = [
+            ("vote", 0),
+            ("vote", 2),
+            ("vote", 4),
+            ("vote", 7),
+        ]
+        for action_index, expected in ((0, valid_actions[0]), (2, valid_actions[2]), (3, valid_actions[3])):
+            with self.subTest(action_index=action_index):
+                backend = MetadataBackend([
+                    json.dumps({"action_index": action_index})
+                ])
+                backend.supports_json_schema = True
+                agent = GPTAgent(
+                    backend=backend,
+                    model_name="agent-model",
+                    temperature=0.6,
+                    gameplay_max_tokens=512,
+                )
+                agent.rate_limit = 0
+                observation = {
+                    "phase": "1_day_vote",
+                    "identity": "Villager",
+                    "current_act_idx": 1,
+                    "game_log": [],
+                    "valid_action": valid_actions,
+                }
+
+                self.assertEqual(agent.act(observation), expected)
+                self.assertEqual(len(backend.calls), 1)
+                request = backend.calls[0]
+                self.assertEqual(request["temperature"], 0.6)
+                self.assertEqual(request["max_tokens"], 512)
+                self.assertEqual(
+                    request["response_format"]["json_schema"]["name"],
+                    "vote_action_selection",
+                )
+                schema = request["response_format"]["json_schema"]["schema"]
+                self.assertEqual(
+                    schema["properties"]["action_index"]["enum"],
+                    list(range(len(valid_actions))),
+                )
+                prompt = request["messages"][0]["content"]
+                for index, expected_line in enumerate((
+                    "abstain",
+                    "vote player2",
+                    "vote player4",
+                    "vote player7",
+                )):
+                    self.assertIn(f"{index}: {expected_line}", prompt)
+                self.assertIn('{"action_index": <编号>}', prompt)
+                self.assertNotIn("投票玩家", prompt)
+                self.assertNotIn("投票原因", prompt)
+
+    def test_invalid_vote_response_fails_once_without_retry_or_fallback(self):
+        invalid_responses = (
+            "{}",
+            '{"action_index":-1}',
+            '{"action_index":2}',
+            '{"action_index":true}',
+            '{"action_index":"1"}',
+            '{"action_index":0,"extra":1}',
+            "[]",
+            "not json",
+            "{'action_index': 0}",
+            '```json\n{"action_index":0}\n```',
+            '{"投票玩家":"2"}',
+            '{"投票":"2"}',
         )
+        for response in invalid_responses:
+            with self.subTest(response=response):
+                backend = MetadataBackend([response])
+                backend.supports_json_schema = True
+                agent = GPTAgent(backend=backend, model_name="agent-model")
+                agent.rate_limit = 0
+
+                with self.assertRaisesRegex(
+                    GameplayActionValidationError,
+                    "invalid vote action selection",
+                ):
+                    agent.act({
+                        "phase": "1_day_vote_pk",
+                        "identity": "Villager",
+                        "current_act_idx": 1,
+                        "game_log": [],
+                        "valid_action": [("vote_pk", 0), ("vote_pk", 3)],
+                    })
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_vote_backend_failure_is_explicit_and_not_retried(self):
+        backend = MetadataBackend([BackendError("vote unavailable")])
+        backend.supports_json_schema = True
+        agent = GPTAgent(backend=backend, model_name="agent-model")
         agent.rate_limit = 0
-        fallback_calls = []
-        agent.choose_fallback_vote_action = lambda *_args: (
-            fallback_calls.append(True) or "{'投票': '2'}"
-        )
+
+        with self.assertRaisesRegex(BackendError, "vote unavailable"):
+            agent.act({
+                "phase": "1_day_vote",
+                "identity": "Villager",
+                "current_act_idx": 1,
+                "game_log": [],
+                "valid_action": [("vote", 0), ("vote", 2)],
+            })
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_abstain_exists_only_when_authoritative_candidates_include_it(self):
+        agent = GPTAgent()
+        with_abstain = agent.freeze_authoritative_vote_candidates([
+            ("vote", 0),
+            ("vote", 2),
+        ])
+        without_abstain = agent.freeze_authoritative_vote_candidates([
+            ("vote_pk", 3),
+            ("vote_pk", 5),
+        ])
+
+        self.assertEqual(with_abstain[0], ("abstain", ("vote", 0)))
+        self.assertNotIn("abstain", [display for display, _ in without_abstain])
+
+    def test_vote_requires_backend_model_schema_and_fresh_metadata(self):
         observation = {
             "phase": "1_day_vote",
             "identity": "Villager",
             "current_act_idx": 1,
             "game_log": [],
-            "valid_action": [("vote", 2), ("vote", 3)],
+            "valid_action": [("vote", 0), ("vote", 2)],
         }
-
-        self.assertEqual(agent.act(observation), ("vote", 2))
-        self.assertEqual(len(backend.calls), 3)
-        self.assertEqual(fallback_calls, [True])
-        for call in backend.calls:
-            self.assertEqual(call["temperature"], 0.6)
-            self.assertEqual(call["max_tokens"], 512)
-            self.assertEqual(
-                call["extra_body"],
-                {
-                    "chat_template_kwargs": {
-                        "enable_thinking": False,
-                    }
-                },
-            )
-
-    def test_invalid_vote_response_retries_then_accepts_valid_response(self):
-        backend = RecordingBackend(["bad", "{'投票': '3'}"])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_max_tokens=512,
+        cases = (
+            (None, "agent-model", "backend and model_name are required"),
+            (MetadataBackend(['{"action_index":0}']), None, "backend and model_name are required"),
+            (MetadataBackend(['{"action_index":0}']), "agent-model", "require backend JSON Schema support"),
         )
+        for backend, model_name, error in cases:
+            with self.subTest(error=error):
+                agent = GPTAgent(backend=backend, model_name=model_name)
+                agent.rate_limit = 0
+                with self.assertRaisesRegex(BackendError, error):
+                    agent.act(observation)
+                if backend is not None:
+                    self.assertEqual(backend.calls, [])
+
+        backend = MetadataBackend(
+            ['{"action_index":0}'],
+            metadata=[{"finish_reason": "length"}],
+        )
+        backend.supports_json_schema = True
+        agent = GPTAgent(backend=backend, model_name="agent-model")
         agent.rate_limit = 0
-        observation = {
+        with self.assertRaisesRegex(
+            GameplayActionValidationError,
+            "vote action response was truncated",
+        ):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_twdm_vote_uses_the_same_single_indexed_call(self):
+        backend = MetadataBackend(['{"action_index":2}'])
+        backend.supports_json_schema = True
+        agent = TWDMStrategyAgent(
+            backend=backend,
+            model_name="twdm-model",
+            gameplay_max_tokens=256,
+        )
+
+        action = agent.act({
             "phase": "1_day_vote_pk",
-            "identity": "Villager",
+            "identity": "Werewolf",
             "current_act_idx": 1,
             "game_log": [],
-            "valid_action": [("vote_pk", 2), ("vote_pk", 3)],
-        }
+            "valid_action": [
+                ("vote_pk", 0),
+                ("vote_pk", 3),
+                ("vote_pk", 6),
+            ],
+        })
 
-        self.assertEqual(agent.act(observation), ("vote_pk", 3))
-        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(action, ("vote_pk", 6))
+        self.assertEqual(len(backend.calls), 1)
+        request = backend.calls[0]
+        self.assertEqual(request["model"], "twdm-model")
+        self.assertEqual(request["max_tokens"], 256)
+        self.assertEqual(
+            request["response_format"]["json_schema"]["name"],
+            "vote_action_selection",
+        )
+        prompt = request["messages"][0]["content"]
+        self.assertIn("2: vote_pk player6", prompt)
+        self.assertNotIn("投票原因", prompt)
 
     def test_v25_structural_matcher_remains_the_membership_boundary(self):
         agent = GPTAgent()

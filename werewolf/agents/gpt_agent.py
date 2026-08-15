@@ -36,6 +36,7 @@ class GPTAgent(LLMAgent):
             night_phase in phase
             for night_phase in _CONSTRAINED_NIGHT_PHASES
         )
+        is_vote = "vote" in phase
         night_candidate_snapshot = None
         if is_constrained_night_action:
             night_candidate_snapshot = (
@@ -43,11 +44,14 @@ class GPTAgent(LLMAgent):
                     observation["valid_action"]
                 )
             )
-        prompt = self.format_observation(
-            observation,
-            action_candidates=night_candidate_snapshot,
-        )
-        valid_action = list(self.nlp_action_to_env_action.keys())  
+        prompt = None
+        valid_action = []
+        if not is_vote:
+            prompt = self.format_observation(
+                observation,
+                action_candidates=night_candidate_snapshot,
+            )
+            valid_action = list(self.nlp_action_to_env_action.keys())
         time.sleep(self.rate_limit)
         is_o1 = self.model_name is not None and "o1" in self.model_name
         request_temperature = None if is_o1 else self.temperature
@@ -78,6 +82,25 @@ class GPTAgent(LLMAgent):
             )
             checked_action = raw_action
             env_action = ('speech', checked_action)
+        elif is_vote:
+            env_action, generation_info = self.generate_indexed_vote_action(
+                observation,
+                temperature=request_temperature,
+                max_tokens=request_max_tokens,
+            )
+            if self.has_log:
+                self.logger.info(
+                    phase,
+                    extra={
+                        "prompt": generation_info["prompt"],
+                        "response": generation_info["response"],
+                        "action": generation_info["action"],
+                        "player_id": observation['current_act_idx'],
+                        "role": observation['identity'],
+                        "phase": phase,
+                        "gen_times": 0,
+                    },
+                )
         else: 
             retry_count = 0
             raw_action = None
@@ -87,14 +110,9 @@ class GPTAgent(LLMAgent):
                 while action not in valid_action:
                     retry_count += 1
                     if retry_count > 3:
-                        if "vote" in phase:
-                            raw_action = self.choose_fallback_vote_action(observation, valid_action)
-                        else:
-                            raise GameplayActionValidationError(
-                                "night action response was not resolved"
-                            )
-                        action = raw_action
-                        break
+                        raise GameplayActionValidationError(
+                            "night action response was not resolved"
+                        )
                     messages = [{'role': 'user', 'content': prompt}]
                     if is_constrained_night_action:
                         raw_action, metadata = self._chat_with_metadata(
@@ -122,50 +140,34 @@ class GPTAgent(LLMAgent):
                             )
                         raw_action = raw_action.strip().strip("- ")
                     else:
-                        request_kwargs = {}
-                        if "vote" in phase:
-                            request_kwargs["extra_body"] = {
-                                "chat_template_kwargs": {
-                                    "enable_thinking": False,
-                                }
-                            }
                         raw_action = self._chat(
                             messages,
                             temperature=request_temperature,
                             max_tokens=request_max_tokens,
-                            **request_kwargs,
                         ).strip().strip("- ")
-                    if "vote" in phase:
-                        parsed_vote_action = self.parse_vote_action(raw_action, observation, valid_action)
-                        if parsed_vote_action is not None:
-                            action = parsed_vote_action
-                    else:
-                        if is_constrained_night_action:
-                            action, selected_env_action = (
-                                self.parse_night_action_selection(
-                                    raw_action,
-                                    night_candidate_snapshot,
-                                    phase=phase,
-                                )
-                            )
-                        else:
-                            action = self.match_authoritative_action_response(
+                    if is_constrained_night_action:
+                        action, selected_env_action = (
+                            self.parse_night_action_selection(
                                 raw_action,
-                                valid_action,
+                                night_candidate_snapshot,
+                                phase=phase,
                             )
-                            if action is None:
-                                raise GameplayActionValidationError(
-                                    "invalid gameplay action response "
-                                    f"(phase={phase!r}, response={raw_action!r}, "
-                                    f"authoritative_candidates={valid_action!r})"
-                                )
+                        )
+                    else:
+                        action = self.match_authoritative_action_response(
+                            raw_action,
+                            valid_action,
+                        )
+                        if action is None:
+                            raise GameplayActionValidationError(
+                                "invalid gameplay action response "
+                                f"(phase={phase!r}, response={raw_action!r}, "
+                                f"authoritative_candidates={valid_action!r})"
+                            )
             else:
-                if "vote" in phase:
-                    action = self.choose_fallback_vote_action(observation, valid_action)
-                else:
-                    raise BackendError(
-                        "Agent backend and model_name are required."
-                    )
+                raise BackendError(
+                    "Agent backend and model_name are required."
+                )
             env_action = (
                 selected_env_action
                 if selected_env_action is not None

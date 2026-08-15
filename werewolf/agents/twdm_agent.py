@@ -2,7 +2,6 @@ import random
 import re
 import json
 from werewolf.agents.prompt_template_v0 import CON
-from werewolf.helper.utils import Matcher
 from . import agent_registry as AgentRegistry
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.twdm_strategy import TWDMStrategy
@@ -46,7 +45,6 @@ class TWDMStrategyAgent(LLMAgent):
                          gameplay_max_tokens=gameplay_max_tokens)
         self.twdm_config = twdm_config or {}
         self.strategy = TWDMStrategy(self.twdm_config)
-        self.matcher = Matcher()
         self.notes = {}
         self.n_player = None
         self.alive = []
@@ -217,32 +215,6 @@ class TWDMStrategyAgent(LLMAgent):
                             speech_log_tmp += "**{}号玩家**: 空;\n".format(log.source)
 
         return note_logs, night_log_tmp, night_action_log_tmp, speech_log_tmp
-
-
-    def parse_vote_reponse(self, phase, response_text):
-        day = int(phase.split("_")[0])
-        night_or_action = phase.split("_")[1]
-        note_str = self.matcher.match_note(response_text, output_str=True)
-        self.notes[day] = note_str.strip()
-        vote_reason = self.matcher.match_vote_reason(response_text)
-
-        if "综上" in response_text:
-            conclusion = response_text.split("综上")[-1]
-            match = re.findall(r'\d+', conclusion)
-            if len(match) > 0:
-                output_vote = int(match[0])
-            else:
-                output_vote = -1
-        else:
-            if "弃票" in response_text:
-                output_vote = -1
-            else:
-                match = re.findall(r'\d+', response_text)
-                if len(match) > 0:
-                    output_vote = int(match[-1])
-                else:
-                    output_vote = -1
-        return note_str, vote_reason, output_vote
 
 
 
@@ -506,11 +478,6 @@ class TWDMStrategyAgent(LLMAgent):
                                                  objective_info=objective_info,
                                                  subjective_info=subjective_info,
                                                  your_role=brief_identity_description)
-        elif "vote" in phase:
-            prompt = CON.vote_prompt_v3.format(player_identity_info=identity_info,
-                                               objective_info=objective_info,
-                                               subjective_info=subjective_info,
-                                               your_role=brief_identity_description)
         else:
             raise ValueError("Invalid phase: {}".format(phase))
         return prompt
@@ -582,38 +549,6 @@ class TWDMStrategyAgent(LLMAgent):
                  "gen_times": attempt_number})
 
     @retry(stop=stop_after_attempt(3), before=before_attempts)
-    def _generate_vote(self, observation, messages, valid_action):
-        phase = observation['phase']
-        global attempt_number
-        response_text = self.__api_generate(messages)
-        if "```json" in response_text:
-            response_text = extract_json(response_text)
-        print(response_text)
-        note_str, vote_reason, output_vote = self.parse_note_vote_reason(phase, response_text)
-        if output_vote is None:
-            action = None
-        elif output_vote == 0:
-            action = "{'投票': '否'}"
-        else:
-            action = "{" + f"'投票': '{output_vote}'" + "}"
-        assert action in valid_action
-        assert response_text is not None and vote_reason is not None
-
-        print("我是{}号，我的身份是{}, 当前阶段：{}".format(observation['current_act_idx'],
-                                                          observation['identity'], observation['phase']))
-        print("retry {}, action: {} valid_action: {} response: {}".format(attempt_number, action, valid_action,
-                                                                          response_text))
-        print("vote reason: \n{}".format(vote_reason))
-
-        return (action,
-                {"response": response_text,
-                 "action": action,
-                 "phase": phase,
-                 "note": note_str,
-                 "vote_reason": vote_reason,
-                 "gen_times": attempt_number})
-
-    @retry(stop=stop_after_attempt(3), before=before_attempts)
     def _generate_action(self, observation, messages, valid_action):
         global attempt_number
         raw_action = self.__api_generate(messages)
@@ -641,6 +576,30 @@ class TWDMStrategyAgent(LLMAgent):
                  "gen_times": attempt_number})
 
     def act(self, observation):
+        phase = observation['phase']
+        day = int(phase.split("_")[0])
+        if "vote" in phase:
+            env_action, generation_info = self.generate_indexed_vote_action(
+                observation,
+                temperature=self.temperature,
+                max_tokens=self.gameplay_max_tokens,
+            )
+            self.vote_reason[day] = ""
+            if self.has_log:
+                self.logger.info(
+                    phase,
+                    extra={
+                        "prompt": generation_info["prompt"],
+                        "response": generation_info["response"],
+                        "action": generation_info["action"],
+                        "player_id": observation['current_act_idx'],
+                        "role": observation['identity'],
+                        "phase": phase,
+                        "gen_times": 0,
+                    },
+                )
+            return env_action
+
         system_prompt = self.get_sys_prompt(observation)
         input_prompt = self.format_observation(observation)
         strategy_hint = self.strategy.build_hint(observation)
@@ -648,9 +607,6 @@ class TWDMStrategyAgent(LLMAgent):
             input_prompt = input_prompt + "\n\n" + strategy_hint
         print("\n------ PROMPT (w/o game desc.) ------")
         print(input_prompt)
-        phase = observation['phase']
-        day = int(phase.split("_")[0])
-
         if "speech" in phase:
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -667,33 +623,6 @@ class TWDMStrategyAgent(LLMAgent):
                                         "role": observation['identity'],
                                         "phase": phase,
                                         "gen_times": generation_info.get("gen_times", 0)})
-        elif "vote" in phase:
-            valid_actions_str = self.get_valid_actions_str(observation['valid_action'])
-            valid_action = list(self.nlp_action_to_env_action.keys())
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_prompt.strip()}
-            ]
-            try:
-                action, generation_info = self._generate_vote(observation, messages, valid_action)
-            except RetryError:
-                action = self.choose_fallback_vote_action(observation, valid_action)
-                generation_info = {"response": action,
-                                   "vote_reason": f"超过3次生成投票错误。选择一个合法候选人作为fallback投票。",
-                                   "gen_times": 4}
-            env_action = self.nlp_action_to_env_action[action]
-            self.vote_reason[day] = generation_info.get("vote_reason", "")
-            if self.has_log:
-                self.logger.info(phase,
-                                 extra={"prompt": input_prompt,
-                                        "response": generation_info.get("response", ""),
-                                        "action": action,
-                                        "player_id": observation['current_act_idx'],
-                                        "role": observation['identity'],
-                                        "phase": phase,
-                                        "note": generation_info.get("note", ""),
-                                        "vote_reason": generation_info.get("vote_reason", ""),
-                                        "gen_times": generation_info.get("gen_times", 4)})
         else: 
             valid_actions_str = self.get_valid_actions_str(observation['valid_action'])
             valid_action = list(self.nlp_action_to_env_action.keys())
@@ -764,17 +693,3 @@ class TWDMStrategyAgent(LLMAgent):
             role_labels_str += f"把{player}贴上身份标签：{role}。"
         speech_template = f"展现自己身份为{role_display}。{role_labels_str}。归票：{call_for_vote}。"
         return speech, role_display, role_labels, call_for_vote, speech_template
-
-    def parse_note_vote_reason(self, phase, raw_action):
-        day = int(phase.split("_")[0])
-        content = self._extract_json_like(raw_action)
-        if not isinstance(content, dict):
-            content = {}
-
-        note_str = ""
-        if "笔记" in content:
-            note_str = content["笔记"]
-            self.notes[day] = note_str.strip()
-        vote_reason = content.get("投票原因", "").strip()
-        output_vote = self.parse_vote_target(raw_action)
-        return note_str, vote_reason, output_vote

@@ -2,7 +2,6 @@ import ast
 from copy import copy, deepcopy
 import json
 import logging
-import random
 import re
 from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
@@ -64,6 +63,35 @@ def night_action_response_format(
         "type": "json_schema",
         "json_schema": {
             "name": "night_action_selection",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["action_index"],
+                "properties": {
+                    "action_index": {
+                        "type": "integer",
+                        "enum": list(range(len(candidate_snapshot))),
+                    },
+                },
+            },
+        },
+    }
+
+
+def vote_action_response_format(
+    *, supports_json_schema, candidate_snapshot
+):
+    if supports_json_schema is not True:
+        raise BackendError(
+            "indexed vote actions require backend JSON Schema support"
+        )
+    if not isinstance(candidate_snapshot, tuple) or not candidate_snapshot:
+        raise ValueError("candidate_snapshot must be a non-empty tuple")
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "vote_action_selection",
             "strict": True,
             "schema": {
                 "type": "object",
@@ -437,11 +465,13 @@ class LLMAgent(Agent):
                     action_candidates,
                 )
             identity = observation['identity']
-            identity_info = CON.player_identity_info.format(player_idx=observation['current_act_idx'],
-                                                            identity=CON.identity_chinese[identity],
-                                                            identity_ability=CON.identity_abilities[identity])
             logs = self.format_log(observation['game_log'])
             if 'skill' in phase:
+                identity_info = CON.player_identity_info.format(
+                    player_idx=observation['current_act_idx'],
+                    identity=CON.identity_chinese[identity],
+                    identity_ability=CON.identity_abilities[identity],
+                )
                 template = (
                     CON.constrained_night_skill_prompt
                     if action_candidates is not None
@@ -451,9 +481,18 @@ class LLMAgent(Agent):
                                          player_identity_info=identity_info, logs=logs,
                                          valid_actions=valid_actions_str)
             else:
-                prompt = CON.vote_prompt.format(game_description=CON.game_description,
-                                                player_identity_info=identity_info, logs=logs,
-                                                valid_actions=valid_actions_str)
+                if action_candidates is None:
+                    raise ValueError(
+                        "vote prompt requires authoritative indexed candidates"
+                    )
+                prompt = CON.indexed_vote_prompt.format(
+                    game_description=CON.game_description,
+                    player_idx=observation['current_act_idx'],
+                    identity=CON.identity_chinese[identity],
+                    phase=phase,
+                    logs=logs,
+                    valid_actions=valid_actions_str,
+                )
         elif 'speech' in phase:
             prompt = build_direct_public_speech_prompt(
                 observation,
@@ -557,19 +596,6 @@ class LLMAgent(Agent):
 
         return logs
 
-    def _normalize_vote_target_value(self, value):
-        if isinstance(value, int):
-            return value if value >= 0 else None
-
-        text = str(value).strip().strip("\"'")
-        if text.lower() in ("否", "弃票", "不投", "不投票", "abstain", "0"):
-            return 0
-
-        match = re.search(r'\d+', text)
-        if match:
-            return int(match.group(0))
-        return None
-
     def _extract_json_like(self, raw_text):
         text = str(raw_text).strip().strip("- ").strip()
         fenced = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
@@ -636,84 +662,119 @@ class LLMAgent(Agent):
             reject("selected action failed authoritative membership")
         return matched_action, env_action
 
-    def parse_vote_target(self, raw_action):
-        if raw_action is None:
-            return None
+    def freeze_authoritative_vote_candidates(self, valid_actions):
+        if not isinstance(valid_actions, list) or not valid_actions:
+            raise ValueError("vote valid_actions must be a non-empty list")
+        candidates = []
+        seen = set()
+        for env_action in valid_actions:
+            if (
+                not isinstance(env_action, tuple)
+                or len(env_action) != 2
+                or env_action[0] not in {"vote", "vote_pk"}
+                or isinstance(env_action[1], bool)
+                or not isinstance(env_action[1], int)
+                or not 0 <= env_action[1] <= 7
+            ):
+                raise ValueError(
+                    f"invalid authoritative vote action: {env_action!r}"
+                )
+            if env_action in seen:
+                raise ValueError(
+                    f"duplicate authoritative vote action: {env_action!r}"
+                )
+            seen.add(env_action)
+            target = env_action[1]
+            action_text = (
+                "abstain"
+                if target == 0
+                else f"{env_action[0]} player{target}"
+            )
+            candidates.append((action_text, env_action))
+        return tuple(candidates)
 
-        parsed = self._extract_json_like(raw_action)
-        if isinstance(parsed, dict):
-            for key in ("投票玩家", "投票"):
-                if key in parsed:
-                    return self._normalize_vote_target_value(parsed[key])
+    def parse_vote_action_selection(
+        self,
+        raw_response,
+        candidate_snapshot,
+        *,
+        phase,
+    ):
+        def reject(reason):
+            raise GameplayActionValidationError(
+                f"invalid vote action selection: {reason} "
+                f"(phase={phase!r}, response={raw_response!r})"
+            )
 
-        text = str(raw_action).strip()
-        match = re.search(r'(?:投票玩家|投票)\s*[:：]\s*([^\n,，。；;}]*)', text)
-        if match:
-            return self._normalize_vote_target_value(match.group(1))
+        try:
+            payload = json.loads(raw_response)
+        except (TypeError, json.JSONDecodeError):
+            reject("response must be strict JSON")
+        if not isinstance(payload, dict):
+            reject("root must be an object")
+        if set(payload) != {"action_index"}:
+            reject("keys must be exactly {'action_index'}")
+        action_index = payload["action_index"]
+        if isinstance(action_index, bool) or not isinstance(action_index, int):
+            reject("action_index must be an integer")
+        if not 0 <= action_index < len(candidate_snapshot):
+            reject("action_index is outside the authoritative candidates")
+        return candidate_snapshot[action_index]
 
-        return None
-
-    def vote_target_to_action_str(self, vote_target):
-        if vote_target in (None, -1, 0):
-            return "{'投票': '否'}"
-        return "{'" + f"投票': '{vote_target}'" + "}"
-
-    def choose_fallback_vote(self, observation, self_player_id=None):
-        if self_player_id is None:
-            self_player_id = observation.get("current_act_idx")
-
-        positive_candidates = []
-        non_self_candidates = []
-        for action_name, target in observation.get("valid_action", observation.get("valid_actions", [])):
-            if action_name not in ("vote", "vote_pk", "投票"):
-                continue
-            if not isinstance(target, int) or target <= 0:
-                continue
-
-            positive_candidates.append(target)
-            if target != self_player_id:
-                non_self_candidates.append(target)
-
-        if non_self_candidates:
-            return random.choice(non_self_candidates)
-        if positive_candidates:
-            return random.choice(positive_candidates)
-        return 0
-
-    def choose_fallback_vote_action(self, observation, valid_action=None):
-        valid_action = list(valid_action or self.nlp_action_to_env_action.keys())
-        fallback_target = self.choose_fallback_vote(observation)
-        fallback_action = self.vote_target_to_action_str(fallback_target)
-        if fallback_action in valid_action:
-            return fallback_action
-
-        non_abstain_actions = [
-            action for action in valid_action
-            if self.parse_vote_target(action) not in (None, 0)
-        ]
-        if non_abstain_actions:
-            return random.choice(non_abstain_actions)
-
-        abstain_action = self.vote_target_to_action_str(0)
-        if abstain_action in valid_action:
-            return abstain_action
-        return valid_action[0] if valid_action else abstain_action
-
-    def parse_vote_action(self, raw_action, observation, valid_action):
-        cleaned_action = str(raw_action).strip().strip("- ")
-        if cleaned_action in valid_action:
-            return cleaned_action
-
-        vote_target = self.parse_vote_target(cleaned_action)
-        if vote_target is None:
-            return None
-
-        action = self.vote_target_to_action_str(vote_target)
-        if action in valid_action:
-            return action
-        if vote_target == 0:
-            return self.choose_fallback_vote_action(observation, valid_action)
-        return None
+    def generate_indexed_vote_action(
+        self,
+        observation,
+        *,
+        temperature,
+        max_tokens,
+    ):
+        phase = observation["phase"]
+        if "vote" not in phase:
+            raise ValueError("indexed vote generation requires a vote phase")
+        if self.backend is None or not self.model_name:
+            raise BackendError("Agent backend and model_name are required.")
+        candidate_snapshot = self.freeze_authoritative_vote_candidates(
+            observation["valid_action"]
+        )
+        prompt = LLMAgent.format_observation(
+            self,
+            observation,
+            action_candidates=candidate_snapshot,
+        )
+        raw_response, metadata = self._chat_with_metadata(
+            [{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=vote_action_response_format(
+                supports_json_schema=getattr(
+                    self.backend,
+                    "supports_json_schema",
+                    False,
+                ),
+                candidate_snapshot=candidate_snapshot,
+            ),
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
+        )
+        if metadata["finish_reason"] == "length":
+            raise GameplayActionValidationError(
+                "vote action response was truncated "
+                f"(phase={phase!r}, finish_reason='length')"
+            )
+        action_text, env_action = self.parse_vote_action_selection(
+            raw_response,
+            candidate_snapshot,
+            phase=phase,
+        )
+        return env_action, {
+            "prompt": prompt,
+            "response": raw_response,
+            "action": action_text,
+            "gen_times": 0,
+        }
 
     def freeze_authoritative_action_candidates(self, valid_actions):
         self.get_valid_actions_str(valid_actions)
@@ -731,10 +792,6 @@ class LLMAgent(Agent):
     def get_valid_actions_str(self, valid_actions):
         valid_actions_str = ""
         action_pairs = []
-        has_positive_vote_target = any(
-            action[0] in ("vote", "vote_pk") and isinstance(action[1], int) and action[1] > 0
-            for action in valid_actions
-        )
         for action in valid_actions:
             if action[0] == 'kill':
                 if action[1] == 0:
@@ -768,16 +825,6 @@ class LLMAgent(Agent):
                     continue
                 valid_actions_str += f"- {action_text}\n"
                 action_pairs.append((action_text, action))
-            elif action[0] == 'vote' or action[0] == 'vote_pk':
-                if action[1] == 0:
-                    if has_positive_vote_target:
-                        continue
-                    action_text = "{'投票': '否'}"
-                else:
-                    action_text = "{{'投票': '{0}'}}".format(action[1])
-                valid_actions_str += f"- {action_text}\n"
-                action_pairs.append((action_text, action))
-
         self.nlp_action_to_env_action = {}
         for nlp_action, env_action in action_pairs:
             self.nlp_action_to_env_action[nlp_action] = env_action

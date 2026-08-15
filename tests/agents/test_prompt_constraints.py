@@ -1,46 +1,45 @@
 import unittest
 
 from werewolf.agents.llm_agent import LLMAgent
-from werewolf.agents.prompt_template_v0 import CON
 from werewolf.helper.log_utils import Log
 
 
-VOTE_CONSISTENCY_RULES = (
-    "基于当前可见 observation 中的公开信息",
-    "继承你自己白天发言中的怀疑、支持、站边和投票意向",
-    "明确怀疑过某人，优先从这些对象中选择投票目标",
-    "不要把“跟随 X 归票”理解成“投 X”",
-    "自己之前没有怀疑过的人",
-    "不要无依据随机投票",
-    "不要投给自己",
-    "不要投已死亡玩家",
-)
-
-
 class VotePromptConsistencyTest(unittest.TestCase):
-    def test_standard_vote_prompt_contains_consistency_rules(self):
-        prompt = CON.vote_prompt.format(
-            game_description="game",
-            player_identity_info="identity",
-            logs="logs",
-            valid_actions="actions",
+    def test_vote_prompt_is_indexed_and_contains_no_strategy_contract(self):
+        agent = LLMAgent()
+        observation = {
+            "phase": "1_day_vote",
+            "identity": "Werewolf",
+            "current_act_idx": 1,
+            "game_log": [],
+            "valid_action": [("vote", 0), ("vote", 2), ("vote", 4)],
+        }
+        candidates = agent.freeze_authoritative_vote_candidates(
+            observation["valid_action"]
+        )
+        prompt = agent.format_observation(
+            observation,
+            action_candidates=candidates,
         )
 
-        for rule in VOTE_CONSISTENCY_RULES:
-            self.assertIn(rule, prompt)
-
-    def test_twdm_vote_prompt_contains_consistency_rules(self):
-        prompt = CON.vote_prompt_v3.format(
-            player_identity_info="identity",
-            objective_info="objective",
-            subjective_info="subjective",
-            your_role="role",
-        )
-
-        for rule in VOTE_CONSISTENCY_RULES:
-            self.assertIn(rule, prompt)
-        self.assertIn("投票原因", prompt)
-        self.assertIn("说明为什么改变目标", prompt)
+        for required in (
+            "当前投票阶段",
+            "0: abstain",
+            "1: vote player2",
+            "2: vote player4",
+            '{"action_index": <编号>}',
+        ):
+            self.assertIn(required, prompt)
+        for forbidden in (
+            "投票玩家",
+            "投票原因",
+            "跟随",
+            "优先",
+            "保护队友",
+            "分票",
+            "隐藏你的身份",
+        ):
+            self.assertNotIn(forbidden, prompt)
 
 
 

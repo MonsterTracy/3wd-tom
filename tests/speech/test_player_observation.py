@@ -1,7 +1,10 @@
 from copy import deepcopy
 import unittest
 
-from werewolf.agents.llm_agent import LLMAgent
+from werewolf.agents.llm_agent import (
+    GameplayActionValidationError,
+    LLMAgent,
+)
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
 )
@@ -112,7 +115,7 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 3, 4],
         )
 
-    def test_normal_vote_parser_and_environment_reject_self_vote(self):
+    def test_normal_vote_index_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -120,16 +123,21 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.alive = [1, 1, 1, 1, 0, 0, 0]
         observation = self.env.get_observation_for(2)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '2'}",
-                observation,
-                valid_actions,
-            )
+        candidates = agent.freeze_authoritative_vote_candidates(
+            observation["valid_action"]
         )
+
+        self.assertEqual(
+            [env_action for _display, env_action in candidates],
+            observation["valid_action"],
+        )
+        self.assertNotIn("vote player2", [display for display, _ in candidates])
+        with self.assertRaises(GameplayActionValidationError):
+            agent.parse_vote_action_selection(
+                '{"投票":"2"}',
+                candidates,
+                phase=observation["phase"],
+            )
         with self.assertRaisesRegex(ValueError, "invalid normal vote action"):
             self.env.step(("vote", 2))
 
@@ -161,7 +169,7 @@ class PlayerObservationTest(unittest.TestCase):
                 )
                 self.assertEqual(self.env.vote_pk_players, [5, 6, 0, 2])
 
-    def test_vote_pk_parser_and_environment_reject_self_vote(self):
+    def test_vote_pk_index_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote_pk"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -170,23 +178,18 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.vote_pk_players = [5, 6, 0, 2]
         observation = self.env.get_observation_for(3)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '3'}",
-                observation,
-                valid_actions,
-            )
+        candidates = agent.freeze_authoritative_vote_candidates(
+            observation["valid_action"]
         )
+
+        self.assertNotIn("vote_pk player3", [display for display, _ in candidates])
         self.assertEqual(
-            agent.parse_vote_action(
-                "{'投票': '6'}",
-                observation,
-                valid_actions,
-            ),
-            "{'投票': '6'}",
+            agent.parse_vote_action_selection(
+                '{"action_index":1}',
+                candidates,
+                phase=observation["phase"],
+            )[1],
+            ("vote_pk", 6),
         )
         with self.assertRaisesRegex(ValueError, "invalid PK vote action"):
             self.env.step(("vote_pk", 3))
