@@ -156,6 +156,71 @@ Villager: {3}""".format(*counts)
         self.assertIn("我声称player5是狼人。", prompt)
         self.assertNotIn("sp_actions", prompt)
 
+    def test_public_speech_preserves_authoritative_temporal_provenance(self):
+        raw_speech = "我声称这是第9天夜晚；昨夜平安夜？！  原文不变。"
+        observation = _observation(phase="2_day_speech")
+        observation["game_log"] = [
+            Log(
+                viewer=list(range(1, 8)),
+                source=4,
+                target=list(range(1, 8)),
+                content={"speech_content": raw_speech, "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            ),
+            Log(
+                viewer=list(range(1, 8)),
+                source=4,
+                target=list(range(1, 8)),
+                content={"speech_content": raw_speech, "sp_actions": []},
+                day=2,
+                time="第2天白天",
+                event="speech_pk",
+            ),
+        ]
+
+        prompt = build_belief_prompt(observation)
+        authoritative, conversation = prompt.split("PUBLIC CONVERSATION", 1)
+        day_one = f"- [第1天白天 / speech] player4：{raw_speech}"
+        day_two = f"- [第2天白天 / speech_pk] player4：{raw_speech}"
+
+        self.assertIn(day_one, conversation)
+        self.assertIn(day_two, conversation)
+        self.assertEqual(conversation.count(raw_speech), 2)
+        self.assertNotIn(raw_speech, authoritative)
+        self.assertIn("truthful, deceptive, mistaken or strategic", conversation)
+        self.assertIn("not an authoritative fact", conversation)
+        self.assertNotIn("- [第9天夜晚 /", conversation)
+
+    def test_all_gameplay_prompts_share_temporal_public_conversation(self):
+        observation = _observation()
+        gameplay_belief = {
+            "belief": BELIEF["belief"],
+            "concise": BELIEF["concise"],
+        }
+        prompts = (
+            build_belief_prompt(observation),
+            build_speech_prompt(observation, gameplay_belief),
+            build_vote_prompt(observation, gameplay_belief, (0, 1, 4, 5)),
+        )
+        rendered_speech = (
+            "- [第1天白天 / speech] "
+            "player2：我声称player5是狼人。"
+        )
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIn(rendered_speech, prompt)
+        for marker, prompt in (
+            ("CURRENT PRIVATE BELIEF\n", prompts[1]),
+            ("FRESH PRIVATE BELIEF\n", prompts[2]),
+        ):
+            private_belief = prompt.split(marker, 1)[1].split("\n\n", 1)[0]
+            self.assertIn('"belief"', private_belief)
+            self.assertIn('"concise"', private_belief)
+            self.assertNotIn('"roles"', private_belief)
+
     def test_multiday_public_results_stay_authoritative_and_chronological(self):
         logs = [
             Log(

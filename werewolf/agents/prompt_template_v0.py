@@ -477,7 +477,9 @@ def _build_gameplay_context(observation):
             continue
         speech = getattr(log, "content", {}).get("speech_content")
         if isinstance(speech, str) and speech.strip():
-            public_claims.append(f"- player{source}：{speech}")
+            public_claims.append(
+                f"- [{log.time} / {log.event}] player{source}：{speech}"
+            )
     claims_text = "\n".join(public_claims) or "- (尚无玩家公开主张)"
     authoritative_history = _render_authoritative_public_history(game_log)
 
