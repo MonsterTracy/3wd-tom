@@ -594,7 +594,7 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("player0", formatted)
         self.assertNotIn("0号", formatted)
         self.assertIn(
-            "player4=好人",
+            "player4=不是狼人",
             build_belief_prompt(seer_observation),
         )
 

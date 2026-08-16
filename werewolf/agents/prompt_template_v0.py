@@ -390,24 +390,39 @@ def _build_gameplay_context(observation):
 
     if identity == "Werewolf":
         wolf_team = []
+        night_proposals = []
         night_decisions = []
         for log in game_log:
             if getattr(log, "event", None) == "werewolf_team_info":
                 wolf_team.extend(
                     getattr(log, "content", {}).get("wolf_team", [])
                 )
+            elif getattr(log, "event", None) == "skill_wolf":
+                source = getattr(log, "source", None)
+                target = getattr(log, "target", None)
+                if (
+                    isinstance(source, int)
+                    and 1 <= source <= 7
+                    and isinstance(target, int)
+                    and 0 <= target <= 7
+                ):
+                    choice = "主动空刀" if target == 0 else f"击杀 player{target}"
+                    night_proposals.append(
+                        f"{log.time}：player{source} 提交{choice}"
+                    )
             elif getattr(log, "event", None) == "kill_decision":
                 target = getattr(log, "target", None)
-                if isinstance(target, int) and 1 <= target <= 7:
-                    night_decisions.append(target)
+                if isinstance(target, int) and 0 <= target <= 7:
+                    decision = "主动空刀" if target == 0 else f"击杀 player{target}"
+                    night_decisions.append(f"{log.time}：{decision}")
         team_text = ", ".join(
             f"player{player_id}" for player_id in sorted(set(wolf_team))
         ) or "(无合法可见狼队信息)"
-        decision_text = ", ".join(
-            f"player{player_id}" for player_id in night_decisions
-        ) or "(尚无已完成狼刀决策)"
+        proposal_text = "；".join(night_proposals) or "(尚无已完成狼队夜间选择)"
+        decision_text = "；".join(night_decisions) or "(尚无已完成狼刀决策)"
         role_rules = f"""你的真实私有身份是狼人。
 - 真实狼队信息（仅用于内部策略）：{team_text}。
+- 依法可见的真实狼队夜间选择（仅用于内部策略）：{proposal_text}。
 - 已完成的真实夜间刀人决策（仅用于内部策略）：{decision_text}。
 - 绝不能公开说自己是狼人，也不能直接公开狼人队友身份。
 - 绝不能直接公开狼队夜间讨论、狼刀真实决策或夜间技能信息。
@@ -450,12 +465,11 @@ def _build_gameplay_context(observation):
                 and 1 <= target <= 7
             ):
                 checks.append(
-                    "player"
-                    f"{target}="
+                    f"{log.time}:player{target}="
                     + (
                         "狼人"
                         if result == "bad"
-                        else "好人"
+                        else "不是狼人"
                     )
                 )
         check_text = (
@@ -470,6 +484,7 @@ def _build_gameplay_context(observation):
     elif identity == "Witch":
         heal_used = False
         poison_used = False
+        witch_actions = []
         night_kill_targets = []
         for log in game_log:
             event = getattr(
@@ -496,28 +511,39 @@ def _build_gameplay_context(observation):
                     poison_used
                     or "poison" in content
                 )
+                if "heal" in content and isinstance(target, int) and 1 <= target <= 7:
+                    witch_actions.append(
+                        f"{log.time}：对 player{target} 使用解药"
+                    )
+                elif "poison" in content and isinstance(target, int) and 1 <= target <= 7:
+                    witch_actions.append(
+                        f"{log.time}：对 player{target} 使用毒药"
+                    )
+                elif "pass" in content:
+                    witch_actions.append(f"{log.time}：未使用药物")
             elif (
                 event == "kill_decision"
                 and isinstance(
                     target,
                     int,
                 )
-                and 1 <= target <= 7
+                and 0 <= target <= 7
             ):
-                night_kill_targets.append(
-                    f"player{target}"
+                target_text = (
+                    "狼队主动空刀"
+                    if target == 0
+                    else f"player{target}"
                 )
-        kill_text = (
-            ", ".join(
-                night_kill_targets
-            )
-            if night_kill_targets
-            else "(无当前合法可见目标)"
-        )
+                night_kill_targets.append(
+                    f"{log.time}：{target_text}"
+                )
+        action_text = "；".join(witch_actions) or "(尚无已执行的女巫夜间行动)"
+        kill_text = "；".join(night_kill_targets) or "(无合法可见的历史狼队夜间决定)"
         role_rules = f"""你的合法私有身份是女巫。
 - 解药真实状态：{"已使用" if heal_used else "未使用"}。
 - 毒药真实状态：{"已使用" if poison_used else "未使用"}。
-- 合法可见的历史夜间击杀目标：{kill_text}。
+- 已真实执行的女巫夜间行动：{action_text}。
+- 合法可见的历史狼队夜间决定：{kill_text}。
 - 这些是内部真实状态；公开时可以披露、隐藏、歪曲或虚构身份和技能声明。
 - 女巫没有真实的查验能力，也不知道狼人队友。"""
     public_claims = []

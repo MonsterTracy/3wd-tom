@@ -202,6 +202,39 @@ Villager: {3}""".format(*counts)
         self.assertIn("我声称player5是狼人。", prompt)
         self.assertNotIn("sp_actions", prompt)
 
+    def test_private_night_history_preserves_role_authoritative_actions(self):
+        wolf = _observation(identity="Werewolf")
+        wolf["game_log"].extend([
+            Log([3, 7], 0, [3, 7], {"wolf_team": [3, 7]}, 0, "第0天夜晚", "werewolf_team_info"),
+            Log([3, 7], 3, 1, {"kill_target": 1}, 0, "第0天夜晚", "skill_wolf"),
+            Log([3, 7], 7, 0, {"kill_target": 0}, 0, "第0天夜晚", "skill_wolf"),
+            Log([3, 7], 0, 0, {"kill_decision": 0}, 0, "第0天夜晚", "kill_decision"),
+        ])
+        wolf_prompt = build_belief_prompt(wolf)
+        self.assertIn("第0天夜晚：player3 提交击杀 player1", wolf_prompt)
+        self.assertIn("第0天夜晚：player7 提交主动空刀", wolf_prompt)
+        self.assertIn("第0天夜晚：主动空刀", wolf_prompt)
+
+        seer = _observation(identity="Seer")
+        seer["game_log"].append(
+            Log([3], 3, 5, {"cheked_identity": "good"}, 0, "第0天夜晚", "skill_seer")
+        )
+        seer_prompt = build_belief_prompt(seer)
+        self.assertIn("第0天夜晚:player5=不是狼人", seer_prompt)
+
+        witch = _observation(identity="Witch")
+        witch["game_log"].extend([
+            Log([3], 0, 5, {"kill_decision": 5}, 0, "第0天夜晚", "kill_decision"),
+            Log([3], 3, 5, {"heal": 5}, 0, "第0天夜晚", "skill_witch"),
+            Log([3], 3, 6, {"poison": 6}, 1, "第1天夜晚", "skill_witch"),
+        ])
+        witch_prompt = build_belief_prompt(witch)
+        self.assertIn("第0天夜晚：对 player5 使用解药", witch_prompt)
+        self.assertIn("第1天夜晚：对 player6 使用毒药", witch_prompt)
+        self.assertIn("第0天夜晚：player5", witch_prompt)
+        self.assertIn("解药真实状态：已使用", witch_prompt)
+        self.assertIn("毒药真实状态：已使用", witch_prompt)
+
     def test_public_speech_preserves_authoritative_temporal_provenance(self):
         raw_speech = "我声称这是第9天夜晚；昨夜平安夜？！  原文不变。"
         observation = _observation(phase="2_day_speech")
