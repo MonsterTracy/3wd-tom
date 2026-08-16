@@ -60,14 +60,60 @@ class GameplayPromptTest(unittest.TestCase):
         prompt = build_belief_prompt(_observation())
 
         for rule in (
-            "Exactly 2 Werewolves",
-            "Exactly 1 Seer",
-            "Exactly 1 Witch",
-            "Exactly 3 Villagers",
-            "No other roles exist in the current game",
+            "2名狼人、1名预言家、1名女巫、3名普通村民",
+            "本局没有守卫、猎人或其他任何角色",
+            "所有玩家的身份整局固定",
         ):
             self.assertIn(rule, prompt)
         self.assertNotIn("Guard", prompt)
+
+    def test_strict_classic7_common_rules_cover_frozen_mechanics(self):
+        prompt = build_belief_prompt(_observation())
+
+        required_rules = (
+            "可以主动选择当晚不进行击杀",
+            "不能主动放弃查验",
+            "已经查验过的玩家不能再次查验",
+            "查验只提供信息",
+            "没有任何玩家死亡",
+            "1瓶解药和1瓶毒药",
+            "不能对自己使用解药",
+            "不能毒杀自己",
+            "毒药目标可以与当晚狼队的击杀目标是同一名玩家",
+            "使用毒药也不保证当晚一定出现两名不同的死亡玩家",
+            "公开发言只是玩家自己的陈述",
+            "已经投出的具体票不会提前公开",
+            "所有存活玩家都参加PK投票，包括PK候选人本人",
+            "如果最高票再次平票",
+            "没有任何PK候选人获得有效票数",
+            "不再有任何存活狼人",
+            "没有任何普通村民存活",
+            "预言家和女巫都已经出局",
+        )
+        for rule in required_rules:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, prompt)
+
+        self.assertNotIn("女巫应该", prompt)
+        self.assertNotIn("预言家应该", prompt)
+        self.assertNotIn("通常", prompt)
+        self.assertNotIn("一般", prompt)
+
+    def test_common_rules_keep_no_target_edge_cases_explicit(self):
+        prompt = build_belief_prompt(_observation(identity="Seer"))
+
+        self.assertIn(
+            "不存在任何合法且未查验的目标，则该夜不执行查验",
+            prompt,
+        )
+        self.assertIn(
+            "没有任何玩家获得有效票数，则无人被放逐，也不进入PK阶段",
+            prompt,
+        )
+        self.assertIn(
+            "没有任何PK候选人获得有效票数，则本轮无人被放逐",
+            prompt,
+        )
 
     def test_strict_context_rejects_non_witch_role_setting(self):
         observation = _observation()

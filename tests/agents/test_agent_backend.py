@@ -20,7 +20,10 @@ from werewolf.agents.llm_agent import (
     validate_role_report,
     vote_response_format,
 )
-from werewolf.agents.prompt_template_v0 import derive_belief_constraints
+from werewolf.agents.prompt_template_v0 import (
+    STRICT_CLASSIC7_GAME_DESCRIPTION,
+    derive_belief_constraints,
+)
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
 from werewolf.registry import Registry
@@ -636,6 +639,25 @@ class GameplayCognitionTest(unittest.TestCase):
         with self.assertRaisesRegex(GameplayActionValidationError, "truncated"):
             agent.act(_observation("1_day_vote"))
         self.assertEqual(len(backend.calls), 2)
+
+    def test_strict_night_prompt_uses_same_chinese_common_rule_contract(self):
+        observation = {
+            "phase": "1_night_skill_seer",
+            "identity": "Seer",
+            "current_act_idx": 3,
+            "game_log": [],
+            "valid_action": [("check", 2), ("check", 4)],
+        }
+        backend = MetadataBackend(['{"action_index":0}'])
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(observation), ("check", 2))
+        prompt = backend.calls[0]["messages"][0]["content"]
+        self.assertIn(STRICT_CLASSIC7_GAME_DESCRIPTION, prompt)
+        self.assertIn("不能主动放弃查验", prompt)
+        self.assertIn("不能对自己使用解药", prompt)
+        self.assertIn("所有存活玩家都参加PK投票", prompt)
+        self.assertNotIn("Exactly 2 Werewolves", prompt)
 
     def test_invalid_night_action_fails_after_one_generation(self):
         observation = {
