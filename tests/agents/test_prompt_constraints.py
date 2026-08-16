@@ -91,12 +91,20 @@ class GameplayPromptTest(unittest.TestCase):
 
         self.assertIn("roles as fixed premises", prompt)
         self.assertIn("Do not reinterpret or re-guess them", prompt)
+        self.assertIn("compact step-by-step role deduction", prompt)
         self.assertIn("Infer only these unresolved players", prompt)
         self.assertIn("roles object must contain exactly those unresolved", prompt)
+        self.assertIn("Do not restate the game rules", prompt)
+        self.assertIn("recount or recompute the fixed 7-player role composition", prompt)
+        self.assertIn("Do not repeat the observation or history", prompt)
+        self.assertIn("Do not mechanically discuss every unresolved player", prompt)
         self.assertIn('Use "unknown" when the available', prompt)
         self.assertIn("information is insufficient", prompt)
         self.assertIn("belief field must reason only about unresolved", prompt)
-        self.assertIn("concise field must give a short conclusion", prompt)
+        self.assertIn("as concise as possible", prompt)
+        self.assertIn("about 50 words", prompt)
+        self.assertIn("concise field must be a short derived conclusion", prompt)
+        self.assertIn("no more than 2 short sentences", prompt)
 
     def test_belief_prompt_separates_authority_private_facts_and_raw_claims(self):
         prompt = build_belief_prompt(_observation())

@@ -544,7 +544,14 @@ Infer only these unresolved players, using only each player's listed values:
 The roles object must contain exactly those unresolved players and no known
 player. Use "unknown" when the available information is insufficient.
 The belief field must reason only about unresolved players and the current
-situation. The concise field must give a short conclusion of that reasoning.
+situation as a compact step-by-step role deduction. Include only reasoning
+directly relevant to current role uncertainty. Step-by-step means compact
+evidence -> role-assessment steps, not a long hidden-thought transcript.
+Do not restate the game rules or recount or recompute the fixed 7-player role composition.
+Do not repeat the observation or history. Do not mechanically discuss every unresolved player
+when there is no useful evidence. Use unknown rather than inventing evidence.
+Be as concise as possible and target no more than about 50 words.
+The concise field must be a short derived conclusion of no more than 2 short sentences.
 Return only the JSON object required by the response schema. The three fields
 remain belief, concise and roles."""
 
