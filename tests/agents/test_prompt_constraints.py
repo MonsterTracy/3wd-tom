@@ -410,11 +410,20 @@ Villager: {3}""".format(*counts)
         prompt = build_speech_prompt(_observation(), BELIEF)
 
         self.assertIn("CURRENT PRIVATE BELIEF", prompt)
-        self.assertIn("Directly produce", prompt)
-        self.assertIn("reveal, hide, bluff or", prompt)
-        self.assertIn("deceive strategically", prompt)
-        self.assertIn("Do not output JSON", prompt)
+        self.assertIn("直接输出本轮简洁的自然语言公开发言", prompt)
+        self.assertIn("真实、隐瞒、误导、假跳身份", prompt)
+        self.assertIn("必须遵守上文与你真实角色对应的私人信息边界", prompt)
+        self.assertIn("不要输出 JSON", prompt)
+        self.assertNotIn("You may reveal, hide, bluff or", prompt)
         self.assertNotIn("public_actions", prompt)
+
+    def test_werewolf_speech_prompt_has_no_conflicting_permission_to_reveal(self):
+        prompt = build_speech_prompt(_observation(identity="Werewolf"), BELIEF)
+
+        self.assertIn("绝不能公开说自己是狼人", prompt)
+        self.assertIn("必须遵守上文与你真实角色对应的私人信息边界", prompt)
+        self.assertIn("不构成泄露上文明确禁止公开", prompt)
+        self.assertNotIn("You may reveal, hide, bluff or", prompt)
 
     def test_vote_prompt_uses_fresh_belief_and_rejects_intent_inheritance(self):
         prompt = build_vote_prompt(

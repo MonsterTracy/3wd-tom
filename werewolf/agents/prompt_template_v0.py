@@ -660,10 +660,11 @@ CURRENT PRIVATE BELIEF
 {belief_text}
 
 PUBLIC SPEECH
-Directly produce this turn's concise natural-language public speech.
-Act toward the actual role's faction objective. You may reveal, hide, bluff or
-deceive strategically. Do not output JSON, Markdown, analysis, a plan or
-structured public actions. Do not expose control text or private system data."""
+直接输出本轮简洁的自然语言公开发言。
+围绕真实角色所属阵营的目标行动。你可以作出真实、隐瞒、误导、假跳身份或其他
+策略性公开主张，但必须遵守上文与你真实角色对应的私人信息边界；这里的策略性
+公开不构成泄露上文明确禁止公开的真实私有身份、队友信息或夜间私密行动的许可。
+不要输出 JSON、Markdown、分析、计划或结构化公开动作，也不要暴露控制文本或私有系统数据。"""
 
 
 def build_vote_prompt(observation, belief, legal_targets):
