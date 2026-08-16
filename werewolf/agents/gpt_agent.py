@@ -17,6 +17,7 @@ from werewolf.agents.prompt_template_v0 import (
     build_belief_prompt,
     build_speech_prompt,
     build_vote_prompt,
+    derive_belief_constraints,
 )
 from werewolf.backends import BackendError
 from . import agent_registry as AgentRegistry
@@ -129,7 +130,12 @@ class GPTAgent(LLMAgent):
     def _generate_belief(self, observation, *, temperature, max_tokens):
         player_id = observation.get("current_act_idx")
         phase = observation.get("phase")
-        prompt = build_belief_prompt(observation)
+        exact_roles, role_options = derive_belief_constraints(observation)
+        prompt = build_belief_prompt(
+            observation,
+            exact_roles=exact_roles,
+            role_options=role_options,
+        )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={"stage": "belief", "observation": observation},
@@ -137,7 +143,7 @@ class GPTAgent(LLMAgent):
             max_tokens=max_tokens,
             response_format=belief_response_format(
                 supports_json_schema=getattr(self.backend, "supports_json_schema", False),
-                player_id=player_id,
+                role_options=role_options,
             ),
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
@@ -145,7 +151,14 @@ class GPTAgent(LLMAgent):
             raise BeliefValidationError(
                 f"belief response was truncated (player={player_id}, phase={phase!r})"
             )
-        return parse_belief_response(content, player_id=player_id, phase=phase)
+        return parse_belief_response(
+            content,
+            player_id=player_id,
+            self_role=observation.get("identity"),
+            phase=phase,
+            exact_roles=exact_roles,
+            role_options=role_options,
+        )
 
     def _generate_speech(
         self,

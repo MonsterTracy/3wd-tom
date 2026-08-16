@@ -9,8 +9,10 @@ from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
     CON,
     LEGACY_GAMEPLAY_PROMPT_PROFILE,
+    STRICT_BELIEF_CONCRETE_ROLES,
     STRICT_CLASSIC7_GAME_DESCRIPTION,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
+    STRICT_CLASSIC7_ROLE_COUNTS,
 )
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
@@ -58,7 +60,7 @@ class BeliefValidationError(ValueError):
     """A transient gameplay belief response violates its contract."""
 
 
-BELIEF_ROLES = ("Werewolf", "Seer", "Witch", "Villager", "unknown")
+BELIEF_ROLES = STRICT_BELIEF_CONCRETE_ROLES + ("unknown",)
 
 
 @dataclass(frozen=True)
@@ -75,16 +77,12 @@ class BeliefReport:
         }
 
 
-def belief_response_format(*, supports_json_schema, player_id):
+def belief_response_format(*, supports_json_schema, role_options):
     if supports_json_schema is not True:
         raise BackendError("belief generation requires backend JSON Schema support")
-    if isinstance(player_id, bool) or not isinstance(player_id, int) or not 1 <= player_id <= 7:
-        raise ValueError("player_id must be an integer in [1, 7]")
-    other_players = [
-        f"player{candidate}"
-        for candidate in range(1, 8)
-        if candidate != player_id
-    ]
+    if not isinstance(role_options, dict) or not role_options:
+        raise ValueError("role_options must be a non-empty dictionary")
+    unresolved_players = list(role_options)
     return {
         "type": "json_schema",
         "json_schema": {
@@ -100,13 +98,13 @@ def belief_response_format(*, supports_json_schema, player_id):
                     "roles": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": other_players,
+                        "required": unresolved_players,
                         "properties": {
                             player: {
                                 "type": "string",
-                                "enum": list(BELIEF_ROLES),
+                                "enum": list(role_options[player]),
                             }
-                            for player in other_players
+                            for player in unresolved_players
                         },
                     },
                 },
@@ -115,7 +113,15 @@ def belief_response_format(*, supports_json_schema, player_id):
     }
 
 
-def parse_belief_response(raw_response, *, player_id, phase):
+def parse_belief_response(
+    raw_response,
+    *,
+    player_id,
+    self_role,
+    phase,
+    exact_roles,
+    role_options,
+):
     context = f"player={player_id}, phase={phase}"
     try:
         payload = json.loads(raw_response)
@@ -127,20 +133,58 @@ def parse_belief_response(raw_response, *, player_id, phase):
         raise BeliefValidationError(f"belief fields do not match contract ({context})")
     if any(not isinstance(payload[field], str) or not payload[field].strip() for field in ("belief", "concise")):
         raise BeliefValidationError(f"belief text fields must be non-empty ({context})")
-    expected_players = {
+    final_players = [
         f"player{candidate}"
         for candidate in range(1, 8)
         if candidate != player_id
-    }
+    ]
+    expected_players = set(role_options)
+    if (
+        not isinstance(exact_roles, dict)
+        or set(exact_roles) & expected_players
+        or set(exact_roles) | expected_players != set(final_players)
+    ):
+        raise BeliefValidationError(
+            f"belief constraints do not cover the other players ({context})"
+        )
     roles = payload["roles"]
     if not isinstance(roles, dict) or set(roles) != expected_players:
-        raise BeliefValidationError(f"roles must contain only the other players ({context})")
-    if any(role not in BELIEF_ROLES for role in roles.values()):
-        raise BeliefValidationError(f"roles contain an unsupported value ({context})")
+        raise BeliefValidationError(
+            f"roles must contain only unresolved players ({context})"
+        )
+    if any(
+        roles[player] not in role_options[player]
+        for player in expected_players
+    ):
+        raise BeliefValidationError(
+            f"roles contain a value outside the legal inference domain ({context})"
+        )
+
+    role_counts = {role: 0 for role in STRICT_BELIEF_CONCRETE_ROLES}
+    if self_role not in role_counts:
+        raise BeliefValidationError(f"unsupported self role ({context})")
+    role_counts[self_role] += 1
+    for role in exact_roles.values():
+        if role not in role_counts:
+            raise BeliefValidationError(f"unsupported exact-known role ({context})")
+        role_counts[role] += 1
+    for role in roles.values():
+        if role != "unknown":
+            role_counts[role] += 1
+    for role, count in role_counts.items():
+        if count > STRICT_CLASSIC7_ROLE_COUNTS[role]:
+            raise BeliefValidationError(
+                f"belief exceeds fixed {role} inventory ({context})"
+            )
+
+    final_roles = {
+        player: exact_roles[player] if player in exact_roles else roles[player]
+        for player in final_players
+    }
     return BeliefReport(
         belief=payload["belief"].strip(),
         concise=payload["concise"].strip(),
-        roles=dict(roles),
+        roles=final_roles,
     )
 
 

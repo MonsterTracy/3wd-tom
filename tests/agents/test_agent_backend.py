@@ -18,6 +18,7 @@ from werewolf.agents.llm_agent import (
     validate_gameplay_public_speech,
     vote_response_format,
 )
+from werewolf.agents.prompt_template_v0 import derive_belief_constraints
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
 from werewolf.registry import Registry
@@ -63,6 +64,21 @@ def _belief(player_id=1, *, role="unknown"):
     )
 
 
+def _belief_for(role_options, assignments=None):
+    assignments = assignments or {}
+    return json.dumps(
+        {
+            "belief": "只推断尚未确定的玩家。",
+            "concise": "保留未知。",
+            "roles": {
+                player: assignments.get(player, "unknown")
+                for player in role_options
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
 def _observation(phase="1_day_speech"):
     public_phase = "vote_pk" if "vote_pk" in phase else (
         "vote" if "vote" in phase else "speech"
@@ -101,6 +117,26 @@ def _observation(phase="1_day_speech"):
     }
 
 
+def _role_observation(identity, player_id, logs=(), phase="1_day_speech"):
+    observation = _observation(phase)
+    observation["identity"] = identity
+    observation["current_act_idx"] = player_id
+    observation["game_log"] = list(logs)
+    return observation
+
+
+def _parse_belief(raw_response, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    return parse_belief_response(
+        raw_response,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+    )
+
+
 class GameplayCognitionTest(unittest.TestCase):
     def _agent(self, backend, **kwargs):
         agent = GPTAgent(
@@ -113,9 +149,11 @@ class GameplayCognitionTest(unittest.TestCase):
         return agent
 
     def test_belief_schema_has_exact_minimal_fields_and_accepts_unknown(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
         response_format = belief_response_format(
             supports_json_schema=True,
-            player_id=1,
+            role_options=role_options,
         )
         schema = response_format["json_schema"]["schema"]
 
@@ -129,33 +167,219 @@ class GameplayCognitionTest(unittest.TestCase):
             self.assertEqual(tuple(player_schema["enum"]), BELIEF_ROLES)
             self.assertIn("unknown", player_schema["enum"])
 
-        report = parse_belief_response(
+        report = _parse_belief(
             _belief(role="unknown"),
-            player_id=1,
-            phase="1_day_speech",
+            observation,
         )
         self.assertEqual(set(report.roles.values()), {"unknown"})
 
     def test_belief_rejects_extra_cognitive_fields_and_self_role(self):
+        observation = _observation()
         payload = json.loads(_belief())
         for field in ("confidence", "alignment", "probability"):
             with self.subTest(field=field):
                 candidate = dict(payload)
                 candidate[field] = 0.5
                 with self.assertRaises(BeliefValidationError):
-                    parse_belief_response(
+                    _parse_belief(
                         json.dumps(candidate),
-                        player_id=1,
-                        phase="1_day_speech",
+                        observation,
                     )
 
         payload["roles"]["player1"] = "Villager"
-        with self.assertRaisesRegex(BeliefValidationError, "other players"):
-            parse_belief_response(
+        with self.assertRaisesRegex(BeliefValidationError, "unresolved players"):
+            _parse_belief(
                 json.dumps(payload),
-                player_id=1,
-                phase="1_day_speech",
+                observation,
             )
+
+    def test_self_role_consumes_fixed_inventory(self):
+        for identity in ("Witch", "Seer"):
+            with self.subTest(identity=identity):
+                observation = _role_observation(identity, 1)
+                exact_roles, role_options = derive_belief_constraints(
+                    observation
+                )
+
+                self.assertEqual(exact_roles, {})
+                self.assertTrue(role_options)
+                self.assertTrue(
+                    all(
+                        identity not in options
+                        for options in role_options.values()
+                    )
+                )
+
+        villager = _role_observation("Villager", 1)
+        _exact_roles, role_options = derive_belief_constraints(villager)
+        with self.assertRaisesRegex(BeliefValidationError, "Villager"):
+            _parse_belief(
+                _belief_for(
+                    role_options,
+                    {
+                        "player2": "Villager",
+                        "player3": "Villager",
+                        "player4": "Villager",
+                    },
+                ),
+                villager,
+            )
+
+    def test_werewolf_teammate_is_fixed_outside_inference_and_merged(self):
+        observation = _role_observation(
+            "Werewolf",
+            2,
+            [
+                Log(
+                    viewer=[2, 7],
+                    source=0,
+                    target=[2, 7],
+                    content={"wolf_team": [2, 7]},
+                    day=0,
+                    time="第0天夜晚",
+                    event="werewolf_team_info",
+                )
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {"player7": "Werewolf"})
+        self.assertEqual(
+            set(role_options),
+            {"player1", "player3", "player4", "player5", "player6"},
+        )
+        self.assertTrue(
+            all("Werewolf" not in options for options in role_options.values())
+        )
+        role_schema = belief_response_format(
+            supports_json_schema=True,
+            role_options=role_options,
+        )["json_schema"]["schema"]["properties"]["roles"]
+        self.assertNotIn("player7", role_schema["properties"])
+
+        report = _parse_belief(_belief_for(role_options), observation)
+        self.assertEqual(report.roles["player7"], "Werewolf")
+        self.assertEqual(
+            set(report.roles),
+            {f"player{player}" for player in (1, 3, 4, 5, 6, 7)},
+        )
+
+        leaked_known = json.loads(_belief_for(role_options))
+        leaked_known["roles"]["player7"] = "Villager"
+        with self.assertRaises(BeliefValidationError):
+            _parse_belief(json.dumps(leaked_known), observation)
+
+    def test_seer_good_excludes_werewolf_without_fixing_role(self):
+        observation = _role_observation(
+            "Seer",
+            3,
+            [
+                Log(
+                    viewer=[3],
+                    source=3,
+                    target=1,
+                    content={"cheked_identity": "good"},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_seer",
+                )
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {})
+        self.assertEqual(
+            role_options["player1"],
+            ("Witch", "Villager", "unknown"),
+        )
+        self.assertIn("Werewolf", role_options["player2"])
+        self.assertEqual(
+            _parse_belief(_belief_for(role_options), observation).roles[
+                "player1"
+            ],
+            "unknown",
+        )
+        self.assertEqual(
+            _parse_belief(
+                _belief_for(role_options, {"player1": "Witch"}),
+                observation,
+            ).roles["player1"],
+            "Witch",
+        )
+
+    def test_seer_bad_is_fixed_outside_inference_and_merged(self):
+        observation = _role_observation(
+            "Seer",
+            3,
+            [
+                Log(
+                    viewer=[3],
+                    source=3,
+                    target=1,
+                    content={"cheked_identity": "bad"},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_seer",
+                )
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {"player1": "Werewolf"})
+        self.assertNotIn("player1", role_options)
+        report = _parse_belief(_belief_for(role_options), observation)
+        self.assertEqual(report.roles["player1"], "Werewolf")
+        self.assertEqual(len(report.roles), 6)
+
+    def test_inventory_violation_fails_once_without_repair(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        backend = MetadataBackend([
+            _belief_for(
+                role_options,
+                {
+                    "player2": "Villager",
+                    "player3": "Villager",
+                    "player4": "Villager",
+                },
+            )
+        ])
+        agent = self._agent(backend)
+
+        with self.assertRaisesRegex(BeliefValidationError, "Villager"):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_dead_claims_and_witch_target_do_not_fix_roles(self):
+        claimed = _observation()
+        exact_roles, _role_options = derive_belief_constraints(claimed)
+        self.assertEqual(exact_roles, {})
+
+        dead = _observation()
+        dead["authoritative_public_state"]["alive_players"] = [
+            1, 2, 3, 4, 5, 7
+        ]
+        _exact_roles, dead_options = derive_belief_constraints(dead)
+        self.assertIn("player6", dead_options)
+
+        witch = _role_observation(
+            "Witch",
+            4,
+            [
+                Log(
+                    viewer=[4],
+                    source=0,
+                    target=5,
+                    content={"kill_decision": 5},
+                    day=1,
+                    time="第1天夜晚",
+                    event="kill_decision",
+                )
+            ],
+        )
+        exact_roles, witch_options = derive_belief_constraints(witch)
+        self.assertEqual(exact_roles, {})
+        self.assertEqual(witch_options["player5"], witch_options["player1"])
 
     def test_day_path_is_belief_then_direct_speech(self):
         backend = MetadataBackend([_belief(), "我会重点听2号和4号的后续发言。"])

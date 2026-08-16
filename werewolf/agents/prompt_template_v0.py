@@ -19,6 +19,13 @@ LEGACY_GAMEPLAY_PROMPT_PROFILE = "legacy"
 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
     "strict_classic7"
 )
+STRICT_CLASSIC7_ROLE_COUNTS = {
+    "Werewolf": 2,
+    "Seer": 1,
+    "Witch": 1,
+    "Villager": 3,
+}
+STRICT_BELIEF_CONCRETE_ROLES = tuple(STRICT_CLASSIC7_ROLE_COUNTS)
 
 STRICT_CLASSIC7_GAME_DESCRIPTION = """This is exactly a 7-player Werewolf game.
 - Exactly 2 Werewolves.
@@ -32,6 +39,88 @@ and eliminating village players. The Seer, Witch and Villagers win by finding
 and eliminating both Werewolves. Night actions are private; completed deaths,
 public speech, votes and exile results become public according to the game
 rules."""
+
+
+def derive_belief_constraints(observation):
+    """Derive one transient belief domain from a legal observation."""
+
+    if not isinstance(observation, dict):
+        raise TypeError("belief observation must be a dictionary")
+    player_id = observation.get("observer_id")
+    if player_id is None:
+        player_id = observation.get("current_act_idx")
+    if (
+        isinstance(player_id, bool)
+        or not isinstance(player_id, int)
+        or not 1 <= player_id <= 7
+    ):
+        raise ValueError("belief observation requires an observer in [1, 7]")
+    self_role = observation.get("identity")
+    if self_role not in STRICT_CLASSIC7_ROLE_COUNTS:
+        raise ValueError("belief observation has an unsupported identity")
+    game_log = observation.get("game_log")
+    if not isinstance(game_log, list):
+        raise TypeError("belief observation requires a game_log list")
+
+    other_players = [
+        f"player{candidate}"
+        for candidate in range(1, 8)
+        if candidate != player_id
+    ]
+    exact_roles = {}
+    excluded_roles = {player: set() for player in other_players}
+
+    if self_role == "Werewolf":
+        for log in game_log:
+            if getattr(log, "event", None) != "werewolf_team_info":
+                continue
+            wolf_team = getattr(log, "content", {}).get("wolf_team", [])
+            if not isinstance(wolf_team, list):
+                continue
+            for teammate in wolf_team:
+                if (
+                    isinstance(teammate, int)
+                    and not isinstance(teammate, bool)
+                    and 1 <= teammate <= 7
+                    and teammate != player_id
+                ):
+                    exact_roles[f"player{teammate}"] = "Werewolf"
+
+    if self_role == "Seer":
+        for log in game_log:
+            if getattr(log, "event", None) != "skill_seer":
+                continue
+            target = getattr(log, "target", None)
+            result = getattr(log, "content", {}).get("cheked_identity")
+            if (
+                not isinstance(target, int)
+                or isinstance(target, bool)
+                or target == player_id
+                or not 1 <= target <= 7
+            ):
+                continue
+            player = f"player{target}"
+            if result == "bad":
+                exact_roles[player] = "Werewolf"
+            elif result == "good":
+                excluded_roles[player].add("Werewolf")
+
+    known_counts = {role: 0 for role in STRICT_BELIEF_CONCRETE_ROLES}
+    known_counts[self_role] += 1
+    for role in exact_roles.values():
+        known_counts[role] += 1
+
+    role_options = {}
+    for player in other_players:
+        if player in exact_roles:
+            continue
+        role_options[player] = tuple(
+            role
+            for role in STRICT_BELIEF_CONCRETE_ROLES
+            if known_counts[role] < STRICT_CLASSIC7_ROLE_COUNTS[role]
+            and role not in excluded_roles[player]
+        ) + ("unknown",)
+    return exact_roles, role_options
 
 
 def _render_authoritative_public_phase(public_state):
@@ -231,13 +320,7 @@ def _build_gameplay_context(observation):
         if getattr(log, "event", None) != "game_setting":
             continue
         role_counts = getattr(log, "content", {})
-        expected_counts = {
-            "Werewolf": 2,
-            "Seer": 1,
-            "Witch": 1,
-            "Villager": 3,
-        }
-        if dict(role_counts) != expected_counts:
+        if dict(role_counts) != STRICT_CLASSIC7_ROLE_COUNTS:
             raise ValueError(
                 "strict gameplay requires exactly 2 Werewolves, 1 Seer, "
                 "1 Witch and 3 Villagers"
@@ -428,22 +511,42 @@ A claim is not an authoritative fact merely because someone stated it.
 {claims_text}"""
 
 
-def build_belief_prompt(observation):
+def build_belief_prompt(
+    observation,
+    *,
+    exact_roles=None,
+    role_options=None,
+):
     """Ask for one transient belief report from a legal observation."""
 
+    if exact_roles is None and role_options is None:
+        exact_roles, role_options = derive_belief_constraints(observation)
+    elif exact_roles is None or role_options is None:
+        raise ValueError("exact_roles and role_options must be supplied together")
     context = _build_gameplay_context(observation)
+    exact_text = json.dumps(exact_roles, ensure_ascii=False, sort_keys=True)
+    options_text = json.dumps(
+        {
+            player: list(options)
+            for player, options in role_options.items()
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
     return f"""{context}
 
 BELIEF OUTPUT
-Infer only the other players' roles. Do not infer the current player's role;
-the Environment already supplied it above. Use only Werewolf, Seer, Witch,
-Villager or unknown as role values.
-The inferred role guesses together with the player's known self role must not
-exceed the actual role counts of this game. Use "unknown" when the available
-information is insufficient.
+Treat the Environment-supplied self role and these exact-known other-player
+roles as fixed premises. Do not reinterpret or re-guess them:
+{exact_text}
+Infer only these unresolved players, using only each player's listed values:
+{options_text}
+The roles object must contain exactly those unresolved players and no known
+player. Use "unknown" when the available information is insufficient.
+The belief field must reason only about unresolved players and the current
+situation. The concise field must give a short conclusion of that reasoning.
 Return only the JSON object required by the response schema. The three fields
-mean: belief = current private assessment, concise = a short summary, and
-roles = the role estimate for every other player."""
+remain belief, concise and roles."""
 
 
 def build_speech_prompt(observation, belief):

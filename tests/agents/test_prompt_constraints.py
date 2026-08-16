@@ -86,16 +86,17 @@ class GameplayPromptTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "1 Witch"):
             build_belief_prompt(observation)
 
-    def test_belief_prompt_has_role_count_and_unknown_reasoning_rule(self):
+    def test_belief_prompt_uses_fixed_premises_and_unresolved_domain(self):
         prompt = build_belief_prompt(_observation(identity="Seer"))
 
-        self.assertIn(
-            "role guesses together with the player's known self role must not",
-            prompt,
-        )
-        self.assertIn("exceed the actual role counts", prompt)
+        self.assertIn("roles as fixed premises", prompt)
+        self.assertIn("Do not reinterpret or re-guess them", prompt)
+        self.assertIn("Infer only these unresolved players", prompt)
+        self.assertIn("roles object must contain exactly those unresolved", prompt)
         self.assertIn('Use "unknown" when the available', prompt)
         self.assertIn("information is insufficient", prompt)
+        self.assertIn("belief field must reason only about unresolved", prompt)
+        self.assertIn("concise field must give a short conclusion", prompt)
 
     def test_belief_prompt_separates_authority_private_facts_and_raw_claims(self):
         prompt = build_belief_prompt(_observation())
@@ -213,8 +214,8 @@ class GameplayPromptTest(unittest.TestCase):
         prompt = build_belief_prompt(_observation(identity="Seer"))
 
         self.assertIn("Actual role supplied by the Environment: Seer", prompt)
-        self.assertIn("Infer only the other players' roles", prompt)
-        self.assertIn("Do not infer the current player's role", prompt)
+        self.assertIn("Environment-supplied self role", prompt)
+        self.assertIn("Infer only these unresolved players", prompt)
 
     def test_speech_prompt_requests_direct_natural_language(self):
         prompt = build_speech_prompt(_observation(), BELIEF)
