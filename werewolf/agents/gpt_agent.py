@@ -5,11 +5,13 @@ from werewolf.agents.llm_agent import (
     BeliefValidationError,
     GameplayActionValidationError,
     LLMAgent,
+    RoleReportValidationError,
     belief_response_format,
     night_action_response_format,
     parse_belief_response,
     parse_vote_response,
     validate_gameplay_public_speech,
+    validate_role_report,
     vote_response_format,
 )
 from werewolf.agents.prompt_template_v0 import (
@@ -151,7 +153,7 @@ class GPTAgent(LLMAgent):
             raise BeliefValidationError(
                 f"belief response was truncated (player={player_id}, phase={phase!r})"
             )
-        return parse_belief_response(
+        report = parse_belief_response(
             content,
             player_id=player_id,
             self_role=observation.get("identity"),
@@ -159,6 +161,19 @@ class GPTAgent(LLMAgent):
             exact_roles=exact_roles,
             role_options=role_options,
         )
+        try:
+            validate_role_report(
+                report,
+                player_id=player_id,
+                self_role=observation.get("identity"),
+                phase=phase,
+                exact_roles=exact_roles,
+                role_options=role_options,
+            )
+        except RoleReportValidationError:
+            # The raw response is already retained by the existing call audit.
+            pass
+        return report
 
     def _generate_speech(
         self,
@@ -170,7 +185,7 @@ class GPTAgent(LLMAgent):
     ):
         phase = observation.get("phase")
         player_id = observation.get("current_act_idx")
-        prompt = build_speech_prompt(observation, belief.as_dict())
+        prompt = build_speech_prompt(observation, belief.gameplay_dict())
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={"stage": "speech", "observation": observation},
@@ -201,7 +216,11 @@ class GPTAgent(LLMAgent):
         )
         legal_targets = tuple(target for target, _action in candidates)
         action_by_target = dict(candidates)
-        prompt = build_vote_prompt(observation, belief.as_dict(), legal_targets)
+        prompt = build_vote_prompt(
+            observation,
+            belief.gameplay_dict(),
+            legal_targets,
+        )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={"stage": "vote", "observation": observation},

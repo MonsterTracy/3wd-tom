@@ -12,10 +12,12 @@ from werewolf.agents.llm_agent import (
     BeliefValidationError,
     GameplayActionValidationError,
     GameplaySpeechQualityError,
+    RoleReportValidationError,
     belief_response_format,
     parse_belief_response,
     parse_vote_response,
     validate_gameplay_public_speech,
+    validate_role_report,
     vote_response_format,
 )
 from werewolf.agents.prompt_template_v0 import derive_belief_constraints
@@ -137,6 +139,18 @@ def _parse_belief(raw_response, observation):
     )
 
 
+def _validate_role_report(report, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    return validate_role_report(
+        report,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+    )
+
+
 class GameplayCognitionTest(unittest.TestCase):
     def _agent(self, backend, **kwargs):
         agent = GPTAgent(
@@ -212,18 +226,19 @@ class GameplayCognitionTest(unittest.TestCase):
 
         villager = _role_observation("Villager", 1)
         _exact_roles, role_options = derive_belief_constraints(villager)
-        with self.assertRaisesRegex(BeliefValidationError, "Villager"):
-            _parse_belief(
-                _belief_for(
-                    role_options,
-                    {
-                        "player2": "Villager",
-                        "player3": "Villager",
-                        "player4": "Villager",
-                    },
-                ),
-                villager,
-            )
+        report = _parse_belief(
+            _belief_for(
+                role_options,
+                {
+                    "player2": "Villager",
+                    "player3": "Villager",
+                    "player4": "Villager",
+                },
+            ),
+            villager,
+        )
+        with self.assertRaisesRegex(RoleReportValidationError, "Villager"):
+            _validate_role_report(report, villager)
 
     def test_werewolf_teammate_is_fixed_outside_inference_and_merged(self):
         observation = _role_observation(
@@ -269,6 +284,19 @@ class GameplayCognitionTest(unittest.TestCase):
         with self.assertRaises(BeliefValidationError):
             _parse_belief(json.dumps(leaked_known), observation)
 
+        backend = MetadataBackend([_belief_for(role_options), "维持当前发言策略。"])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "维持当前发言策略。"),
+        )
+        speech_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("真实狼队信息（仅用于内部策略）：player2, player7", speech_prompt)
+        gameplay_belief = speech_prompt.split(
+            "CURRENT PRIVATE BELIEF\n", 1
+        )[1].split("\n\nPUBLIC SPEECH", 1)[0]
+        self.assertNotIn('"roles"', gameplay_belief)
+
     def test_seer_good_excludes_werewolf_without_fixing_role(self):
         observation = _role_observation(
             "Seer",
@@ -307,6 +335,26 @@ class GameplayCognitionTest(unittest.TestCase):
             "Witch",
         )
 
+        invalid_response = _belief_for(
+            role_options,
+            {"player1": "Werewolf"},
+        )
+        invalid_report = _parse_belief(invalid_response, observation)
+        with self.assertRaisesRegex(
+            RoleReportValidationError,
+            "player1",
+        ):
+            _validate_role_report(invalid_report, observation)
+        self.assertEqual(invalid_report.roles["player1"], "Werewolf")
+
+        backend = MetadataBackend([invalid_response, "继续基于已知查验发言。"])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "继续基于已知查验发言。"),
+        )
+        self.assertEqual(len(backend.calls), 2)
+
     def test_seer_bad_is_fixed_outside_inference_and_merged(self):
         observation = _role_observation(
             "Seer",
@@ -331,24 +379,102 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertEqual(report.roles["player1"], "Werewolf")
         self.assertEqual(len(report.roles), 6)
 
-    def test_inventory_violation_fails_once_without_repair(self):
+    def test_inventory_invalid_report_is_detected_without_gating_gameplay(self):
         observation = _observation()
         _exact_roles, role_options = derive_belief_constraints(observation)
-        backend = MetadataBackend([
-            _belief_for(
-                role_options,
-                {
-                    "player2": "Villager",
-                    "player3": "Villager",
-                    "player4": "Villager",
-                },
-            )
-        ])
+        invalid_response = _belief_for(
+            role_options,
+            {
+                "player2": "Villager",
+                "player3": "Villager",
+                "player4": "Villager",
+            },
+        )
+        report = _parse_belief(invalid_response, observation)
+        with self.assertRaisesRegex(RoleReportValidationError, "Villager"):
+            _validate_role_report(report, observation)
+        self.assertEqual(
+            [report.roles[f"player{player}"] for player in (2, 3, 4)],
+            ["Villager", "Villager", "Villager"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Player_1.jsonl"
+            backend = MetadataBackend([invalid_response, "继续观察发言。"])
+            agent = self._agent(backend, log_file=str(path))
+            try:
+                self.assertEqual(
+                    agent.act(observation),
+                    ("speech", "继续观察发言。"),
+                )
+            finally:
+                agent.close()
+
+            self.assertEqual(len(backend.calls), 2)
+            belief_calls = [
+                call
+                for call in backend.calls
+                if "response_format" in call
+                and call["response_format"]["json_schema"]["name"]
+                == "belief_report"
+            ]
+            self.assertEqual(len(belief_calls), 1)
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(records[0]["response"], invalid_response)
+
+    def test_subjective_concrete_role_report_remains_valid(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        response = _belief_for(role_options, {"player2": "Seer"})
+        report = _parse_belief(response, observation)
+
+        self.assertIs(_validate_role_report(report, observation), report)
+        self.assertEqual(report.roles["player2"], "Seer")
+
+        backend = MetadataBackend([response, "保留当前判断。"])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            ("speech", "保留当前判断。"),
+        )
+        self.assertEqual(len(backend.calls), 2)
+
+    def test_inventory_invalid_report_does_not_gate_vote(self):
+        observation = _observation("1_day_vote")
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        invalid_response = _belief_for(
+            role_options,
+            {
+                "player2": "Villager",
+                "player3": "Villager",
+                "player4": "Villager",
+            },
+        )
+        backend = MetadataBackend([invalid_response, '{"target":0}'])
         agent = self._agent(backend)
 
-        with self.assertRaisesRegex(BeliefValidationError, "Villager"):
-            agent.act(observation)
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(agent.act(observation), ("vote", 0))
+        self.assertEqual(len(backend.calls), 2)
+        vote_prompt = backend.calls[1]["messages"][0]["content"]
+        gameplay_belief = vote_prompt.split(
+            "FRESH PRIVATE BELIEF\n", 1
+        )[1].split("\n\nVOTE", 1)[0]
+        self.assertNotIn('"roles"', gameplay_belief)
+
+    def test_malformed_belief_response_still_fails_fast(self):
+        malformed = (
+            "not-json",
+            json.dumps({"belief": "判断", "roles": {}}),
+            json.dumps({"belief": "判断", "concise": "结论", "roles": []}),
+        )
+        for response in malformed:
+            with self.subTest(response=response):
+                backend = MetadataBackend([response])
+                agent = self._agent(backend)
+
+                with self.assertRaises(BeliefValidationError):
+                    agent.act(_observation())
+                self.assertEqual(len(backend.calls), 1)
 
     def test_dead_claims_and_witch_target_do_not_fix_roles(self):
         claimed = _observation()
@@ -395,7 +521,18 @@ class GameplayCognitionTest(unittest.TestCase):
             "belief_report",
         )
         self.assertNotIn("response_format", backend.calls[1])
-        self.assertIn("CURRENT PRIVATE BELIEF", backend.calls[1]["messages"][0]["content"])
+        speech_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("CURRENT PRIVATE BELIEF", speech_prompt)
+        gameplay_belief = json.loads(
+            speech_prompt.split("CURRENT PRIVATE BELIEF\n", 1)[1].split(
+                "\n\nPUBLIC SPEECH", 1
+            )[0]
+        )
+        self.assertEqual(
+            gameplay_belief,
+            {"belief": "当前信息有限。", "concise": "继续观察。"},
+        )
+        self.assertNotIn("roles", gameplay_belief)
         self.assertNotIn("public_actions", backend.calls[1]["messages"][0]["content"])
 
     def test_day_logs_only_belief_and_speech_stages(self):
@@ -430,6 +567,16 @@ class GameplayCognitionTest(unittest.TestCase):
         )
         vote_prompt = backend.calls[1]["messages"][0]["content"]
         self.assertIn("FRESH PRIVATE BELIEF", vote_prompt)
+        gameplay_belief = json.loads(
+            vote_prompt.split("FRESH PRIVATE BELIEF\n", 1)[1].split(
+                "\n\nVOTE", 1
+            )[0]
+        )
+        self.assertEqual(
+            gameplay_belief,
+            {"belief": "当前信息有限。", "concise": "继续观察。"},
+        )
+        self.assertNotIn("roles", gameplay_belief)
         self.assertIn("Do not preserve", vote_prompt)
 
     def test_vote_abstention_maps_to_exact_environment_action(self):

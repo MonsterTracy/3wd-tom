@@ -60,6 +60,10 @@ class BeliefValidationError(ValueError):
     """A transient gameplay belief response violates its contract."""
 
 
+class RoleReportValidationError(ValueError):
+    """A structured role report violates observer-authoritative semantics."""
+
+
 BELIEF_ROLES = STRICT_BELIEF_CONCRETE_ROLES + ("unknown",)
 
 
@@ -74,6 +78,12 @@ class BeliefReport:
             "belief": self.belief,
             "concise": self.concise,
             "roles": dict(self.roles),
+        }
+
+    def gameplay_dict(self):
+        return {
+            "belief": self.belief,
+            "concise": self.concise,
         }
 
 
@@ -152,30 +162,12 @@ def parse_belief_response(
         raise BeliefValidationError(
             f"roles must contain only unresolved players ({context})"
         )
-    if any(
-        roles[player] not in role_options[player]
-        for player in expected_players
-    ):
+    if any(not isinstance(role, str) for role in roles.values()):
         raise BeliefValidationError(
-            f"roles contain a value outside the legal inference domain ({context})"
+            f"role report values must be strings ({context})"
         )
-
-    role_counts = {role: 0 for role in STRICT_BELIEF_CONCRETE_ROLES}
-    if self_role not in role_counts:
+    if self_role not in STRICT_CLASSIC7_ROLE_COUNTS:
         raise BeliefValidationError(f"unsupported self role ({context})")
-    role_counts[self_role] += 1
-    for role in exact_roles.values():
-        if role not in role_counts:
-            raise BeliefValidationError(f"unsupported exact-known role ({context})")
-        role_counts[role] += 1
-    for role in roles.values():
-        if role != "unknown":
-            role_counts[role] += 1
-    for role, count in role_counts.items():
-        if count > STRICT_CLASSIC7_ROLE_COUNTS[role]:
-            raise BeliefValidationError(
-                f"belief exceeds fixed {role} inventory ({context})"
-            )
 
     final_roles = {
         player: exact_roles[player] if player in exact_roles else roles[player]
@@ -186,6 +178,60 @@ def parse_belief_response(
         concise=payload["concise"].strip(),
         roles=final_roles,
     )
+
+
+def validate_role_report(
+    report,
+    *,
+    player_id,
+    self_role,
+    phase,
+    exact_roles,
+    role_options,
+):
+    """Validate one role report without judging subjective guesses by truth."""
+
+    context = f"player={player_id}, phase={phase}"
+    if not isinstance(report, BeliefReport):
+        raise RoleReportValidationError(f"invalid role report ({context})")
+    final_players = {
+        f"player{candidate}"
+        for candidate in range(1, 8)
+        if candidate != player_id
+    }
+    if set(report.roles) != final_players:
+        raise RoleReportValidationError(
+            f"role report must contain the other players ({context})"
+        )
+    for player, role in exact_roles.items():
+        if report.roles.get(player) != role:
+            raise RoleReportValidationError(
+                f"role report contradicts exact-known {player} ({context})"
+            )
+    for player, options in role_options.items():
+        if report.roles.get(player) not in options:
+            raise RoleReportValidationError(
+                f"role report violates the legal domain for {player} ({context})"
+            )
+
+    role_counts = {role: 0 for role in STRICT_BELIEF_CONCRETE_ROLES}
+    if self_role not in role_counts:
+        raise RoleReportValidationError(f"unsupported self role ({context})")
+    role_counts[self_role] += 1
+    for role in report.roles.values():
+        if role == "unknown":
+            continue
+        if role not in role_counts:
+            raise RoleReportValidationError(
+                f"role report contains an unsupported role ({context})"
+            )
+        role_counts[role] += 1
+    for role, count in role_counts.items():
+        if count > STRICT_CLASSIC7_ROLE_COUNTS[role]:
+            raise RoleReportValidationError(
+                f"role report exceeds fixed {role} inventory ({context})"
+            )
+    return report
 
 
 def vote_response_format(*, supports_json_schema, legal_targets):
