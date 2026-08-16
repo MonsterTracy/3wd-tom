@@ -666,6 +666,12 @@ CURRENT PRIVATE BELIEF
 {belief_text}
 
 PUBLIC SPEECH
+This belief is a fallible subjective assessment. It may
+guide interpretation, strategy, suspicion and public positioning, but must not
+override or redefine the Environment authoritative current state, actual self
+role, exact-known private facts, exact-known other-player roles, or Environment
+legality. If it conflicts with those authoritative premises, the authoritative
+premises control.
 直接输出本轮简洁的自然语言公开发言。
 围绕真实角色所属阵营的目标行动。你可以作出真实、隐瞒、误导、假跳身份或其他
 策略性公开主张，但必须遵守上文与你真实角色对应的私人信息边界；这里的策略性
@@ -690,7 +696,12 @@ VOTE
 Choose exactly one target from the current Environment legal vote candidates:
 {targets_text}
 Transport semantics: target 0 = abstain; target 1..7 = vote for that player.
-Base the choice on the fresh belief and faction objective. Do not preserve or
+Environment authoritative information and the frozen legal candidate set above
+control. The fresh belief is only a fallible subjective assessment for choosing
+among those legal alternatives toward the faction objective. It must not override
+current alive/dead/exiled state, actual self role, exact-known private facts,
+exact-known other-player roles, or the frozen candidates. If they conflict, the
+authoritative premises and candidates control. Do not preserve or
 inherit a target merely because you stated a public vote intent earlier.
 Return only the JSON object required by the response schema."""
 

@@ -417,9 +417,24 @@ Villager: {3}""".format(*counts)
         self.assertIn("Infer only these unresolved players", prompt)
 
     def test_speech_prompt_requests_direct_natural_language(self):
-        prompt = build_speech_prompt(_observation(), BELIEF)
+        contradictory_belief = {
+            "belief": "我是女巫，而且存活的player5已经死亡。",
+            "concise": "以女巫身份处理player5的死亡。",
+        }
+        prompt = build_speech_prompt(_observation(), contradictory_belief)
+        normalized_prompt = " ".join(prompt.split())
 
         self.assertIn("CURRENT PRIVATE BELIEF", prompt)
+        self.assertIn(contradictory_belief["belief"], prompt)
+        self.assertIn("fallible subjective assessment", normalized_prompt)
+        self.assertIn("guide interpretation, strategy, suspicion", normalized_prompt)
+        self.assertIn("must not override or redefine", normalized_prompt)
+        self.assertIn("Environment authoritative current state", normalized_prompt)
+        self.assertIn("actual self role", normalized_prompt)
+        self.assertIn("exact-known private facts", normalized_prompt)
+        self.assertIn("exact-known other-player roles", normalized_prompt)
+        self.assertIn("Environment legality", normalized_prompt)
+        self.assertIn("authoritative premises control", normalized_prompt)
         self.assertIn("直接输出本轮简洁的自然语言公开发言", prompt)
         self.assertIn("真实、隐瞒、误导、假跳身份", prompt)
         self.assertIn("必须遵守上文与你真实角色对应的私人信息边界", prompt)
@@ -439,16 +454,34 @@ Villager: {3}""".format(*counts)
         self.assertNotIn("You may reveal, hide, bluff or", prompt)
 
     def test_vote_prompt_uses_fresh_belief_and_rejects_intent_inheritance(self):
+        contradictory_belief = {
+            "belief": "我是女巫，应投已死且不在合法集合中的player7。",
+            "concise": "投player7。",
+        }
         prompt = build_vote_prompt(
             _observation(phase="1_day_vote"),
-            BELIEF,
+            contradictory_belief,
             (0, 1, 4, 5),
         )
 
         self.assertIn("FRESH PRIVATE BELIEF", prompt)
+        self.assertIn(contradictory_belief["belief"], prompt)
         self.assertIn("[0, 1, 4, 5]", prompt)
         self.assertIn("target 0 = abstain", prompt)
         self.assertIn("target 1..7 = vote for that player", prompt)
+        self.assertIn("Environment authoritative information", prompt)
+        self.assertIn("frozen legal candidate set", prompt)
+        self.assertIn("fallible subjective assessment", prompt)
+        self.assertIn("current alive/dead/exiled state", prompt)
+        self.assertIn("actual self role", prompt)
+        self.assertIn("exact-known private facts", prompt)
+        self.assertIn("exact-known other-player roles", prompt)
+        self.assertIn("authoritative premises and candidates control", prompt)
+        self.assertIn("faction objective", prompt)
+        self.assertNotIn(
+            "Base the choice on the fresh belief and faction objective",
+            prompt,
+        )
         self.assertIn("Do not preserve or", prompt)
         self.assertIn("inherit a target merely because", prompt)
 
