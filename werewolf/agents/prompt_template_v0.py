@@ -524,6 +524,14 @@ def build_belief_prompt(
     elif exact_roles is None or role_options is None:
         raise ValueError("exact_roles and role_options must be supplied together")
     context = _build_gameplay_context(observation)
+    remaining_inventory = dict(STRICT_CLASSIC7_ROLE_COUNTS)
+    remaining_inventory[observation["identity"]] -= 1
+    for role in exact_roles.values():
+        remaining_inventory[role] -= 1
+    inventory_text = "\n".join(
+        f"{role}: {remaining_inventory[role]}"
+        for role in STRICT_BELIEF_CONCRETE_ROLES
+    )
     exact_text = json.dumps(exact_roles, ensure_ascii=False, sort_keys=True)
     options_text = json.dumps(
         {
@@ -539,6 +547,11 @@ BELIEF OUTPUT
 Treat the Environment-supplied self role and these exact-known other-player
 roles as fixed premises. Do not reinterpret or re-guess them:
 {exact_text}
+Remaining concrete role inventory for unresolved players:
+{inventory_text}
+Across all unresolved players, concrete role guesses must not
+exceed this remaining inventory. This is one global constraint across the complete roles object.
+"unknown" consumes no role slot.
 Infer only these unresolved players, using only each player's listed values:
 {options_text}
 The roles object must contain exactly those unresolved players and no known

@@ -106,6 +106,43 @@ class GameplayPromptTest(unittest.TestCase):
         self.assertIn("concise field must be a short derived conclusion", prompt)
         self.assertIn("no more than 2 short sentences", prompt)
 
+    def test_belief_prompt_renders_remaining_global_role_inventory(self):
+        wolf_team = Log(
+            viewer=[3, 7],
+            source=0,
+            target=[3, 7],
+            content={"wolf_team": [3, 7]},
+            day=0,
+            time="第0天夜晚",
+            event="werewolf_team_info",
+        )
+        cases = (
+            ("Villager", [], (2, 1, 1, 2)),
+            ("Witch", [], (2, 1, 0, 3)),
+            ("Seer", [], (2, 0, 1, 3)),
+            ("Werewolf", [wolf_team], (0, 1, 1, 3)),
+        )
+
+        for identity, extra_logs, counts in cases:
+            with self.subTest(identity=identity):
+                observation = _observation(identity=identity)
+                observation["game_log"].extend(extra_logs)
+                prompt = build_belief_prompt(observation)
+                expected_inventory = """Remaining concrete role inventory for unresolved players:
+Werewolf: {0}
+Seer: {1}
+Witch: {2}
+Villager: {3}""".format(*counts)
+
+                self.assertIn(expected_inventory, prompt)
+                self.assertIn(
+                    "Across all unresolved players, concrete role guesses must not",
+                    prompt,
+                )
+                self.assertIn("exceed this remaining inventory", prompt)
+                self.assertIn("global constraint across the complete roles object", prompt)
+                self.assertIn('"unknown" consumes no role slot', prompt)
+
     def test_belief_prompt_separates_authority_private_facts_and_raw_claims(self):
         prompt = build_belief_prompt(_observation())
 
