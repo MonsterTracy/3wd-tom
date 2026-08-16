@@ -216,11 +216,13 @@ class WerewolfTextEnvV0(gym.Env):
         info = {}
 
         if (
-            self.phase in {'skill_seer', 'vote', 'vote_pk'}
+            self.phase in {'skill_seer', 'skill_witch', 'vote', 'vote_pk'}
             and action not in self._get_valid_action_for_current_actor()
         ):
             if self.phase == 'skill_seer':
                 raise ValueError("invalid Seer check action")
+            if self.phase == 'skill_witch':
+                raise ValueError("invalid Witch action")
             vote_phase = "normal" if self.phase == 'vote' else "PK"
             raise ValueError(f"invalid {vote_phase} vote action")
 
@@ -247,21 +249,10 @@ class WerewolfTextEnvV0(gym.Env):
                 self.current_act_idx = self.WOLF_IDX[tmp_idx + 1]
                 self.phase = 'skill_wolf'
             else:
-                kill_candidate = [target.get(self.get_phase(self.day, self.day_or_night, 'skill_wolf'), -1) for target
-                                  in self.single_werewolf_kill_target]
-                kill_condidate_counter = Counter(kill_candidate)
-                del kill_condidate_counter[-1]
-                wolf_kill_idx = -1
-
-                if len(kill_condidate_counter) > 0:
-                    most_count = kill_condidate_counter.most_common(1)[0]
-                    if list(kill_condidate_counter.values()).count(most_count[1]) > 1:
-                        for i in range(len(kill_candidate) - 1, -1, -1):
-                            if kill_candidate[i] != -1:
-                                wolf_kill_idx = kill_candidate[i]
-                                break
-                    else:
-                        wolf_kill_idx = most_count[0]
+                # The final living Werewolf acts after seeing earlier private
+                # Werewolf proposals. Its action is the authoritative team
+                # decision, including an intentional no-kill.
+                wolf_kill_idx = action_content
                 self.werewolf_kill_decision[self.get_phase(self.day, self.day_or_night, self.phase)] = wolf_kill_idx
                 witch_viewers = (
                     [self.WITCH_IDX]
@@ -519,14 +510,11 @@ class WerewolfTextEnvV0(gym.Env):
                     speak_n = random.randint(0, len(tmp_speech_queue))
                     self.speech_queue = tmp_speech_queue[speak_n:] + tmp_speech_queue[:speak_n]
 
-                    self.vote_queue = []
-                    for player_idx in range(self.n_player):
-                        if self.alive[player_idx] == 1 and player_idx not in self.speech_queue:
-                            self.vote_queue.append(player_idx)
-
-                    if len(self.vote_queue) == 0:
-                        self.vote_queue = deepcopy(self.speech_queue)
-                        self.vote_queue.sort()
+                    self.vote_queue = [
+                        player_idx
+                        for player_idx in range(self.n_player)
+                        if self.alive[player_idx] == 1
+                    ]
                     self.vote_pk_players = deepcopy(self.speech_queue)
 
                     self.game_log.append(Log([idx for idx in range(self.n_player)], source=-1, target=-1,
@@ -674,7 +662,7 @@ class WerewolfTextEnvV0(gym.Env):
             ]
 
         elif self.phase == 'skill_seer':
-            valid_action = [('check', -1)] + [
+            valid_action = [
                 ('check', idx)
                 for idx, is_live in enumerate(self.alive)
                 if (
@@ -683,6 +671,8 @@ class WerewolfTextEnvV0(gym.Env):
                     and idx not in self.seer_check_target.values()
                 )
             ]
+            if len(valid_action) == 0:
+                valid_action = [('check', -1)]
 
         elif self.phase == 'skill_guard':
             valid_action = [('guard', -1)] + [
@@ -725,12 +715,13 @@ class WerewolfTextEnvV0(gym.Env):
                 valid_action += [
                     ('witch_poison', idx)
                     for idx, is_live in enumerate(self.alive)
-                    if is_live == 1
+                    if is_live == 1 and idx != self.WITCH_IDX
                 ]
 
             if (
                 len(self.witch_heal_target) == 0
                 and wolf_kill_decision != -1
+                and wolf_kill_decision != self.WITCH_IDX
             ):
                 valid_action.append(
                     (

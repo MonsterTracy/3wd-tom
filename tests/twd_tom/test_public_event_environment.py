@@ -33,7 +33,7 @@ def _env(parser=None):
 def _finish_first_night(env, target):
     env.step(("kill", target))
     env.step(("kill", target))
-    env.step(("check", 0))
+    env.step(("check", 1))
     env.step(("witch_pass", 0))
 
 

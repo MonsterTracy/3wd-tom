@@ -63,7 +63,7 @@ def test_witch_keeps_legal_knife_target_and_sees_no_later_target_after_heal():
         [],
         ["player4", "player5"],
     )
-    env.step(("check", 0))
+    env.step(("check", 1))
     env.step(("witch_heal", 5))
 
     env.phase = "skill_wolf"
@@ -80,7 +80,7 @@ def test_witch_poison_target_does_not_enter_hard_knowledge():
     env = _env()
     env.step(("kill", 5))
     env.step(("kill", 5))
-    env.step(("check", 0))
+    env.step(("check", 1))
     before = env.get_twd_tom_hard_knowledge_for(4)
     env.step(("witch_poison", 6))
 
