@@ -132,24 +132,34 @@ class GameplayPromptTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "1 Witch"):
             build_belief_prompt(observation)
 
-    def test_belief_prompt_uses_fixed_premises_and_unresolved_domain(self):
+    def test_belief_prompt_separates_gameplay_cognition_from_role_report(self):
         prompt = build_belief_prompt(_observation(identity="Seer"))
 
         self.assertIn("roles as fixed premises", prompt)
         self.assertIn("Do not reinterpret or re-guess them", prompt)
-        self.assertIn("compact step-by-step role deduction", prompt)
         self.assertIn("Infer only these unresolved players", prompt)
         self.assertIn("roles object must contain exactly those unresolved", prompt)
+        self.assertIn("roles-object inference rules above apply to the roles field", prompt)
+        self.assertIn("not to which", prompt)
+        self.assertIn("players the gameplay belief may discuss", prompt)
+        self.assertIn("belief field is gameplay cognition", prompt)
+        self.assertIn("Environment authoritative", prompt)
+        self.assertIn("exact-known private facts", prompt)
+        self.assertIn("Use both exact-known facts and relevant unresolved-player", prompt)
+        self.assertIn("You may mention exact-known", prompt)
+        self.assertIn("do not reinterpret or re-guess fixed facts", prompt)
+        self.assertIn("do not try to explain or enumerate the roles object", prompt)
         self.assertIn("Do not restate the game rules", prompt)
         self.assertIn("recount or recompute the fixed 7-player role composition", prompt)
         self.assertIn("Do not repeat the observation or history", prompt)
         self.assertIn("Do not mechanically discuss every unresolved player", prompt)
         self.assertIn('Use "unknown" when the available', prompt)
         self.assertIn("information is insufficient", prompt)
-        self.assertIn("belief field must reason only about unresolved", prompt)
+        self.assertNotIn("belief field must reason only about unresolved", prompt)
         self.assertIn("as concise as possible", prompt)
         self.assertIn("about 50 words", prompt)
-        self.assertIn("concise field must be a short derived conclusion", prompt)
+        self.assertIn("concise field must be a short gameplay conclusion", prompt)
+        self.assertIn("not a\nsummary of the roles object", prompt)
         self.assertIn("no more than 2 short sentences", prompt)
 
     def test_belief_prompt_renders_remaining_global_role_inventory(self):
