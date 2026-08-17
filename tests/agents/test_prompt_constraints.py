@@ -517,6 +517,27 @@ Villager: {3}""".format(*counts)
         self.assertIn("编码的策略性欺骗、误导或假跳仍然允许", prompt)
         self.assertIn("playerX 是唯一可推动的当前放逐投票目标", prompt)
         self.assertIn("若不存在 vote_intent，不得发明新的当前", prompt)
+        self.assertIn(
+            "DiscussionAct V1 itself is atemporal and does not license a "
+            "concrete temporal",
+            prompt,
+        )
+        self.assertIn(
+            "check_as_*, save and poison must not by themselves be rendered as",
+            prompt,
+        )
+        for forbidden_anchor in (
+            '"last night"',
+            '"the night before"',
+            "Night0/Night1",
+            '"first night"',
+        ):
+            self.assertIn(forbidden_anchor, prompt)
+        self.assertIn(
+            "only when SELECTED PUBLIC EVIDENCE or authoritative PUBLIC "
+            "information explicitly provides that time",
+            prompt,
+        )
         self.assertIn("不要复述游戏规则、完整历史、分析过程或内部计划", prompt)
         self.assertIn("控制在 1 到 3 句", prompt)
         self.assertIn("目标不超过约 120 个汉字", prompt)

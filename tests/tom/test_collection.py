@@ -359,12 +359,34 @@ def test_hard_knowledge_ignores_god_view_and_speech_claims():
     }
 
 
+def test_witch_kill_target_is_known_non_werewolf():
+    observation = legal_observation(
+        4,
+        "Witch",
+        [
+            Log(
+                viewer=[4], source=0, target=5,
+                content={"kill_decision": 5}, day=1,
+                time="night", event="kill_decision",
+            )
+        ],
+    )
+
+    assert BeliefReporter.derive_hard_knowledge(4, observation) == {
+        "known_werewolves": [],
+        "known_non_werewolves": ["player4", "player5"],
+        "unknown_players": [
+            "player1", "player2", "player3", "player6", "player7",
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     ("observer_id", "identity", "event", "content"),
     [
-        (4, "Witch", "kill_decision", {"kill_decision": 5}),
         (4, "Witch", "skill_witch", {"poison": 5}),
         (4, "Guard", "skill_guard", {"protected": 5}),
+        (7, "Villager", "kill_decision", {"kill_decision": 5}),
     ],
 )
 def test_other_roles_do_not_infer_roles_from_skill_targets(

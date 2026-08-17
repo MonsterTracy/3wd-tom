@@ -117,6 +117,10 @@ class BeliefReporter:
                     known_non_werewolves.add(normalize_player(log["target"]))
                 elif checked is not None:
                     raise ValueError("unsupported Seer check result")
+            elif event == "kill_decision" and self_role == "Witch":
+                target = log["target"]
+                if type(target) is int and 1 <= target <= 7:
+                    known_non_werewolves.add(normalize_player(target))
 
         known_werewolves.update(wolf_team)
         if wolf_team and len(wolf_team) == public_wolf_count:

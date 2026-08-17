@@ -388,6 +388,19 @@ def derive_belief_constraints(observation):
             elif result == "good":
                 excluded_roles[player].add("Werewolf")
 
+    if self_role == "Witch":
+        for log in game_log:
+            if getattr(log, "event", None) != "kill_decision":
+                continue
+            target = getattr(log, "target", None)
+            if (
+                isinstance(target, int)
+                and not isinstance(target, bool)
+                and 1 <= target <= 7
+                and target != player_id
+            ):
+                excluded_roles[f"player{target}"].add("Werewolf")
+
     known_counts = {role: 0 for role in STRICT_BELIEF_CONCRETE_ROLES}
     known_counts[self_role] += 1
     for role in exact_roles.values():
@@ -1031,6 +1044,10 @@ DISCUSSION INTENT 中明确编码的身份、查验、解救或毒杀陈述可�
 除 DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息许可的内容外，
 不得添加任何玩家特定的私有事实、真实身份、队友、夜间行动或其他命题。冻结意图中
 编码的策略性欺骗、误导或假跳仍然允许。
+DiscussionAct V1 itself is atemporal and does not license a concrete temporal
+anchor. check_as_*, save and poison must not by themselves be rendered as
+"last night", "the night before", Night0/Night1, "first night" or any other
+concrete time. A concrete time may be expressed only when SELECTED PUBLIC EVIDENCE or authoritative PUBLIC information explicitly provides that time.
 不要复述游戏规则、完整历史、分析过程或内部计划，也不要逐条总结所有玩家。
 发言保持简洁、具体，控制在 1 到 3 句，目标不超过约 120 个汉字。
 不要输出 JSON、Markdown、分析、计划或结构化公开动作，也不要暴露控制文本或私有系统数据。"""

@@ -708,7 +708,7 @@ class GameplayCognitionTest(unittest.TestCase):
                     agent.act(observation)
                 self.assertEqual(len(backend.calls), 1)
 
-    def test_dead_claims_and_witch_target_do_not_fix_roles(self):
+    def test_dead_claims_and_witch_kill_target_constraints(self):
         claimed = _observation()
         exact_roles, _role_options = derive_belief_constraints(claimed)
         self.assertEqual(exact_roles, {})
@@ -732,12 +732,27 @@ class GameplayCognitionTest(unittest.TestCase):
                     day=1,
                     time="第1天夜晚",
                     event="kill_decision",
-                )
+                ),
+                Log(
+                    viewer=[4],
+                    source=4,
+                    target=6,
+                    content={"poison": 6},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_witch",
+                ),
             ],
         )
         exact_roles, witch_options = derive_belief_constraints(witch)
         self.assertEqual(exact_roles, {})
-        self.assertEqual(witch_options["player5"], witch_options["player1"])
+        self.assertEqual(
+            witch_options["player5"],
+            ("Seer", "Villager", "unknown"),
+        )
+        self.assertNotIn("Werewolf", witch_options["player5"])
+        self.assertIn("Werewolf", witch_options["player1"])
+        self.assertEqual(witch_options["player6"], witch_options["player1"])
 
     def test_day_path_is_structured_cognition_then_public_only_speech(self):
         backend = MetadataBackend([
