@@ -529,8 +529,10 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
                     f"player{player_id}": "unknown"
                     for player_id in range(2, 8)
                 },
+                "public_action_indices": [0],
+                "evidence_claim_ids": [],
             }, ensure_ascii=False)
-            if response_name == "belief_report"
+            if response_name == "day_cognition_report"
             else "这是公开发言。"
         )
         return _success_response(request, content=content)

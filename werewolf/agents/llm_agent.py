@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
     CON,
+    DiscussionAct,
     LEGACY_GAMEPLAY_PROMPT_PROFILE,
     STRICT_BELIEF_CONCRETE_ROLES,
     STRICT_CLASSIC7_GAME_DESCRIPTION,
@@ -87,6 +88,15 @@ class BeliefReport:
         }
 
 
+@dataclass(frozen=True)
+class DayCognitionReport:
+    belief: str
+    concise: str
+    roles: dict[str, str]
+    public_action_indices: tuple[int, ...]
+    evidence_claim_ids: tuple[str, ...]
+
+
 def belief_response_format(*, supports_json_schema, role_options):
     if supports_json_schema is not True:
         raise BackendError("belief generation requires backend JSON Schema support")
@@ -116,6 +126,91 @@ def belief_response_format(*, supports_json_schema, role_options):
                             }
                             for player in unresolved_players
                         },
+                    },
+                },
+            },
+        },
+    }
+
+
+def day_cognition_response_format(
+    *,
+    supports_json_schema,
+    role_options,
+    candidate_snapshot,
+    claim_ids,
+):
+    if supports_json_schema is not True:
+        raise BackendError(
+            "Day cognition requires backend JSON Schema support"
+        )
+    if not isinstance(role_options, dict) or not role_options:
+        raise ValueError("role_options must be a non-empty dictionary")
+    if (
+        not isinstance(candidate_snapshot, tuple)
+        or not candidate_snapshot
+        or any(not isinstance(act, DiscussionAct) for act in candidate_snapshot)
+    ):
+        raise ValueError(
+            "candidate_snapshot must be a non-empty DiscussionAct tuple"
+        )
+    if not isinstance(claim_ids, tuple) or any(
+        not isinstance(claim_id, str) for claim_id in claim_ids
+    ):
+        raise TypeError("claim_ids must be a tuple of strings")
+
+    unresolved_players = list(role_options)
+    evidence_items = (
+        {"type": "string", "enum": list(claim_ids)}
+        if claim_ids
+        else {"type": "string"}
+    )
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "day_cognition_report",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "belief",
+                    "concise",
+                    "roles",
+                    "public_action_indices",
+                    "evidence_claim_ids",
+                ],
+                "properties": {
+                    "belief": {"type": "string", "minLength": 1},
+                    "concise": {"type": "string", "minLength": 1},
+                    "roles": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": unresolved_players,
+                        "properties": {
+                            player: {
+                                "type": "string",
+                                "enum": list(role_options[player]),
+                            }
+                            for player in unresolved_players
+                        },
+                    },
+                    "public_action_indices": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "uniqueItems": True,
+                        "items": {
+                            "type": "integer",
+                            "enum": list(range(len(candidate_snapshot))),
+                        },
+                    },
+                    "evidence_claim_ids": {
+                        "type": "array",
+                        "minItems": 0,
+                        "maxItems": min(2, len(claim_ids)),
+                        "uniqueItems": True,
+                        "items": evidence_items,
                     },
                 },
             },
@@ -180,6 +275,111 @@ def parse_belief_response(
     )
 
 
+def parse_day_cognition_response(
+    raw_response,
+    *,
+    player_id,
+    self_role,
+    phase,
+    exact_roles,
+    role_options,
+    candidate_snapshot,
+    claim_ids,
+):
+    context = f"player={player_id}, phase={phase}"
+    try:
+        payload = json.loads(raw_response)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BeliefValidationError(
+            f"Day cognition response is not valid JSON ({context})"
+        ) from exc
+    required_fields = {
+        "belief",
+        "concise",
+        "roles",
+        "public_action_indices",
+        "evidence_claim_ids",
+    }
+    if not isinstance(payload, dict) or set(payload) != required_fields:
+        raise BeliefValidationError(
+            f"Day cognition fields do not match contract ({context})"
+        )
+    if (
+        not isinstance(candidate_snapshot, tuple)
+        or not candidate_snapshot
+        or any(not isinstance(act, DiscussionAct) for act in candidate_snapshot)
+    ):
+        raise BeliefValidationError(
+            f"invalid discussion candidate snapshot ({context})"
+        )
+    if not isinstance(claim_ids, tuple) or any(
+        not isinstance(claim_id, str) for claim_id in claim_ids
+    ):
+        raise BeliefValidationError(f"invalid public claim catalog ({context})")
+
+    indices = payload["public_action_indices"]
+    if (
+        not isinstance(indices, list)
+        or not 1 <= len(indices) <= 3
+        or any(
+            isinstance(index, bool) or not isinstance(index, int)
+            for index in indices
+        )
+        or len(set(indices)) != len(indices)
+        or any(not 0 <= index < len(candidate_snapshot) for index in indices)
+    ):
+        raise BeliefValidationError(
+            f"invalid public_action_indices ({context})"
+        )
+    selected_actions = [candidate_snapshot[index].action for index in indices]
+    if (
+        ("no_commitment" in selected_actions and len(selected_actions) != 1)
+        or selected_actions.count("vote_intent") > 1
+        or selected_actions.count("abstain_intent") > 1
+        or (
+            "vote_intent" in selected_actions
+            and "abstain_intent" in selected_actions
+        )
+    ):
+        raise BeliefValidationError(
+            f"invalid discussion action combination ({context})"
+        )
+
+    evidence_claim_ids = payload["evidence_claim_ids"]
+    if (
+        not isinstance(evidence_claim_ids, list)
+        or len(evidence_claim_ids) > 2
+        or any(not isinstance(claim_id, str) for claim_id in evidence_claim_ids)
+        or len(set(evidence_claim_ids)) != len(evidence_claim_ids)
+        or any(claim_id not in claim_ids for claim_id in evidence_claim_ids)
+    ):
+        raise BeliefValidationError(
+            f"invalid evidence_claim_ids ({context})"
+        )
+
+    belief_report = parse_belief_response(
+        json.dumps(
+            {
+                "belief": payload["belief"],
+                "concise": payload["concise"],
+                "roles": payload["roles"],
+            }
+        ),
+        player_id=player_id,
+        self_role=self_role,
+        phase=phase,
+        exact_roles=exact_roles,
+        role_options=role_options,
+    )
+    return DayCognitionReport(
+        belief=belief_report.belief,
+        concise=belief_report.concise,
+        roles=belief_report.roles,
+        public_action_indices=tuple(indices),
+        evidence_claim_ids=tuple(evidence_claim_ids),
+    )
+
+
 def validate_role_report(
     report,
     *,
@@ -192,7 +392,7 @@ def validate_role_report(
     """Validate one role report without judging subjective guesses by truth."""
 
     context = f"player={player_id}, phase={phase}"
-    if not isinstance(report, BeliefReport):
+    if not isinstance(report, (BeliefReport, DayCognitionReport)):
         raise RoleReportValidationError(f"invalid role report ({context})")
     final_players = {
         f"player{candidate}"
@@ -401,6 +601,10 @@ def validate_gameplay_public_speech(
         "CURRENT PRIVATE BELIEF",
         "FRESH PRIVATE BELIEF",
         "BELIEF OUTPUT",
+        "COMMON PUBLIC RULES",
+        "PUBLIC AUTHORITATIVE INFORMATION",
+        "DISCUSSION INTENT",
+        "SELECTED PUBLIC EVIDENCE",
         "Environment authoritative public state",
         "Authoritative public history (chronological)",
         "Private facts legally visible to this player",

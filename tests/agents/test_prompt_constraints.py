@@ -1,10 +1,17 @@
 import unittest
 
 from werewolf.agents.prompt_template_v0 import (
+    DISCUSSION_ACTIONS,
+    DiscussionAct,
     _render_authoritative_public_history,
     build_belief_prompt,
-    build_speech_prompt,
+    build_day_cognition_prompt,
+    build_public_claim_catalog,
+    build_public_speech_prompt,
     build_vote_prompt,
+    derive_belief_constraints,
+    derive_discussion_vote_targets,
+    freeze_discussion_candidates,
 )
 from werewolf.helper.log_utils import Log
 
@@ -282,15 +289,31 @@ Villager: {3}""".format(*counts)
         self.assertIn("not an authoritative fact", conversation)
         self.assertNotIn("- [第9天夜晚 /", conversation)
 
-    def test_all_gameplay_prompts_share_temporal_public_conversation(self):
+        catalog = build_public_claim_catalog(observation)
+        self.assertEqual(
+            tuple(claim.claim_id for claim in catalog),
+            ("claim_000", "claim_001"),
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+        day_prompt = build_day_cognition_prompt(
+            observation,
+            exact_roles=exact_roles,
+            role_options=role_options,
+            candidate_snapshot=freeze_discussion_candidates(observation),
+            claim_catalog=catalog,
+        )
+        self.assertLess(day_prompt.index("claim_000"), day_prompt.index("claim_001"))
+        self.assertIn(f"[claim_000] [第1天白天 / speech] player4：{raw_speech}", day_prompt)
+        self.assertIn(f"[claim_001] [第2天白天 / speech_pk] player4：{raw_speech}", day_prompt)
+
+    def test_day_claim_ids_do_not_change_default_belief_or_vote_history(self):
         observation = _observation()
         gameplay_belief = {
             "belief": BELIEF["belief"],
             "concise": BELIEF["concise"],
         }
-        prompts = (
+        default_prompts = (
             build_belief_prompt(observation),
-            build_speech_prompt(observation, gameplay_belief),
             build_vote_prompt(observation, gameplay_belief, (0, 1, 4, 5)),
         )
         rendered_speech = (
@@ -298,17 +321,23 @@ Villager: {3}""".format(*counts)
             "player2：我声称player5是狼人。"
         )
 
-        for prompt in prompts:
+        for prompt in default_prompts:
             with self.subTest(prompt=prompt):
                 self.assertIn(rendered_speech, prompt)
-        for marker, prompt in (
-            ("CURRENT PRIVATE BELIEF\n", prompts[1]),
-            ("FRESH PRIVATE BELIEF\n", prompts[2]),
-        ):
-            private_belief = prompt.split(marker, 1)[1].split("\n\n", 1)[0]
-            self.assertIn('"belief"', private_belief)
-            self.assertIn('"concise"', private_belief)
-            self.assertNotIn('"roles"', private_belief)
+                self.assertNotIn("claim_000", prompt)
+
+        exact_roles, role_options = derive_belief_constraints(observation)
+        catalog = build_public_claim_catalog(observation)
+        day_prompt = build_day_cognition_prompt(
+            observation,
+            exact_roles=exact_roles,
+            role_options=role_options,
+            candidate_snapshot=freeze_discussion_candidates(observation),
+            claim_catalog=catalog,
+        )
+        self.assertIn("[claim_000] [第1天白天 / speech]", day_prompt)
+        self.assertIn("DISCUSSION INTENT OUTPUT", day_prompt)
+        self.assertNotIn("sp_actions", day_prompt)
 
     def test_multiday_public_results_stay_authoritative_and_chronological(self):
         logs = [
@@ -416,42 +445,123 @@ Villager: {3}""".format(*counts)
         self.assertIn("Environment-supplied self role", prompt)
         self.assertIn("Infer only these unresolved players", prompt)
 
-    def test_speech_prompt_requests_direct_natural_language(self):
-        contradictory_belief = {
-            "belief": "我是女巫，而且存活的player5已经死亡。",
-            "concise": "以女巫身份处理player5的死亡。",
-        }
-        prompt = build_speech_prompt(_observation(), contradictory_belief)
-        normalized_prompt = " ".join(prompt.split())
+    def test_public_speech_prompt_is_public_only_and_selected_claim_only(self):
+        observation = _observation(identity="Werewolf")
+        observation["game_log"] = [
+            Log([3, 7], 0, [3, 7], {"wolf_team": [3, 7]}, 0, "第0天夜晚", "werewolf_team_info"),
+            Log([3, 7], 0, 6, {"kill_decision": 6}, 0, "第0天夜晚", "kill_decision"),
+            Log(list(range(1, 8)), 2, list(range(1, 8)), {"speech_content": "SELECTED-CLAIM-CANARY", "sp_actions": []}, 1, "第1天白天", "speech"),
+            Log(list(range(1, 8)), 4, list(range(1, 8)), {"speech_content": "UNSELECTED-CLAIM-CANARY", "sp_actions": []}, 1, "第1天白天", "speech"),
+            Log(list(range(1, 8)), 0, 4, {"vote_outcome": 4, "expelled": 4}, 1, "第1天白天", "end_vote"),
+            Log(list(range(1, 8)), 0, [6], {"dead_list": [6]}, 1, "第1天夜晚", "end_night"),
+        ]
+        observation["authoritative_public_state"].update({
+            "last_night_result": {"day": 1, "dead_players": [6]},
+            "prior_exiles": [{"player_id": 4, "day": 1}],
+            "alive_players": [1, 2, 3, 5, 7],
+            "suggestible_exile_targets": [1, 2, 5, 7],
+        })
+        catalog = build_public_claim_catalog(observation)
+        prompt = build_public_speech_prompt(
+            observation,
+            discussion_acts=(
+                DiscussionAct("point_as_seer", 3),
+                DiscussionAct("vote_intent", 5),
+            ),
+            selected_claims=(catalog[0],),
+        )
 
-        self.assertIn("CURRENT PRIVATE BELIEF", prompt)
-        self.assertIn(contradictory_belief["belief"], prompt)
-        self.assertIn("fallible subjective assessment", normalized_prompt)
-        self.assertIn("guide interpretation, strategy, suspicion", normalized_prompt)
-        self.assertIn("must not override or redefine", normalized_prompt)
-        self.assertIn("Environment authoritative current state", normalized_prompt)
-        self.assertIn("actual self role", normalized_prompt)
-        self.assertIn("exact-known private facts", normalized_prompt)
-        self.assertIn("exact-known other-player roles", normalized_prompt)
-        self.assertIn("Environment legality", normalized_prompt)
-        self.assertIn("authoritative premises control", normalized_prompt)
+        self.assertIn("COMMON PUBLIC RULES", prompt)
+        self.assertIn("PUBLIC AUTHORITATIVE INFORMATION", prompt)
+        self.assertIn("Current speaker: player3", prompt)
+        self.assertIn("DISCUSSION INTENT", prompt)
+        self.assertIn("point_as_seer(player3)", prompt)
+        self.assertIn("vote_intent(player5)", prompt)
+        self.assertIn("SELECTED PUBLIC EVIDENCE", prompt)
+        self.assertIn("SELECTED-CLAIM-CANARY", prompt)
+        self.assertNotIn("UNSELECTED-CLAIM-CANARY", prompt)
+        self.assertIn("player4 was exiled", prompt)
+        self.assertIn("completed night result: player6 died", prompt)
+        self.assertIn("【当前存活】player1, player2, player3, player5, player7", prompt)
+        self.assertNotIn("PUBLIC CONVERSATION", prompt)
+        self.assertNotIn("CURRENT PRIVATE BELIEF", prompt)
+        self.assertNotIn("Actual role supplied by the Environment: Werewolf", prompt)
+        self.assertNotIn("真实狼队信息（仅用于内部策略）：player3, player7", prompt)
+        self.assertNotIn("第0天夜晚：击杀 player6", prompt)
         self.assertIn("直接输出本轮简洁的自然语言公开发言", prompt)
-        self.assertIn("真实、隐瞒、误导、假跳身份", prompt)
-        self.assertIn("必须遵守上文与你真实角色对应的私人信息边界", prompt)
+        self.assertIn("策略性欺骗、误导或假跳", prompt)
+        self.assertIn("不得发明、暴露或暗示任何私有信息", prompt)
         self.assertIn("不要复述游戏规则、完整历史、分析过程或内部计划", prompt)
         self.assertIn("控制在 1 到 3 句", prompt)
         self.assertIn("目标不超过约 120 个汉字", prompt)
         self.assertIn("不要输出 JSON", prompt)
-        self.assertNotIn("You may reveal, hide, bluff or", prompt)
-        self.assertNotIn("public_actions", prompt)
 
-    def test_werewolf_speech_prompt_has_no_conflicting_permission_to_reveal(self):
-        prompt = build_speech_prompt(_observation(identity="Werewolf"), BELIEF)
+    def test_frozen_discussion_candidates_enforce_only_hard_boundaries(self):
+        self.assertEqual(
+            DISCUSSION_ACTIONS,
+            (
+                "point_as_werewolf",
+                "point_as_villager",
+                "point_as_seer",
+                "point_as_witch",
+                "support",
+                "oppose",
+                "check_as_good",
+                "check_as_werewolf",
+                "save",
+                "poison",
+                "vote_intent",
+                "abstain_intent",
+                "no_commitment",
+            ),
+        )
+        normal = _observation(identity="Werewolf")
+        normal["authoritative_public_state"]["alive_players"] = [1, 2, 3, 5, 6, 7]
+        normal["authoritative_public_state"]["suggestible_exile_targets"] = [1, 2, 5, 6, 7]
+        normal["game_log"].append(
+            Log([3, 7], 0, [3, 7], {"wolf_team": [3, 7]}, 0, "第0天夜晚", "werewolf_team_info")
+        )
+        snapshot = freeze_discussion_candidates(normal)
 
-        self.assertIn("绝不能公开说自己是狼人", prompt)
-        self.assertIn("必须遵守上文与你真实角色对应的私人信息边界", prompt)
-        self.assertIn("不构成泄露上文明确禁止公开", prompt)
-        self.assertNotIn("You may reveal, hide, bluff or", prompt)
+        vote_targets = tuple(
+            act.target for act in snapshot if act.action == "vote_intent"
+        )
+        self.assertEqual(vote_targets, (1, 2, 5, 6, 7))
+        self.assertNotIn(DiscussionAct("vote_intent", 3), snapshot)
+        self.assertNotIn(DiscussionAct("vote_intent", 4), snapshot)
+        for action in ("check_as_good", "check_as_werewolf", "save", "poison"):
+            self.assertNotIn(DiscussionAct(action, 3), snapshot)
+        self.assertNotIn(DiscussionAct("point_as_werewolf", 3), snapshot)
+        self.assertIn(DiscussionAct("point_as_werewolf", 7), snapshot)
+        self.assertEqual(snapshot, freeze_discussion_candidates(normal))
+
+    def test_pk_vote_intent_uses_only_latest_draw_speech_queue(self):
+        observation = _observation(identity="Villager", phase="2_day_speech_pk")
+        observation["authoritative_public_state"]["phase"] = "speech_pk"
+        observation["game_log"].append(
+            Log(
+                list(range(1, 8)),
+                0,
+                0,
+                {"vote_outcome": "draw", "speech_queue": [2, 3, 5]},
+                2,
+                "第2天白天",
+                "end_vote",
+            )
+        )
+
+        self.assertEqual(derive_discussion_vote_targets(observation), (2, 5))
+        vote_targets = tuple(
+            act.target
+            for act in freeze_discussion_candidates(observation)
+            if act.action == "vote_intent"
+        )
+        self.assertEqual(vote_targets, (2, 5))
+        self.assertNotIn(1, vote_targets)
+
+        observation["game_log"] = observation["game_log"][:-1]
+        with self.assertRaisesRegex(ValueError, "draw speech_queue"):
+            freeze_discussion_candidates(observation)
 
     def test_vote_prompt_uses_fresh_belief_and_rejects_intent_inheritance(self):
         contradictory_belief = {

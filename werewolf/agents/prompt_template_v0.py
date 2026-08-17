@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 
 
 class Const(object):
@@ -26,6 +27,201 @@ STRICT_CLASSIC7_ROLE_COUNTS = {
     "Villager": 3,
 }
 STRICT_BELIEF_CONCRETE_ROLES = tuple(STRICT_CLASSIC7_ROLE_COUNTS)
+
+DISCUSSION_ACTIONS = (
+    "point_as_werewolf",
+    "point_as_villager",
+    "point_as_seer",
+    "point_as_witch",
+    "support",
+    "oppose",
+    "check_as_good",
+    "check_as_werewolf",
+    "save",
+    "poison",
+    "vote_intent",
+    "abstain_intent",
+    "no_commitment",
+)
+_ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:6]
+_NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[6:10]
+
+
+@dataclass(frozen=True)
+class DiscussionAct:
+    action: str
+    target: int | None
+
+
+@dataclass(frozen=True)
+class PublicClaim:
+    claim_id: str
+    time: str
+    event: str
+    speaker: int
+    raw_text: str
+
+
+def build_public_claim_catalog(observation):
+    """Freeze visible raw public claims in observation order."""
+
+    if not isinstance(observation, dict):
+        raise TypeError("discussion observation must be a dictionary")
+    game_log = observation.get("game_log")
+    if not isinstance(game_log, list):
+        raise TypeError("discussion observation requires a game_log list")
+    claims = []
+    for log in game_log:
+        event = getattr(log, "event", None)
+        if event not in {"speech", "speech_pk"}:
+            continue
+        speaker = getattr(log, "source", None)
+        time_text = getattr(log, "time", None)
+        raw_text = getattr(log, "content", {}).get("speech_content")
+        if (
+            isinstance(speaker, bool)
+            or not isinstance(speaker, int)
+            or not 1 <= speaker <= 7
+            or not isinstance(time_text, str)
+            or not isinstance(raw_text, str)
+            or not raw_text.strip()
+        ):
+            continue
+        claims.append(
+            PublicClaim(
+                claim_id=f"claim_{len(claims):03d}",
+                time=time_text,
+                event=event,
+                speaker=speaker,
+                raw_text=raw_text,
+            )
+        )
+    return tuple(claims)
+
+
+def render_public_claim(claim):
+    if not isinstance(claim, PublicClaim):
+        raise TypeError("public claim must be a PublicClaim")
+    return (
+        f"[{claim.claim_id}] [{claim.time} / {claim.event}] "
+        f"player{claim.speaker}：{claim.raw_text}"
+    )
+
+
+def derive_discussion_vote_targets(observation):
+    """Derive authoritative public vote-intent targets for one speech phase."""
+
+    if not isinstance(observation, dict):
+        raise TypeError("discussion observation must be a dictionary")
+    actor = observation.get("current_act_idx")
+    phase = observation.get("phase")
+    public_state = observation.get("authoritative_public_state")
+    if (
+        isinstance(actor, bool)
+        or not isinstance(actor, int)
+        or not 1 <= actor <= 7
+    ):
+        raise ValueError("discussion requires current_act_idx in [1, 7]")
+    if not isinstance(phase, str) or "speech" not in phase:
+        raise ValueError("discussion vote targets require a speech phase")
+    if not isinstance(public_state, dict):
+        raise TypeError("discussion requires authoritative_public_state")
+    alive_players = public_state.get("alive_players")
+    if not isinstance(alive_players, list):
+        raise TypeError("discussion requires authoritative alive players")
+    alive_set = set(alive_players)
+
+    if "speech_pk" in phase:
+        game_log = observation.get("game_log")
+        if not isinstance(game_log, list):
+            raise TypeError("PK discussion requires a game_log list")
+        targets = None
+        for log in reversed(game_log):
+            if getattr(log, "event", None) != "end_vote":
+                continue
+            content = getattr(log, "content", {})
+            if content.get("vote_outcome") == "draw":
+                targets = content.get("speech_queue")
+                break
+        if not isinstance(targets, list) or not targets:
+            raise ValueError(
+                "speech_pk requires the latest public draw speech_queue"
+            )
+    else:
+        targets = public_state.get("suggestible_exile_targets")
+        if not isinstance(targets, list):
+            raise TypeError(
+                "normal discussion requires suggestible_exile_targets"
+            )
+
+    if (
+        any(
+            isinstance(target, bool)
+            or not isinstance(target, int)
+            or not 1 <= target <= 7
+            for target in targets
+        )
+        or len(set(targets)) != len(targets)
+        or not set(targets) <= alive_set
+    ):
+        raise ValueError(
+            "discussion vote targets are not authoritative living players"
+        )
+    return tuple(sorted(target for target in targets if target != actor))
+
+
+def freeze_discussion_candidates(observation):
+    """Build one deterministic Day-only discussion candidate snapshot."""
+
+    actor = (
+        observation.get("current_act_idx")
+        if isinstance(observation, dict)
+        else None
+    )
+    identity = (
+        observation.get("identity")
+        if isinstance(observation, dict)
+        else None
+    )
+    if (
+        isinstance(actor, bool)
+        or not isinstance(actor, int)
+        or not 1 <= actor <= 7
+    ):
+        raise ValueError("discussion requires current_act_idx in [1, 7]")
+    if identity not in STRICT_CLASSIC7_ROLE_COUNTS:
+        raise ValueError("discussion requires a supported classic7 identity")
+
+    candidates = []
+    for action in _ALL_PLAYER_TARGET_ACTIONS:
+        for target in range(1, 8):
+            if (
+                action == "point_as_werewolf"
+                and identity == "Werewolf"
+                and target == actor
+            ):
+                continue
+            candidates.append(DiscussionAct(action, target))
+    for action in _NON_SELF_TARGET_ACTIONS:
+        for target in range(1, 8):
+            if target != actor:
+                candidates.append(DiscussionAct(action, target))
+    for target in derive_discussion_vote_targets(observation):
+        candidates.append(DiscussionAct("vote_intent", target))
+    candidates.extend(
+        (
+            DiscussionAct("abstain_intent", None),
+            DiscussionAct("no_commitment", None),
+        )
+    )
+    return tuple(candidates)
+
+
+def render_discussion_act(act):
+    if not isinstance(act, DiscussionAct):
+        raise TypeError("discussion intent must contain DiscussionAct values")
+    return act.action if act.target is None else f"{act.action}(player{act.target})"
+
 
 STRICT_CLASSIC7_GAME_DESCRIPTION = """你正在进行一局固定规则的7人多日制狼人杀游戏。
 
@@ -322,7 +518,7 @@ def _render_authoritative_public_history(game_log):
     return "\n".join(history) or "- (no completed public history yet)"
 
 
-def _build_gameplay_context(observation):
+def _build_gameplay_context(observation, *, claim_catalog=None):
     """Render one legally filtered classic-7 observation."""
     if not isinstance(
         observation,
@@ -546,18 +742,27 @@ def _build_gameplay_context(observation):
 - 合法可见的历史狼队夜间决定：{kill_text}。
 - 这些是内部真实状态；公开时可以披露、隐藏、歪曲或虚构身份和技能声明。
 - 女巫没有真实的查验能力，也不知道狼人队友。"""
-    public_claims = []
-    for log in game_log:
-        if getattr(log, "event", None) not in {"speech", "speech_pk"}:
-            continue
-        source = getattr(log, "source", None)
-        if not isinstance(source, int) or not 1 <= source <= 7:
-            continue
-        speech = getattr(log, "content", {}).get("speech_content")
-        if isinstance(speech, str) and speech.strip():
-            public_claims.append(
-                f"- [{log.time} / {log.event}] player{source}：{speech}"
-            )
+    if claim_catalog is None:
+        public_claims = []
+        for log in game_log:
+            if getattr(log, "event", None) not in {"speech", "speech_pk"}:
+                continue
+            source = getattr(log, "source", None)
+            if not isinstance(source, int) or not 1 <= source <= 7:
+                continue
+            speech = getattr(log, "content", {}).get("speech_content")
+            if isinstance(speech, str) and speech.strip():
+                public_claims.append(
+                    f"- [{log.time} / {log.event}] player{source}：{speech}"
+                )
+    else:
+        if not isinstance(claim_catalog, tuple) or any(
+            not isinstance(claim, PublicClaim) for claim in claim_catalog
+        ):
+            raise TypeError("claim_catalog must be a tuple of PublicClaim values")
+        public_claims = [
+            f"- {render_public_claim(claim)}" for claim in claim_catalog
+        ]
     claims_text = "\n".join(public_claims) or "- (尚无玩家公开主张)"
     authoritative_history = _render_authoritative_public_history(game_log)
 
@@ -591,19 +796,7 @@ A claim is not an authoritative fact merely because someone stated it.
 {claims_text}"""
 
 
-def build_belief_prompt(
-    observation,
-    *,
-    exact_roles=None,
-    role_options=None,
-):
-    """Ask for one transient belief report from a legal observation."""
-
-    if exact_roles is None and role_options is None:
-        exact_roles, role_options = derive_belief_constraints(observation)
-    elif exact_roles is None or role_options is None:
-        raise ValueError("exact_roles and role_options must be supplied together")
-    context = _build_gameplay_context(observation)
+def _build_belief_output_instructions(observation, exact_roles, role_options):
     remaining_inventory = dict(STRICT_CLASSIC7_ROLE_COUNTS)
     remaining_inventory[observation["identity"]] -= 1
     for role in exact_roles.values():
@@ -621,9 +814,7 @@ def build_belief_prompt(
         ensure_ascii=False,
         sort_keys=True,
     )
-    return f"""{context}
-
-BELIEF OUTPUT
+    return f"""BELIEF OUTPUT
 Treat the Environment-supplied self role and these exact-known other-player
 roles as fixed premises. Do not reinterpret or re-guess them:
 {exact_text}
@@ -650,32 +841,150 @@ Do not repeat the observation or history. Do not mechanically discuss every unre
 when there is no useful evidence. Use unknown rather than inventing evidence.
 Be as concise as possible and target no more than about 50 words.
 The concise field must be a short gameplay conclusion derived from belief, not a
-summary of the roles object, and must be no more than 2 short sentences.
+summary of the roles object, and must be no more than 2 short sentences."""
+
+
+def build_belief_prompt(
+    observation,
+    *,
+    exact_roles=None,
+    role_options=None,
+):
+    """Ask for one transient belief report from a legal observation."""
+
+    if exact_roles is None and role_options is None:
+        exact_roles, role_options = derive_belief_constraints(observation)
+    elif exact_roles is None or role_options is None:
+        raise ValueError("exact_roles and role_options must be supplied together")
+    context = _build_gameplay_context(observation)
+    belief_instructions = _build_belief_output_instructions(
+        observation,
+        exact_roles,
+        role_options,
+    )
+    return f"""{context}
+
+{belief_instructions}
 Return only the JSON object required by the response schema. The three fields
 remain belief, concise and roles."""
 
 
-def build_speech_prompt(observation, belief):
-    """Ask for direct natural-language public speech."""
+def build_day_cognition_prompt(
+    observation,
+    *,
+    exact_roles,
+    role_options,
+    candidate_snapshot,
+    claim_catalog,
+):
+    """Ask for one private Day cognition and frozen public discussion intent."""
 
-    context = _build_gameplay_context(observation)
-    belief_text = json.dumps(belief, ensure_ascii=False, sort_keys=True)
+    if not isinstance(candidate_snapshot, tuple) or not candidate_snapshot:
+        raise ValueError("candidate_snapshot must be a non-empty tuple")
+    if any(not isinstance(act, DiscussionAct) for act in candidate_snapshot):
+        raise TypeError("candidate_snapshot must contain DiscussionAct values")
+    context = _build_gameplay_context(
+        observation,
+        claim_catalog=claim_catalog,
+    )
+    belief_instructions = _build_belief_output_instructions(
+        observation,
+        exact_roles,
+        role_options,
+    )
+    candidate_text = "\n".join(
+        f"{index}: {render_discussion_act(act)}"
+        for index, act in enumerate(candidate_snapshot)
+    )
+    claim_ids = [claim.claim_id for claim in claim_catalog]
     return f"""{context}
 
-CURRENT PRIVATE BELIEF
-{belief_text}
+{belief_instructions}
+
+DISCUSSION INTENT OUTPUT
+Choose 1 to 3 unique public_action_indices from this frozen candidate snapshot:
+{candidate_text}
+These indices describe only what the current speaker intends to communicate
+publicly. They are public claim/positioning primitives, not truth labels.
+Strategic deception and bluff remain allowed within this frozen candidate space.
+Choose 0 to 2 unique evidence_claim_ids from the visible public claim catalog:
+{json.dumps(claim_ids)}
+Selected claim IDs are the only prior raw public utterances that the final public
+speech may explicitly reference. Do not provide a reason, confidence, strategy
+name, expected reaction, or any free-text public plan.
+Return only the JSON object required by the response schema. The five fields are
+belief, concise, roles, public_action_indices and evidence_claim_ids."""
+
+
+def build_public_speech_prompt(
+    observation,
+    *,
+    discussion_acts,
+    selected_claims,
+):
+    """Render one public-only prompt for realizing frozen discussion intent."""
+
+    if not isinstance(observation, dict):
+        raise TypeError("public speech observation must be a dictionary")
+    actor = observation.get("current_act_idx")
+    game_log = observation.get("game_log")
+    public_state = observation.get("authoritative_public_state")
+    if (
+        isinstance(actor, bool)
+        or not isinstance(actor, int)
+        or not 1 <= actor <= 7
+    ):
+        raise ValueError("public speech requires current_act_idx in [1, 7]")
+    if not isinstance(game_log, list):
+        raise TypeError("public speech requires a game_log list")
+    if not isinstance(public_state, dict):
+        raise TypeError("public speech requires authoritative_public_state")
+    if (
+        not isinstance(discussion_acts, tuple)
+        or not 1 <= len(discussion_acts) <= 3
+        or any(not isinstance(act, DiscussionAct) for act in discussion_acts)
+    ):
+        raise ValueError("public speech requires 1 to 3 frozen discussion acts")
+    if not isinstance(selected_claims, tuple) or any(
+        not isinstance(claim, PublicClaim) for claim in selected_claims
+    ):
+        raise TypeError("selected_claims must be a tuple of PublicClaim values")
+
+    state_text = _render_authoritative_public_state(
+        public_state,
+        suggestible_player_ids=derive_discussion_vote_targets(observation),
+    )
+    history_text = _render_authoritative_public_history(game_log)
+    intent_text = "\n".join(
+        f"- {render_discussion_act(act)}" for act in discussion_acts
+    )
+    evidence_text = "\n".join(
+        f"- {render_public_claim(claim)}" for claim in selected_claims
+    ) or "- (no public evidence selected)"
+    return f"""COMMON PUBLIC RULES
+{STRICT_CLASSIC7_GAME_DESCRIPTION}
+
+PUBLIC AUTHORITATIVE INFORMATION
+Current speaker: player{actor}
+Environment authoritative public state:
+{state_text}
+
+Authoritative public history (chronological):
+{history_text}
+
+DISCUSSION INTENT
+{intent_text}
+
+SELECTED PUBLIC EVIDENCE
+{evidence_text}
 
 PUBLIC SPEECH
-This belief is a fallible subjective assessment. It may
-guide interpretation, strategy, suspicion and public positioning, but must not
-override or redefine the Environment authoritative current state, actual self
-role, exact-known private facts, exact-known other-player roles, or Environment
-legality. If it conflicts with those authoritative premises, the authoritative
-premises control.
 直接输出本轮简洁的自然语言公开发言。
-围绕真实角色所属阵营的目标行动。你可以作出真实、隐瞒、误导、假跳身份或其他
-策略性公开主张，但必须遵守上文与你真实角色对应的私人信息边界；这里的策略性
-公开不构成泄露上文明确禁止公开的真实私有身份、队友信息或夜间私密行动的许可。
+只将上述冻结讨论意图实现为自然发言，不要重新规划。如果意图中包含投票立场，
+不得发明意图之外的当前投票目标。只可引用 SELECTED PUBLIC EVIDENCE 中的
+原始公开发言；未选历史发言不可见。
+意图是公开主张而非真值标签，可以在冻结意图范围内进行策略性欺骗、误导或假跳。
+不得发明、暴露或暗示任何私有信息、真实身份、夜间行动或系统信息。
 不要复述游戏规则、完整历史、分析过程或内部计划，也不要逐条总结所有玩家。
 发言保持简洁、具体，控制在 1 到 3 句，目标不超过约 120 个汉字。
 不要输出 JSON、Markdown、分析、计划或结构化公开动作，也不要暴露控制文本或私有系统数据。"""

@@ -7,8 +7,10 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     RoleReportValidationError,
     belief_response_format,
+    day_cognition_response_format,
     night_action_response_format,
     parse_belief_response,
+    parse_day_cognition_response,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -17,9 +19,12 @@ from werewolf.agents.llm_agent import (
 from werewolf.agents.prompt_template_v0 import (
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
     build_belief_prompt,
-    build_speech_prompt,
+    build_day_cognition_prompt,
+    build_public_claim_catalog,
+    build_public_speech_prompt,
     build_vote_prompt,
     derive_belief_constraints,
+    freeze_discussion_candidates,
 )
 from werewolf.backends import BackendError
 from . import agent_registry as AgentRegistry
@@ -67,14 +72,18 @@ class GPTAgent(LLMAgent):
         temperature, max_tokens = self._request_limits()
 
         if is_speech and is_strict:
-            belief = self._generate_belief(
-                observation,
-                temperature=temperature,
-                max_tokens=max_tokens,
+            day_cognition, candidate_snapshot, claim_catalog = (
+                self._generate_day_cognition(
+                    observation,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
             )
-            return self._generate_speech(
+            return self._generate_public_speech(
                 observation,
-                belief=belief,
+                day_cognition=day_cognition,
+                candidate_snapshot=candidate_snapshot,
+                claim_catalog=claim_catalog,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
@@ -175,17 +184,100 @@ class GPTAgent(LLMAgent):
             pass
         return report
 
-    def _generate_speech(
+    def _generate_day_cognition(
         self,
         observation,
         *,
-        belief,
+        temperature,
+        max_tokens,
+    ):
+        player_id = observation.get("current_act_idx")
+        phase = observation.get("phase")
+        exact_roles, role_options = derive_belief_constraints(observation)
+        candidate_snapshot = freeze_discussion_candidates(observation)
+        claim_catalog = build_public_claim_catalog(observation)
+        claim_ids = tuple(claim.claim_id for claim in claim_catalog)
+        prompt = build_day_cognition_prompt(
+            observation,
+            exact_roles=exact_roles,
+            role_options=role_options,
+            candidate_snapshot=candidate_snapshot,
+            claim_catalog=claim_catalog,
+        )
+        content, metadata = self._chat_with_metadata(
+            [{"role": "user", "content": prompt}],
+            player_log_context={"stage": "belief", "observation": observation},
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=day_cognition_response_format(
+                supports_json_schema=getattr(
+                    self.backend,
+                    "supports_json_schema",
+                    False,
+                ),
+                role_options=role_options,
+                candidate_snapshot=candidate_snapshot,
+                claim_ids=claim_ids,
+            ),
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        if metadata["finish_reason"] == "length":
+            raise BeliefValidationError(
+                f"Day cognition response was truncated "
+                f"(player={player_id}, phase={phase!r})"
+            )
+        report = parse_day_cognition_response(
+            content,
+            player_id=player_id,
+            self_role=observation.get("identity"),
+            phase=phase,
+            exact_roles=exact_roles,
+            role_options=role_options,
+            candidate_snapshot=candidate_snapshot,
+            claim_ids=claim_ids,
+        )
+        try:
+            validate_role_report(
+                report,
+                player_id=player_id,
+                self_role=observation.get("identity"),
+                phase=phase,
+                exact_roles=exact_roles,
+                role_options=role_options,
+            )
+        except RoleReportValidationError:
+            # The raw response is already retained by the existing call audit.
+            pass
+        return report, candidate_snapshot, claim_catalog
+
+    def _generate_public_speech(
+        self,
+        observation,
+        *,
+        day_cognition,
+        candidate_snapshot,
+        claim_catalog,
         temperature,
         max_tokens,
     ):
         phase = observation.get("phase")
         player_id = observation.get("current_act_idx")
-        prompt = build_speech_prompt(observation, belief.gameplay_dict())
+        discussion_acts = tuple(
+            candidate_snapshot[index]
+            for index in day_cognition.public_action_indices
+        )
+        claim_by_id = {
+            claim.claim_id: claim for claim in claim_catalog
+        }
+        selected_claims = tuple(
+            claim_by_id[claim_id]
+            for claim_id in day_cognition.evidence_claim_ids
+        )
+        prompt = build_public_speech_prompt(
+            observation,
+            discussion_acts=discussion_acts,
+            selected_claims=selected_claims,
+        )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={"stage": "speech", "observation": observation},

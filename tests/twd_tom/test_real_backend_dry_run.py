@@ -291,6 +291,8 @@ def test_strict_belief_and_speech_are_two_distinguishable_gameplay_calls(
                     f"player{player_id}": "unknown"
                     for player_id in range(2, 8)
                 },
+                "public_action_indices": [0],
+                "evidence_claim_ids": [],
             }, ensure_ascii=False),
             "我继续听大家发言。",
         ],
