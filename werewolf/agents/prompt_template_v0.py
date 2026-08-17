@@ -43,6 +43,32 @@ DISCUSSION_ACTIONS = (
     "abstain_intent",
     "no_commitment",
 )
+_DISCUSSION_ACTION_SEMANTICS = {
+    "point_as_werewolf": "publicly claim playerX is Werewolf",
+    "point_as_villager": (
+        "publicly claim playerX is specifically an ordinary Villager; "
+        "not generic good / non-wolf"
+    ),
+    "point_as_seer": "publicly claim playerX is Seer",
+    "point_as_witch": "publicly claim playerX is Witch",
+    "support": "publicly support / defend playerX",
+    "oppose": "publicly oppose / question playerX",
+    "check_as_good": (
+        "speaker publicly claims a Seer-style check on playerX returned "
+        '"not Werewolf"; not necessarily Villager'
+    ),
+    "check_as_werewolf": (
+        "speaker publicly claims a Seer-style check on playerX returned "
+        "Werewolf"
+    ),
+    "save": "speaker publicly claims using the Witch antidote to save playerX",
+    "poison": "speaker publicly claims using Witch poison on playerX",
+    "vote_intent": "publicly push the current exile vote toward playerX",
+    "abstain_intent": "publicly indicate current abstention intent",
+    "no_commitment": (
+        "make no explicit role/check/skill/vote commitment this turn"
+    ),
+}
 _ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:6]
 _NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[6:10]
 
@@ -221,6 +247,15 @@ def render_discussion_act(act):
     if not isinstance(act, DiscussionAct):
         raise TypeError("discussion intent must contain DiscussionAct values")
     return act.action if act.target is None else f"{act.action}(player{act.target})"
+
+
+def _render_discussion_action_glossary():
+    targetless_actions = {"abstain_intent", "no_commitment"}
+    return "\n".join(
+        f"- {action if action in targetless_actions else f'{action}(playerX)'}: "
+        f"{_DISCUSSION_ACTION_SEMANTICS[action]}"
+        for action in DISCUSSION_ACTIONS
+    )
 
 
 STRICT_CLASSIC7_GAME_DESCRIPTION = """你正在进行一局固定规则的7人多日制狼人杀游戏。
@@ -901,6 +936,10 @@ def build_day_cognition_prompt(
 
 {belief_instructions}
 
+DISCUSSION ACTION SEMANTICS
+{_render_discussion_action_glossary()}
+These are communication semantics only. They are never truth labels.
+
 DISCUSSION INTENT OUTPUT
 Choose 1 to 3 unique public_action_indices from this frozen candidate snapshot:
 {candidate_text}
@@ -975,16 +1014,23 @@ Authoritative public history (chronological):
 DISCUSSION INTENT
 {intent_text}
 
+DISCUSSION ACTION SEMANTICS
+{_render_discussion_action_glossary()}
+These are communication semantics only. They are never truth labels.
+
 SELECTED PUBLIC EVIDENCE
 {evidence_text}
 
 PUBLIC SPEECH
 直接输出本轮简洁的自然语言公开发言。
-只将上述冻结讨论意图实现为自然发言，不要重新规划。如果意图中包含投票立场，
-不得发明意图之外的当前投票目标。只可引用 SELECTED PUBLIC EVIDENCE 中的
-原始公开发言；未选历史发言不可见。
-意图是公开主张而非真值标签，可以在冻结意图范围内进行策略性欺骗、误导或假跳。
-不得发明、暴露或暗示任何私有信息、真实身份、夜间行动或系统信息。
+只将上述冻结讨论意图实现为自然发言，不要重新规划。若存在 vote_intent(playerX)，
+playerX 是唯一可推动的当前放逐投票目标；若不存在 vote_intent，不得发明新的当前
+放逐目标。只可引用 SELECTED PUBLIC EVIDENCE 中的原始公开发言；未选历史发言不可见。
+DISCUSSION INTENT 中明确编码的身份、查验、解救或毒杀陈述可以作为 PUBLIC CLAIMS
+表达；它们不是权威真相。渲染器无法访问实际私有真相，也不得推断实际私有真相。
+除 DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息许可的内容外，
+不得添加任何玩家特定的私有事实、真实身份、队友、夜间行动或其他命题。冻结意图中
+编码的策略性欺骗、误导或假跳仍然允许。
 不要复述游戏规则、完整历史、分析过程或内部计划，也不要逐条总结所有玩家。
 发言保持简洁、具体，控制在 1 到 3 句，目标不超过约 120 个汉字。
 不要输出 JSON、Markdown、分析、计划或结构化公开动作，也不要暴露控制文本或私有系统数据。"""

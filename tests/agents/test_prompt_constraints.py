@@ -337,6 +337,16 @@ Villager: {3}""".format(*counts)
         )
         self.assertIn("[claim_000] [第1天白天 / speech]", day_prompt)
         self.assertIn("DISCUSSION INTENT OUTPUT", day_prompt)
+        self.assertIn(
+            "point_as_villager(playerX): publicly claim playerX is "
+            "specifically an ordinary Villager; not generic good / non-wolf",
+            day_prompt,
+        )
+        self.assertIn(
+            'check_as_good(playerX): speaker publicly claims a Seer-style '
+            'check on playerX returned "not Werewolf"; not necessarily Villager',
+            day_prompt,
+        )
         self.assertNotIn("sp_actions", day_prompt)
 
     def test_multiday_public_results_stay_authoritative_and_chronological(self):
@@ -466,6 +476,7 @@ Villager: {3}""".format(*counts)
             observation,
             discussion_acts=(
                 DiscussionAct("point_as_seer", 3),
+                DiscussionAct("check_as_werewolf", 6),
                 DiscussionAct("vote_intent", 5),
             ),
             selected_claims=(catalog[0],),
@@ -476,7 +487,13 @@ Villager: {3}""".format(*counts)
         self.assertIn("Current speaker: player3", prompt)
         self.assertIn("DISCUSSION INTENT", prompt)
         self.assertIn("point_as_seer(player3)", prompt)
+        self.assertIn("check_as_werewolf(player6)", prompt)
         self.assertIn("vote_intent(player5)", prompt)
+        self.assertIn(
+            "speaker publicly claims a Seer-style check on playerX returned "
+            "Werewolf",
+            prompt,
+        )
         self.assertIn("SELECTED PUBLIC EVIDENCE", prompt)
         self.assertIn("SELECTED-CLAIM-CANARY", prompt)
         self.assertNotIn("UNSELECTED-CLAIM-CANARY", prompt)
@@ -489,8 +506,17 @@ Villager: {3}""".format(*counts)
         self.assertNotIn("真实狼队信息（仅用于内部策略）：player3, player7", prompt)
         self.assertNotIn("第0天夜晚：击杀 player6", prompt)
         self.assertIn("直接输出本轮简洁的自然语言公开发言", prompt)
-        self.assertIn("策略性欺骗、误导或假跳", prompt)
-        self.assertIn("不得发明、暴露或暗示任何私有信息", prompt)
+        self.assertIn("可以作为 PUBLIC CLAIMS", prompt)
+        self.assertIn("它们不是权威真相", prompt)
+        self.assertIn("无法访问实际私有真相，也不得推断实际私有真相", prompt)
+        self.assertIn(
+            "DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息",
+            prompt,
+        )
+        self.assertIn("不得添加任何玩家特定的私有事实", prompt)
+        self.assertIn("编码的策略性欺骗、误导或假跳仍然允许", prompt)
+        self.assertIn("playerX 是唯一可推动的当前放逐投票目标", prompt)
+        self.assertIn("若不存在 vote_intent，不得发明新的当前", prompt)
         self.assertIn("不要复述游戏规则、完整历史、分析过程或内部计划", prompt)
         self.assertIn("控制在 1 到 3 句", prompt)
         self.assertIn("目标不超过约 120 个汉字", prompt)
