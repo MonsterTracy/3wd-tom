@@ -21,10 +21,10 @@ from werewolf.agents.prompt_template_v0 import (
     build_belief_prompt,
     build_day_cognition_prompt,
     build_public_claim_catalog,
-    build_public_speech_prompt,
     build_vote_prompt,
     derive_belief_constraints,
     freeze_discussion_candidates,
+    render_deterministic_public_speech,
 )
 from werewolf.backends import BackendError
 from . import agent_registry as AgentRegistry
@@ -79,13 +79,24 @@ class GPTAgent(LLMAgent):
                     max_tokens=max_tokens,
                 )
             )
-            return self._generate_public_speech(
-                observation,
-                day_cognition=day_cognition,
-                candidate_snapshot=candidate_snapshot,
-                claim_catalog=claim_catalog,
-                temperature=temperature,
-                max_tokens=max_tokens,
+            discussion_acts = tuple(
+                candidate_snapshot[index]
+                for index in day_cognition.public_action_indices
+            )
+            claim_by_id = {
+                claim.claim_id: claim for claim in claim_catalog
+            }
+            selected_claims = tuple(
+                claim_by_id[claim_id]
+                for claim_id in day_cognition.evidence_claim_ids
+            )
+            return (
+                "speech",
+                render_deterministic_public_speech(
+                    observation.get("current_act_idx"),
+                    discussion_acts=discussion_acts,
+                    selected_claims=selected_claims,
+                ),
             )
 
         if is_vote and is_strict:
@@ -249,49 +260,6 @@ class GPTAgent(LLMAgent):
             # The raw response is already retained by the existing call audit.
             pass
         return report, candidate_snapshot, claim_catalog
-
-    def _generate_public_speech(
-        self,
-        observation,
-        *,
-        day_cognition,
-        candidate_snapshot,
-        claim_catalog,
-        temperature,
-        max_tokens,
-    ):
-        phase = observation.get("phase")
-        player_id = observation.get("current_act_idx")
-        discussion_acts = tuple(
-            candidate_snapshot[index]
-            for index in day_cognition.public_action_indices
-        )
-        claim_by_id = {
-            claim.claim_id: claim for claim in claim_catalog
-        }
-        selected_claims = tuple(
-            claim_by_id[claim_id]
-            for claim_id in day_cognition.evidence_claim_ids
-        )
-        prompt = build_public_speech_prompt(
-            observation,
-            discussion_acts=discussion_acts,
-            selected_claims=selected_claims,
-        )
-        content, metadata = self._chat_with_metadata(
-            [{"role": "user", "content": prompt}],
-            player_log_context={"stage": "speech", "observation": observation},
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        validate_gameplay_public_speech(
-            content,
-            finish_reason=metadata["finish_reason"],
-            player_id=player_id,
-            phase=phase,
-        )
-        return ("speech", content.strip())
 
     def _generate_vote(
         self,

@@ -560,7 +560,7 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
     )
     agent.rate_limit = 0
 
-    agent.act(
+    action = agent.act(
         {
             "phase": "1_day_speech",
             "identity": "Villager",
@@ -582,17 +582,16 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
         }
     )
 
-    assert len(calls) == 2
+    assert action == ("speech", "我是狼人。")
+    assert len(calls) == 1
     assert {url for url, _payload in calls} == {
         "http://127.0.0.1:8000/v1/chat/completions"
     }
-    assert [payload["max_tokens"] for _url, payload in calls] == [512, 512]
+    assert [payload["max_tokens"] for _url, payload in calls] == [512]
     assert [payload["model"] for _url, payload in calls] == [
-        "qwen2.5-7b-instruct",
         "qwen2.5-7b-instruct",
     ]
     assert calls[0][1]["response_format"]["type"] == "json_schema"
-    assert "response_format" not in calls[1][1]
 
 
 @pytest.mark.parametrize(

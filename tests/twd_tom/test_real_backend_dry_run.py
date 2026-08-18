@@ -278,7 +278,7 @@ def test_gameplay_limit_and_finish_reason_are_audited(
     )
 
 
-def test_strict_belief_and_speech_are_two_distinguishable_gameplay_calls(
+def test_strict_day_cognition_is_one_audited_gameplay_call(
     tmp_path,
 ):
     session, writer = _new_session(tmp_path)
@@ -294,7 +294,6 @@ def test_strict_belief_and_speech_are_two_distinguishable_gameplay_calls(
                 "public_action_indices": [0],
                 "evidence_claim_ids": [],
             }, ensure_ascii=False),
-            "我继续听大家发言。",
         ],
         usage={"finish_reason": "stop"},
         supports_json_schema=True,
@@ -325,19 +324,14 @@ def test_strict_belief_and_speech_are_two_distinguishable_gameplay_calls(
         observation=observation,
         public_events=_public_events(),
     ):
-        assert agent.act(observation) == ("speech", "我继续听大家发言。")
+        assert agent.act(observation) == ("speech", "我是狼人。")
     writer.close()
 
     records, _serialized = _records(tmp_path / "audit.jsonl")
-    assert [record["call_category"] for record in records] == [
-        "gameplay",
-        "gameplay",
-    ]
+    assert [record["call_category"] for record in records] == ["gameplay"]
     assert [record["response_format_type"] for record in records] == [
         "json_schema",
-        None,
     ]
-    assert records[1]["call_index"] == records[0]["call_index"] + 1
 
 
 def test_bad_request_error_message_is_capped_and_privacy_safe(
