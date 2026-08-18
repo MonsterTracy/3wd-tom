@@ -267,12 +267,24 @@ class GameplayCognitionTest(unittest.TestCase):
             },
         )
         self.assertFalse(schema["additionalProperties"])
+        action_schema = schema["properties"]["public_action_indices"]
+        self.assertEqual(action_schema["type"], "array")
+        self.assertNotIn("uniqueItems", action_schema)
+        self.assertEqual(action_schema["minItems"], 1)
+        self.assertEqual(action_schema["maxItems"], 3)
+        self.assertEqual(action_schema["items"]["type"], "integer")
         self.assertEqual(
-            schema["properties"]["public_action_indices"]["items"]["enum"],
+            action_schema["items"]["enum"],
             list(range(len(snapshot))),
         )
+        evidence_schema = schema["properties"]["evidence_claim_ids"]
+        self.assertEqual(evidence_schema["type"], "array")
+        self.assertNotIn("uniqueItems", evidence_schema)
+        self.assertEqual(evidence_schema["minItems"], 0)
+        self.assertEqual(evidence_schema["maxItems"], min(2, len(claim_ids)))
+        self.assertEqual(evidence_schema["items"]["type"], "string")
         self.assertEqual(
-            schema["properties"]["evidence_claim_ids"]["items"]["enum"],
+            evidence_schema["items"]["enum"],
             ["claim_000"],
         )
 

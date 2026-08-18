@@ -199,7 +199,6 @@ def day_cognition_response_format(
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 3,
-                        "uniqueItems": True,
                         "items": {
                             "type": "integer",
                             "enum": list(range(len(candidate_snapshot))),
@@ -209,7 +208,6 @@ def day_cognition_response_format(
                         "type": "array",
                         "minItems": 0,
                         "maxItems": min(2, len(claim_ids)),
-                        "uniqueItems": True,
                         "items": evidence_items,
                     },
                 },
