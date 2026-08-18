@@ -491,7 +491,7 @@ class WerewolfTextEnvV0(gym.Env):
                               self.vote_target]
 
             vote_candidate_counter = Counter(vote_candidate)
-            del vote_candidate_counter[-1]
+            vote_candidate_counter.pop(-1, None)
             if len(vote_candidate_counter) == 0:
                 expelled_target = -1
                 self.game_log.append(Log(viewer=[idx for idx in range(self.n_player)], source=-1, target=-1,
@@ -542,7 +542,7 @@ class WerewolfTextEnvV0(gym.Env):
             vote_pk_candidate = [target.get(self.get_phase(self.day, self.day_or_night, 'vote_pk'), -1) for target
                                  in self.vote_target]
             vote_pk_candidate_counter = Counter(vote_pk_candidate)
-            del vote_pk_candidate_counter[-1]
+            vote_pk_candidate_counter.pop(-1, None)
             if len(vote_pk_candidate_counter) == 0:
                 expelled_target = -1
                 self.game_log.append(Log(viewer=[idx for idx in range(self.n_player)], source=-1, target=-1,

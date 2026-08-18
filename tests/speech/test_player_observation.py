@@ -307,6 +307,78 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertEqual(self.env.vote_queue, list(range(7)))
         self.assertEqual(self.env.phase, "speech_pk")
 
+    def test_normal_vote_without_abstentions_exiles_unique_maximum(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        phase_key = self.env.get_phase(1, "day", "vote")
+        votes = [4, 4, 4, 4, 5, 4, 4]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1, 1, 1, 1, 0, 1, 1])
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
+
+    def test_normal_vote_without_abstentions_enters_pk_on_tie(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        phase_key = self.env.get_phase(1, "day", "vote")
+        votes = [1, 0, 0, 0, 1, 1, 2]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1] * 7)
+        self.assertEqual(set(self.env.vote_pk_players), {0, 1})
+        self.assertEqual(len(self.env.vote_pk_players), 2)
+        self.assertEqual(self.env.vote_queue, list(range(7)))
+        self.assertEqual(self.env.phase, "speech_pk")
+
+    def test_pk_vote_without_abstentions_exiles_unique_maximum(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.vote_pk_players = [0, 1]
+        phase_key = self.env.get_phase(1, "day", "vote_pk")
+        votes = [1, 0, 0, 0, 1, 1, 1]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1, 0, 1, 1, 1, 1, 1])
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
+
+    def test_pk_vote_without_abstentions_has_no_exile_on_tie(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.vote_pk_players = [0, 1, 2]
+        phase_key = self.env.get_phase(1, "day", "vote_pk")
+        votes = [1, 0, 0, 0, 1, 1, 2]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1] * 7)
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
+
     def test_private_visibility_is_player_specific(self):
         wolf_observation = (
             self.env.get_observation_for(1)
