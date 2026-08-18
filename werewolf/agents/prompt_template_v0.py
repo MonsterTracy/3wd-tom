@@ -258,6 +258,14 @@ def _render_discussion_action_glossary():
     )
 
 
+def _render_selected_discussion_action_semantics(discussion_acts):
+    return "\n".join(
+        f"- {render_discussion_act(act)}: "
+        f"{_DISCUSSION_ACTION_SEMANTICS[act.action].replace('playerX', f'player{act.target}')}"
+        for act in discussion_acts
+    )
+
+
 STRICT_CLASSIC7_GAME_DESCRIPTION = """你正在进行一局固定规则的7人多日制狼人杀游戏。
 
 以下规则是所有玩家从游戏开始时就共同知道的确定规则。不要自行加入这里不存在的角色、技能、公开信息规则、投票规则或胜负条件。
@@ -1013,10 +1021,7 @@ def build_public_speech_prompt(
     evidence_text = "\n".join(
         f"- {render_public_claim(claim)}" for claim in selected_claims
     ) or "- (no public evidence selected)"
-    return f"""COMMON PUBLIC RULES
-{STRICT_CLASSIC7_GAME_DESCRIPTION}
-
-PUBLIC AUTHORITATIVE INFORMATION
+    return f"""PUBLIC AUTHORITATIVE INFORMATION
 Current speaker: player{actor}
 Environment authoritative public state:
 {state_text}
@@ -1028,7 +1033,7 @@ DISCUSSION INTENT
 {intent_text}
 
 DISCUSSION ACTION SEMANTICS
-{_render_discussion_action_glossary()}
+{_render_selected_discussion_action_semantics(discussion_acts)}
 These are communication semantics only. They are never truth labels.
 
 SELECTED PUBLIC EVIDENCE
@@ -1036,14 +1041,25 @@ SELECTED PUBLIC EVIDENCE
 
 PUBLIC SPEECH
 直接输出本轮简洁的自然语言公开发言。
-只将上述冻结讨论意图实现为自然发言，不要重新规划。若存在 vote_intent(playerX)，
-playerX 是唯一可推动的当前放逐投票目标；若不存在 vote_intent，不得发明新的当前
-放逐目标。只可引用 SELECTED PUBLIC EVIDENCE 中的原始公开发言；未选历史发言不可见。
+Call #2 只执行表层实现，不进行游戏推理或重新规划。DISCUSSION INTENT 中的每个冻结
+DiscussionAct 都是最终发言必须明确实现的内容：不得遗漏、矛盾、否定、替换为不同立场，
+也不得弱化成仅仅观察。若存在 vote_intent(playerX)，最终发言必须明确推动当前放逐票投向 playerX；
+playerX 是唯一可推动的当前放逐投票目标。若不存在 vote_intent，不得发明新的当前放逐目标。
+只可引用 SELECTED PUBLIC EVIDENCE 中的原始公开发言；未选历史发言不可见。最终发言中
+的每个游戏具体命题都必须由 DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息
+之一直接许可；权威 PUBLIC 信息必须明确陈述该命题。“直接许可”仅指该命题在这些输入中
+被明确陈述，不包括由输入逻辑推断得出。不得从公开事实推导、假设、解释、猜测或推断隐藏原因。
+例如，权威公开事实“昨夜无人死亡”本身不许可新增“狼人空刀”“狼人没有行动”“女巫
+用了或没用解药”“女巫用了或没用毒药”“预言家进行了某次查验”或“某个隐藏身份导致
+平安夜”等主张或假设，除非该命题本身直接存在于上述三类来源之一。使用“可能”“也许”
+“要么”“说明”“意味着”“推测”等不确定或模态措辞不会产生 provenance，也不能许可
+原本未经许可的命题。不要为了让发言更自然或具体而添加理由、因果解释、背景或游戏状态
+假设；自然的衔接和风格语言仍然允许。
 DISCUSSION INTENT 中明确编码的身份、查验、解救或毒杀陈述可以作为 PUBLIC CLAIMS
 表达；它们不是权威真相。渲染器无法访问实际私有真相，也不得推断实际私有真相。
-除 DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息许可的内容外，
-不得添加任何玩家特定的私有事实、真实身份、队友、夜间行动或其他命题。冻结意图中
-编码的策略性欺骗、误导或假跳仍然允许。
+不得添加任何玩家特定的私有事实、真实身份、队友、夜间行动或其他命题，除非由上述
+三类来源之一直接许可。策略性欺骗仅在冻结 DiscussionAct 本身许可该公开欺骗主张时允许；不得发明
+额外的欺骗命题。
 DiscussionAct V1 itself is atemporal and does not license a concrete temporal
 anchor. check_as_*, save and poison must not by themselves be rendered as
 "last night", "the night before", Night0/Night1, "first night" or any other

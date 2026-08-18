@@ -347,6 +347,11 @@ Villager: {3}""".format(*counts)
             'check on playerX returned "not Werewolf"; not necessarily Villager',
             day_prompt,
         )
+        self.assertIn("1瓶解药和1瓶毒药", day_prompt)
+        self.assertIn("point_as_witch(playerX)", day_prompt)
+        self.assertIn("save(playerX)", day_prompt)
+        self.assertIn("poison(playerX)", day_prompt)
+        self.assertIn("no_commitment", day_prompt)
         self.assertNotIn("sp_actions", day_prompt)
 
     def test_multiday_public_results_stay_authoritative_and_chronological(self):
@@ -482,7 +487,8 @@ Villager: {3}""".format(*counts)
             selected_claims=(catalog[0],),
         )
 
-        self.assertIn("COMMON PUBLIC RULES", prompt)
+        self.assertNotIn("COMMON PUBLIC RULES", prompt)
+        self.assertNotIn("1瓶解药和1瓶毒药", prompt)
         self.assertIn("PUBLIC AUTHORITATIVE INFORMATION", prompt)
         self.assertIn("Current speaker: player3", prompt)
         self.assertIn("DISCUSSION INTENT", prompt)
@@ -490,10 +496,37 @@ Villager: {3}""".format(*counts)
         self.assertIn("check_as_werewolf(player6)", prompt)
         self.assertIn("vote_intent(player5)", prompt)
         self.assertIn(
-            "speaker publicly claims a Seer-style check on playerX returned "
+            "speaker publicly claims a Seer-style check on player6 returned "
             "Werewolf",
             prompt,
         )
+        semantics = prompt.split(
+            "DISCUSSION ACTION SEMANTICS\n",
+            1,
+        )[1].split("\nThese are communication semantics only.", 1)[0]
+        self.assertIn(
+            "point_as_seer(player3): publicly claim player3 is Seer",
+            semantics,
+        )
+        self.assertIn(
+            "check_as_werewolf(player6): speaker publicly claims a "
+            "Seer-style check on player6 returned Werewolf",
+            semantics,
+        )
+        self.assertIn(
+            "vote_intent(player5): publicly push the current exile vote "
+            "toward player5",
+            semantics,
+        )
+        for unselected in (
+            "point_as_witch",
+            "support",
+            "oppose",
+            "save",
+            "poison",
+            "no_commitment",
+        ):
+            self.assertNotIn(unselected, semantics)
         self.assertIn("SELECTED PUBLIC EVIDENCE", prompt)
         self.assertIn("SELECTED-CLAIM-CANARY", prompt)
         self.assertNotIn("UNSELECTED-CLAIM-CANARY", prompt)
@@ -514,9 +547,40 @@ Villager: {3}""".format(*counts)
             prompt,
         )
         self.assertIn("不得添加任何玩家特定的私有事实", prompt)
-        self.assertIn("编码的策略性欺骗、误导或假跳仍然允许", prompt)
+        self.assertIn("Call #2 只执行表层实现，不进行游戏推理或重新规划", prompt)
+        self.assertIn("每个冻结", prompt)
+        self.assertIn("DiscussionAct 都是最终发言必须明确实现的内容", prompt)
+        for mandatory_rule in (
+            "不得遗漏",
+            "矛盾",
+            "否定",
+            "替换为不同立场",
+            "不得弱化成仅仅观察",
+        ):
+            self.assertIn(mandatory_rule, prompt)
+        self.assertIn("最终发言必须明确推动当前放逐票", prompt)
+        self.assertIn("投向 playerX", prompt)
         self.assertIn("playerX 是唯一可推动的当前放逐投票目标", prompt)
         self.assertIn("若不存在 vote_intent，不得发明新的当前", prompt)
+        self.assertIn("每个游戏具体命题都必须由 DISCUSSION INTENT", prompt)
+        self.assertIn("直接许可", prompt)
+        self.assertIn("不包括由输入逻辑推断得出", prompt)
+        self.assertIn("不得从公开事实推导、假设、解释、猜测或推断隐藏原因", prompt)
+        self.assertIn("权威公开事实“昨夜无人死亡”本身不许可新增", prompt)
+        for hidden_hypothesis in (
+            "狼人空刀",
+            "狼人没有行动",
+            "用了或没用解药",
+            "用了或没用毒药",
+            "预言家进行了某次查验",
+            "某个隐藏身份导致",
+        ):
+            self.assertIn(hidden_hypothesis, prompt)
+        for modal_word in ("可能", "也许", "要么", "说明", "意味着", "推测"):
+            self.assertIn(modal_word, prompt)
+        self.assertIn("不确定或模态措辞不会产生 provenance", prompt)
+        self.assertIn("不得发明", prompt)
+        self.assertIn("额外的欺骗命题", prompt)
         self.assertIn(
             "DiscussionAct V1 itself is atemporal and does not license a "
             "concrete temporal",
