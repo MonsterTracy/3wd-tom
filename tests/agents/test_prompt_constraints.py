@@ -337,6 +337,43 @@ Villager: {3}""".format(*counts)
         )
         self.assertIn("[claim_000] [第1天白天 / speech]", day_prompt)
         self.assertIn("DISCUSSION INTENT OUTPUT", day_prompt)
+        compatibility = day_prompt.split(
+            "DISCUSSION ACTION COMPATIBILITY\n",
+            1,
+        )[1].split(
+            "\nChoose 1 to 3 unique public_action_indices",
+            1,
+        )[0]
+        self.assertEqual(
+            compatibility.splitlines(),
+            [
+                "The selected public_action_indices must form a mutually compatible subset",
+                "satisfying exactly these rules:",
+                "- no_commitment must be selected alone and cannot be combined with any other DiscussionAct.",
+                "- Select at most one vote_intent.",
+                "- Select at most one abstain_intent.",
+                "- vote_intent and abstain_intent are mutually exclusive.",
+                "Do not infer any additional DiscussionAct combination restriction.",
+            ],
+        )
+        for absent_restriction in (
+            "support vs oppose",
+            "role claims",
+            "check claims",
+            "save / poison",
+            "sharing the same target",
+        ):
+            self.assertNotIn(absent_restriction, compatibility)
+        self.assertIn(
+            "Choose 1 to 3 unique public_action_indices from this frozen "
+            "candidate snapshot",
+            day_prompt,
+        )
+        self.assertIn(
+            "Strategic deception and bluff remain allowed within this frozen "
+            "candidate space",
+            day_prompt,
+        )
         self.assertIn(
             "point_as_villager(playerX): publicly claim playerX is "
             "specifically an ordinary Villager; not generic good / non-wolf",

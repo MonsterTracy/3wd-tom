@@ -962,6 +962,14 @@ DISCUSSION ACTION SEMANTICS
 These are communication semantics only. They are never truth labels.
 
 DISCUSSION INTENT OUTPUT
+DISCUSSION ACTION COMPATIBILITY
+The selected public_action_indices must form a mutually compatible subset
+satisfying exactly these rules:
+- no_commitment must be selected alone and cannot be combined with any other DiscussionAct.
+- Select at most one vote_intent.
+- Select at most one abstain_intent.
+- vote_intent and abstain_intent are mutually exclusive.
+Do not infer any additional DiscussionAct combination restriction.
 Choose 1 to 3 unique public_action_indices from this frozen candidate snapshot:
 {candidate_text}
 These indices describe only what the current speaker intends to communicate
