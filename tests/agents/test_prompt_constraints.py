@@ -1,15 +1,14 @@
+import inspect
 import unittest
 
 from werewolf.agents.prompt_template_v0 import (
     DISCUSSION_ACTIONS,
     DiscussionAct,
     NO_STANCE,
-    PublicClaim,
     _render_authoritative_public_history,
     build_belief_prompt,
     build_day_cognition_prompt,
     build_public_claim_catalog,
-    build_public_speech_prompt,
     build_vote_prompt,
     derive_belief_constraints,
     derive_discussion_vote_targets,
@@ -403,6 +402,23 @@ Villager: {3}""".format(*counts)
             day_prompt,
         )
         self.assertIn(
+            "relevant evidence for the current cognition and\n"
+            "discussion-intent decision",
+            day_prompt,
+        )
+        self.assertIn("internal linkage record for\naudit only", day_prompt)
+        self.assertIn(
+            "do not authorize or require quoting, paraphrasing or mentioning",
+            day_prompt,
+        )
+        self.assertIn("does not assert truth or falsity", day_prompt)
+        self.assertIn("not prove causal influence", day_prompt)
+        self.assertNotIn(
+            "the only prior raw public utterances that the final public\n"
+            "speech may explicitly reference",
+            day_prompt,
+        )
+        self.assertIn(
             "point_as_villager(playerX): publicly claim playerX is "
             "specifically an ordinary Villager; not generic good / non-wolf",
             day_prompt,
@@ -553,7 +569,6 @@ Villager: {3}""".format(*counts)
                     render_deterministic_public_speech(
                         1,
                         discussion_acts=(DiscussionAct(action, target),),
-                        selected_claims=(),
                     ),
                     expected,
                 )
@@ -575,7 +590,6 @@ Villager: {3}""".format(*counts)
                     render_deterministic_public_speech(
                         3,
                         discussion_acts=(DiscussionAct(action, 3),),
-                        selected_claims=(),
                     ),
                     expected,
                 )
@@ -588,7 +602,6 @@ Villager: {3}""".format(*counts)
                 DiscussionAct("save", 5),
                 DiscussionAct("poison", 4),
             ),
-            selected_claims=(),
         )
 
         self.assertEqual(
@@ -610,187 +623,28 @@ Villager: {3}""".format(*counts)
         ):
             self.assertNotIn(temporal_anchor, speech)
 
-    def test_deterministic_renderer_attributes_only_selected_evidence(self):
-        selected = PublicClaim(
-            claim_id="claim_000",
-            time="第1天白天",
-            event="speech",
-            speaker=7,
-            raw_text="今天我建议投2号。",
-        )
-        speech = render_deterministic_public_speech(
-            3,
-            discussion_acts=(
-                DiscussionAct("oppose", 6),
-                DiscussionAct("vote_intent", 6),
-            ),
-            selected_claims=(selected,),
-        )
+    def test_deterministic_renderer_has_no_evidence_interface(self):
+        signature = inspect.signature(render_deterministic_public_speech)
 
         self.assertEqual(
-            speech.splitlines(),
-            [
-                "此前公开发言中，[第1天白天 / speech] player7 曾说：“今天我建议投2号。”",
-                "我质疑 player6。",
-                "这一轮我建议投票放逐 player6。",
-            ],
+            tuple(signature.parameters),
+            ("speaker_id", "discussion_acts"),
         )
-        self.assertNotIn("player2", "\n".join(speech.splitlines()[1:]))
+        self.assertNotIn("selected_claims", signature.parameters)
+        self.assertEqual(
+            render_deterministic_public_speech(
+                3,
+                discussion_acts=(DiscussionAct("oppose", 6),),
+            ),
+            "我质疑 player6。",
+        )
 
     def test_deterministic_renderer_unknown_action_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "unknown DiscussionAct action"):
             render_deterministic_public_speech(
                 1,
                 discussion_acts=(DiscussionAct("unknown_action", 2),),
-                selected_claims=(),
             )
-
-    def test_public_speech_prompt_is_public_only_and_selected_claim_only(self):
-        observation = _observation(identity="Werewolf")
-        observation["game_log"] = [
-            Log([3, 7], 0, [3, 7], {"wolf_team": [3, 7]}, 0, "第0天夜晚", "werewolf_team_info"),
-            Log([3, 7], 0, 6, {"kill_decision": 6}, 0, "第0天夜晚", "kill_decision"),
-            Log(list(range(1, 8)), 2, list(range(1, 8)), {"speech_content": "SELECTED-CLAIM-CANARY", "sp_actions": []}, 1, "第1天白天", "speech"),
-            Log(list(range(1, 8)), 4, list(range(1, 8)), {"speech_content": "UNSELECTED-CLAIM-CANARY", "sp_actions": []}, 1, "第1天白天", "speech"),
-            Log(list(range(1, 8)), 0, 4, {"vote_outcome": 4, "expelled": 4}, 1, "第1天白天", "end_vote"),
-            Log(list(range(1, 8)), 0, [6], {"dead_list": [6]}, 1, "第1天夜晚", "end_night"),
-        ]
-        observation["authoritative_public_state"].update({
-            "last_night_result": {"day": 1, "dead_players": [6]},
-            "prior_exiles": [{"player_id": 4, "day": 1}],
-            "alive_players": [1, 2, 3, 5, 7],
-            "suggestible_exile_targets": [1, 2, 5, 7],
-        })
-        catalog = build_public_claim_catalog(observation)
-        prompt = build_public_speech_prompt(
-            observation,
-            discussion_acts=(
-                DiscussionAct("point_as_seer", 3),
-                DiscussionAct("check_as_werewolf", 6),
-                DiscussionAct("vote_intent", 5),
-            ),
-            selected_claims=(catalog[0],),
-        )
-
-        self.assertNotIn("COMMON PUBLIC RULES", prompt)
-        self.assertNotIn("1瓶解药和1瓶毒药", prompt)
-        self.assertIn("PUBLIC AUTHORITATIVE INFORMATION", prompt)
-        self.assertIn("Current speaker: player3", prompt)
-        self.assertIn("DISCUSSION INTENT", prompt)
-        self.assertIn("point_as_seer(player3)", prompt)
-        self.assertIn("check_as_werewolf(player6)", prompt)
-        self.assertIn("vote_intent(player5)", prompt)
-        self.assertIn(
-            "speaker publicly claims a Seer-style check on player6 returned "
-            "Werewolf",
-            prompt,
-        )
-        semantics = prompt.split(
-            "DISCUSSION ACTION SEMANTICS\n",
-            1,
-        )[1].split("\nThese are communication semantics only.", 1)[0]
-        self.assertIn(
-            "point_as_seer(player3): publicly claim player3 is Seer",
-            semantics,
-        )
-        self.assertIn(
-            "check_as_werewolf(player6): speaker publicly claims a "
-            "Seer-style check on player6 returned Werewolf",
-            semantics,
-        )
-        self.assertIn(
-            "vote_intent(player5): publicly push the current exile vote "
-            "toward player5",
-            semantics,
-        )
-        for unselected in (
-            "point_as_witch",
-            "support",
-            "oppose",
-            "save",
-            "poison",
-            "no_commitment",
-        ):
-            self.assertNotIn(unselected, semantics)
-        self.assertIn("SELECTED PUBLIC EVIDENCE", prompt)
-        self.assertIn("SELECTED-CLAIM-CANARY", prompt)
-        self.assertNotIn("UNSELECTED-CLAIM-CANARY", prompt)
-        self.assertIn("player4 was exiled", prompt)
-        self.assertIn("completed night result: player6 died", prompt)
-        self.assertIn("【当前存活】player1, player2, player3, player5, player7", prompt)
-        self.assertNotIn("PUBLIC CONVERSATION", prompt)
-        self.assertNotIn("CURRENT PRIVATE BELIEF", prompt)
-        self.assertNotIn("Actual role supplied by the Environment: Werewolf", prompt)
-        self.assertNotIn("真实狼队信息（仅用于内部策略）：player3, player7", prompt)
-        self.assertNotIn("第0天夜晚：击杀 player6", prompt)
-        self.assertIn("直接输出本轮简洁的自然语言公开发言", prompt)
-        self.assertIn("可以作为 PUBLIC CLAIMS", prompt)
-        self.assertIn("它们不是权威真相", prompt)
-        self.assertIn("无法访问实际私有真相，也不得推断实际私有真相", prompt)
-        self.assertIn(
-            "DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息",
-            prompt,
-        )
-        self.assertIn("不得添加任何玩家特定的私有事实", prompt)
-        self.assertIn("Call #2 只执行表层实现，不进行游戏推理或重新规划", prompt)
-        self.assertIn("每个冻结", prompt)
-        self.assertIn("DiscussionAct 都是最终发言必须明确实现的内容", prompt)
-        for mandatory_rule in (
-            "不得遗漏",
-            "矛盾",
-            "否定",
-            "替换为不同立场",
-            "不得弱化成仅仅观察",
-        ):
-            self.assertIn(mandatory_rule, prompt)
-        self.assertIn("最终发言必须明确推动当前放逐票", prompt)
-        self.assertIn("投向 playerX", prompt)
-        self.assertIn("playerX 是唯一可推动的当前放逐投票目标", prompt)
-        self.assertIn("若不存在 vote_intent，不得发明新的当前", prompt)
-        self.assertIn("每个游戏具体命题都必须由 DISCUSSION INTENT", prompt)
-        self.assertIn("直接许可", prompt)
-        self.assertIn("不包括由输入逻辑推断得出", prompt)
-        self.assertIn("不得从公开事实推导、假设、解释、猜测或推断隐藏原因", prompt)
-        self.assertIn("权威公开事实“昨夜无人死亡”本身不许可新增", prompt)
-        for hidden_hypothesis in (
-            "狼人空刀",
-            "狼人没有行动",
-            "用了或没用解药",
-            "用了或没用毒药",
-            "预言家进行了某次查验",
-            "某个隐藏身份导致",
-        ):
-            self.assertIn(hidden_hypothesis, prompt)
-        for modal_word in ("可能", "也许", "要么", "说明", "意味着", "推测"):
-            self.assertIn(modal_word, prompt)
-        self.assertIn("不确定或模态措辞不会产生 provenance", prompt)
-        self.assertIn("不得发明", prompt)
-        self.assertIn("额外的欺骗命题", prompt)
-        self.assertIn(
-            "DiscussionAct V1 itself is atemporal and does not license a "
-            "concrete temporal",
-            prompt,
-        )
-        self.assertIn(
-            "check_as_*, save and poison must not by themselves be rendered as",
-            prompt,
-        )
-        for forbidden_anchor in (
-            '"last night"',
-            '"the night before"',
-            "Night0/Night1",
-            '"first night"',
-        ):
-            self.assertIn(forbidden_anchor, prompt)
-        self.assertIn(
-            "only when SELECTED PUBLIC EVIDENCE or authoritative PUBLIC "
-            "information explicitly provides that time",
-            prompt,
-        )
-        self.assertIn("不要复述游戏规则、完整历史、分析过程或内部计划", prompt)
-        self.assertIn("控制在 1 到 3 句", prompt)
-        self.assertIn("目标不超过约 120 个汉字", prompt)
-        self.assertIn("不要输出 JSON", prompt)
 
     def test_frozen_discussion_candidates_enforce_only_hard_boundaries(self):
         self.assertEqual(

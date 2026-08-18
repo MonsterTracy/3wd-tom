@@ -562,8 +562,6 @@ class GameplayCognitionTest(unittest.TestCase):
             agent.act(observation),
             (
                 "speech",
-                "此前公开发言中，[第1天白天 / speech] player4 曾说："
-                "“PUBLIC-EVIDENCE-CANARY”\n"
                 "这一轮我暂不作明确的身份、查验、技能或投票表态。",
             ),
         )
@@ -862,12 +860,7 @@ class GameplayCognitionTest(unittest.TestCase):
         result = agent.act(observation)
         self.assertEqual(
             result,
-            (
-                "speech",
-                "此前公开发言中，[第1天白天 / speech] player2 曾说："
-                "“我觉得3号可疑。”\n"
-                "我质疑 player2。",
-            ),
+            ("speech", "我质疑 player2。"),
         )
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(
@@ -894,6 +887,83 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1])
         for private_cognition in ("当前信息有限。", "继续观察。", '"roles"'):
             self.assertNotIn(private_cognition, result[1])
+
+    def test_evidence_linkage_cannot_republish_nested_raw_claims(self):
+        observation = _observation()
+        raw_claim = "建议投 player2。"
+        nested_claim = "player2 说过“建议投 player2。”，我再次转述。"
+        observation["game_log"] = [
+            Log(
+                viewer=list(range(1, 8)),
+                source=2,
+                target=list(range(1, 8)),
+                content={"speech_content": raw_claim, "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            ),
+            Log(
+                viewer=list(range(1, 8)),
+                source=3,
+                target=list(range(1, 8)),
+                content={"speech_content": nested_claim, "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            ),
+        ]
+        evidence_selections = (
+            (),
+            ("claim_000",),
+            ("claim_001",),
+            ("claim_000", "claim_001"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Player_1.jsonl"
+            backend = MetadataBackend([
+                _day_cognition(
+                    observation,
+                    content_actions=(DiscussionAct("oppose", 6),),
+                    evidence=evidence,
+                )
+                for evidence in evidence_selections
+            ])
+            agent = self._agent(backend, log_file=str(path))
+            try:
+                speeches = tuple(
+                    agent.act(observation)
+                    for _evidence in evidence_selections
+                )
+            finally:
+                agent.close()
+
+            records = [
+                json.loads(line)
+                for line in path.read_text().splitlines()
+            ]
+
+        self.assertEqual(
+            speeches,
+            (("speech", "我质疑 player6。"),) * len(evidence_selections),
+        )
+        self.assertEqual(len(backend.calls), len(evidence_selections))
+        for call in backend.calls:
+            prompt = call["messages"][0]["content"]
+            self.assertIn("claim_000", prompt)
+            self.assertIn("claim_001", prompt)
+            self.assertIn(raw_claim, prompt)
+            self.assertIn(nested_claim, prompt)
+        self.assertEqual(
+            tuple(
+                tuple(json.loads(record["response"])["evidence_claim_ids"])
+                for record in records
+            ),
+            evidence_selections,
+        )
+        for _action, speech in speeches:
+            self.assertNotIn(raw_claim, speech)
+            self.assertNotIn(nested_claim, speech)
 
     def test_strategic_self_role_bluff_survives_deterministic_realization(self):
         observation = _role_observation("Werewolf", 3)

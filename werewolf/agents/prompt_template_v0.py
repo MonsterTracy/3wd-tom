@@ -317,13 +317,8 @@ def render_deterministic_public_speech(
     speaker_id,
     *,
     discussion_acts,
-    selected_claims,
 ):
-    lines = [
-        f"此前公开发言中，[{claim.time} / {claim.event}] "
-        f"player{claim.speaker} 曾说：“{claim.raw_text}”"
-        for claim in selected_claims
-    ]
+    lines = []
     for act in discussion_acts:
         if act.action not in _DISCUSSION_ACTION_REALIZATIONS:
             raise ValueError(f"unknown DiscussionAct action: {act.action!r}")
@@ -347,14 +342,6 @@ def _render_discussion_action_glossary():
         f"- {action if action in targetless_actions else f'{action}(playerX)'}: "
         f"{_DISCUSSION_ACTION_SEMANTICS[action]}"
         for action in DISCUSSION_ACTIONS
-    )
-
-
-def _render_selected_discussion_action_semantics(discussion_acts):
-    return "\n".join(
-        f"- {render_discussion_act(act)}: "
-        f"{_DISCUSSION_ACTION_SEMANTICS[act.action].replace('playerX', f'player{act.target}')}"
-        for act in discussion_acts
     )
 
 
@@ -1076,105 +1063,15 @@ publicly. They are public claim/positioning primitives, not truth labels.
 Strategic deception and bluff remain allowed within this frozen candidate space.
 Choose 0 to 2 unique evidence_claim_ids from the visible public claim catalog:
 {json.dumps(claim_ids)}
-Selected claim IDs are the only prior raw public utterances that the final public
-speech may explicitly reference. Do not provide a reason, confidence, strategy
-name, expected reaction, or any free-text public plan.
+Choose claims you consider relevant evidence for the current cognition and
+discussion-intent decision. The selected IDs form an internal linkage record for
+audit only. They do not authorize or require quoting, paraphrasing or mentioning
+those claims in public speech. Selection does not assert truth or falsity and does
+not prove causal influence on the belief or action. Do not provide a reason,
+confidence, strategy name, expected reaction, or any free-text public plan.
 Return only the JSON object required by the response schema. The six fields are
 belief, concise, roles, public_content_action_indices, public_vote_stance_index
 and evidence_claim_ids."""
-
-
-def build_public_speech_prompt(
-    observation,
-    *,
-    discussion_acts,
-    selected_claims,
-):
-    """Render one public-only prompt for realizing frozen discussion intent."""
-
-    if not isinstance(observation, dict):
-        raise TypeError("public speech observation must be a dictionary")
-    actor = observation.get("current_act_idx")
-    game_log = observation.get("game_log")
-    public_state = observation.get("authoritative_public_state")
-    if (
-        isinstance(actor, bool)
-        or not isinstance(actor, int)
-        or not 1 <= actor <= 7
-    ):
-        raise ValueError("public speech requires current_act_idx in [1, 7]")
-    if not isinstance(game_log, list):
-        raise TypeError("public speech requires a game_log list")
-    if not isinstance(public_state, dict):
-        raise TypeError("public speech requires authoritative_public_state")
-    if (
-        not isinstance(discussion_acts, tuple)
-        or not 1 <= len(discussion_acts) <= 3
-        or any(not isinstance(act, DiscussionAct) for act in discussion_acts)
-    ):
-        raise ValueError("public speech requires 1 to 3 frozen discussion acts")
-    if not isinstance(selected_claims, tuple) or any(
-        not isinstance(claim, PublicClaim) for claim in selected_claims
-    ):
-        raise TypeError("selected_claims must be a tuple of PublicClaim values")
-
-    state_text = _render_authoritative_public_state(
-        public_state,
-        suggestible_player_ids=derive_discussion_vote_targets(observation),
-    )
-    history_text = _render_authoritative_public_history(game_log)
-    intent_text = "\n".join(
-        f"- {render_discussion_act(act)}" for act in discussion_acts
-    )
-    evidence_text = "\n".join(
-        f"- {render_public_claim(claim)}" for claim in selected_claims
-    ) or "- (no public evidence selected)"
-    return f"""PUBLIC AUTHORITATIVE INFORMATION
-Current speaker: player{actor}
-Environment authoritative public state:
-{state_text}
-
-Authoritative public history (chronological):
-{history_text}
-
-DISCUSSION INTENT
-{intent_text}
-
-DISCUSSION ACTION SEMANTICS
-{_render_selected_discussion_action_semantics(discussion_acts)}
-These are communication semantics only. They are never truth labels.
-
-SELECTED PUBLIC EVIDENCE
-{evidence_text}
-
-PUBLIC SPEECH
-直接输出本轮简洁的自然语言公开发言。
-Call #2 只执行表层实现，不进行游戏推理或重新规划。DISCUSSION INTENT 中的每个冻结
-DiscussionAct 都是最终发言必须明确实现的内容：不得遗漏、矛盾、否定、替换为不同立场，
-也不得弱化成仅仅观察。若存在 vote_intent(playerX)，最终发言必须明确推动当前放逐票投向 playerX；
-playerX 是唯一可推动的当前放逐投票目标。若不存在 vote_intent，不得发明新的当前放逐目标。
-只可引用 SELECTED PUBLIC EVIDENCE 中的原始公开发言；未选历史发言不可见。最终发言中
-的每个游戏具体命题都必须由 DISCUSSION INTENT、SELECTED PUBLIC EVIDENCE 或权威 PUBLIC 信息
-之一直接许可；权威 PUBLIC 信息必须明确陈述该命题。“直接许可”仅指该命题在这些输入中
-被明确陈述，不包括由输入逻辑推断得出。不得从公开事实推导、假设、解释、猜测或推断隐藏原因。
-例如，权威公开事实“昨夜无人死亡”本身不许可新增“狼人空刀”“狼人没有行动”“女巫
-用了或没用解药”“女巫用了或没用毒药”“预言家进行了某次查验”或“某个隐藏身份导致
-平安夜”等主张或假设，除非该命题本身直接存在于上述三类来源之一。使用“可能”“也许”
-“要么”“说明”“意味着”“推测”等不确定或模态措辞不会产生 provenance，也不能许可
-原本未经许可的命题。不要为了让发言更自然或具体而添加理由、因果解释、背景或游戏状态
-假设；自然的衔接和风格语言仍然允许。
-DISCUSSION INTENT 中明确编码的身份、查验、解救或毒杀陈述可以作为 PUBLIC CLAIMS
-表达；它们不是权威真相。渲染器无法访问实际私有真相，也不得推断实际私有真相。
-不得添加任何玩家特定的私有事实、真实身份、队友、夜间行动或其他命题，除非由上述
-三类来源之一直接许可。策略性欺骗仅在冻结 DiscussionAct 本身许可该公开欺骗主张时允许；不得发明
-额外的欺骗命题。
-DiscussionAct V1 itself is atemporal and does not license a concrete temporal
-anchor. check_as_*, save and poison must not by themselves be rendered as
-"last night", "the night before", Night0/Night1, "first night" or any other
-concrete time. A concrete time may be expressed only when SELECTED PUBLIC EVIDENCE or authoritative PUBLIC information explicitly provides that time.
-不要复述游戏规则、完整历史、分析过程或内部计划，也不要逐条总结所有玩家。
-发言保持简洁、具体，控制在 1 到 3 句，目标不超过约 120 个汉字。
-不要输出 JSON、Markdown、分析、计划或结构化公开动作，也不要暴露控制文本或私有系统数据。"""
 
 
 def build_vote_prompt(observation, belief, legal_targets):

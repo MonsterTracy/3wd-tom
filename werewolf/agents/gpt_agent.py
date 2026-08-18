@@ -73,7 +73,7 @@ class GPTAgent(LLMAgent):
         temperature, max_tokens = self._request_limits()
 
         if is_speech and is_strict:
-            day_cognition, candidate_snapshot, claim_catalog = (
+            day_cognition, candidate_snapshot, _claim_catalog = (
                 self._generate_day_cognition(
                     observation,
                     temperature=temperature,
@@ -89,19 +89,11 @@ class GPTAgent(LLMAgent):
                     day_cognition.public_vote_stance_index
                 ),
             )
-            claim_by_id = {
-                claim.claim_id: claim for claim in claim_catalog
-            }
-            selected_claims = tuple(
-                claim_by_id[claim_id]
-                for claim_id in day_cognition.evidence_claim_ids
-            )
             return (
                 "speech",
                 render_deterministic_public_speech(
                     observation.get("current_act_idx"),
                     discussion_acts=discussion_acts,
-                    selected_claims=selected_claims,
                 ),
             )
 
