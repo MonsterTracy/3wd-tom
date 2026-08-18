@@ -7,10 +7,10 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     RoleReportValidationError,
     belief_response_format,
-    day_cognition_response_format,
+    day_cognition_response_format_v2,
     night_action_response_format,
     parse_belief_response,
-    parse_day_cognition_response,
+    parse_day_cognition_response_v2,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -22,6 +22,7 @@ from werewolf.agents.prompt_template_v0 import (
     build_day_cognition_prompt,
     build_public_claim_catalog,
     build_vote_prompt,
+    compile_discussion_intent_v2,
     derive_belief_constraints,
     freeze_discussion_candidates,
     render_deterministic_public_speech,
@@ -79,9 +80,14 @@ class GPTAgent(LLMAgent):
                     max_tokens=max_tokens,
                 )
             )
-            discussion_acts = tuple(
-                candidate_snapshot[index]
-                for index in day_cognition.public_action_indices
+            discussion_acts = compile_discussion_intent_v2(
+                candidate_snapshot,
+                public_content_action_indices=(
+                    day_cognition.public_content_action_indices
+                ),
+                public_vote_stance_index=(
+                    day_cognition.public_vote_stance_index
+                ),
             )
             claim_by_id = {
                 claim.claim_id: claim for claim in claim_catalog
@@ -220,7 +226,7 @@ class GPTAgent(LLMAgent):
             player_log_context={"stage": "belief", "observation": observation},
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=day_cognition_response_format(
+            response_format=day_cognition_response_format_v2(
                 supports_json_schema=getattr(
                     self.backend,
                     "supports_json_schema",
@@ -237,7 +243,7 @@ class GPTAgent(LLMAgent):
                 f"Day cognition response was truncated "
                 f"(player={player_id}, phase={phase!r})"
             )
-        report = parse_day_cognition_response(
+        report = parse_day_cognition_response_v2(
             content,
             player_id=player_id,
             self_role=observation.get("identity"),

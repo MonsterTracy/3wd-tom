@@ -3,6 +3,7 @@ import unittest
 from werewolf.agents.prompt_template_v0 import (
     DISCUSSION_ACTIONS,
     DiscussionAct,
+    NO_STANCE,
     PublicClaim,
     _render_authoritative_public_history,
     build_belief_prompt,
@@ -13,6 +14,8 @@ from werewolf.agents.prompt_template_v0 import (
     derive_belief_constraints,
     derive_discussion_vote_targets,
     freeze_discussion_candidates,
+    project_discussion_content_indices,
+    project_discussion_vote_stances,
     render_deterministic_public_speech,
 )
 from werewolf.helper.log_utils import Log
@@ -339,37 +342,60 @@ Villager: {3}""".format(*counts)
         )
         self.assertIn("[claim_000] [第1天白天 / speech]", day_prompt)
         self.assertIn("DISCUSSION INTENT OUTPUT", day_prompt)
-        compatibility = day_prompt.split(
-            "DISCUSSION ACTION COMPATIBILITY\n",
+        self.assertNotIn("DISCUSSION ACTION COMPATIBILITY", day_prompt)
+        self.assertNotIn("public_action_indices", day_prompt)
+        self.assertIn(
+            "Choose 0 to 2 unique public_content_action_indices",
+            day_prompt,
+        )
+        self.assertIn(
+            "Choose exactly one public_vote_stance_index",
+            day_prompt,
+        )
+        self.assertIn(
+            "NO_STANCE means no publicly stated voting tendency in this speech",
+            day_prompt,
+        )
+        self.assertIn(
+            "speech intent, not the authoritative later Vote-phase ballot",
+            day_prompt,
+        )
+        self.assertIn("no_commitment is not selectable", day_prompt)
+        self.assertIn(
+            "public content is empty and NO_STANCE is\n"
+            "selected, the program represents the empty discussion intent "
+            "canonically",
+            day_prompt,
+        )
+        content_candidates = day_prompt.split(
+            "from this deterministic projection of the frozen canonical "
+            "candidate snapshot:\n",
             1,
         )[1].split(
-            "\nChoose 1 to 3 unique public_action_indices",
+            "\nChoose exactly one public_vote_stance_index",
             1,
         )[0]
-        self.assertEqual(
-            compatibility.splitlines(),
-            [
-                "The selected public_action_indices must form a mutually compatible subset",
-                "satisfying exactly these rules:",
-                "- no_commitment must be selected alone and cannot be combined with any other DiscussionAct.",
-                "- Select at most one vote_intent.",
-                "- Select at most one abstain_intent.",
-                "- vote_intent and abstain_intent are mutually exclusive.",
-                "Do not infer any additional DiscussionAct combination restriction.",
-            ],
-        )
-        for absent_restriction in (
-            "support vs oppose",
-            "role claims",
-            "check claims",
-            "save / poison",
-            "sharing the same target",
+        for excluded_action in (
+            "vote_intent",
+            "abstain_intent",
+            "no_commitment",
         ):
-            self.assertNotIn(absent_restriction, compatibility)
-        self.assertIn(
-            "Choose 1 to 3 unique public_action_indices from this frozen "
-            "candidate snapshot",
-            day_prompt,
+            self.assertNotIn(excluded_action, content_candidates)
+        stance_candidates = day_prompt.split(
+            "Choose exactly one public_vote_stance_index from this "
+            "deterministic projection:\n",
+            1,
+        )[1].split("\nNO_STANCE means", 1)[0]
+        self.assertIn(f"0: {NO_STANCE}", stance_candidates)
+        self.assertIn("vote_intent(player1)", stance_candidates)
+        self.assertIn("abstain_intent", stance_candidates)
+        for excluded_action in ("support", "oppose", "no_commitment"):
+            self.assertNotIn(excluded_action, stance_candidates)
+        snapshot = freeze_discussion_candidates(observation)
+        self.assertTrue(project_discussion_content_indices(snapshot))
+        self.assertEqual(
+            project_discussion_vote_stances(snapshot)[0],
+            NO_STANCE,
         )
         self.assertIn(
             "Strategic deception and bluff remain allowed within this frozen "

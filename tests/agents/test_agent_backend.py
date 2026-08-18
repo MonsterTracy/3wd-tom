@@ -10,14 +10,14 @@ from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.agents.llm_agent import (
     BELIEF_ROLES,
     BeliefValidationError,
-    DayCognitionReport,
+    DayCognitionReportV2,
     GameplayActionValidationError,
     GameplaySpeechQualityError,
     RoleReportValidationError,
     belief_response_format,
-    day_cognition_response_format,
+    day_cognition_response_format_v2,
     parse_belief_response,
-    parse_day_cognition_response,
+    parse_day_cognition_response_v2,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -25,10 +25,14 @@ from werewolf.agents.llm_agent import (
 )
 from werewolf.agents.prompt_template_v0 import (
     DiscussionAct,
+    NO_STANCE,
     STRICT_CLASSIC7_GAME_DESCRIPTION,
     build_public_claim_catalog,
+    compile_discussion_intent_v2,
     derive_belief_constraints,
     freeze_discussion_candidates,
+    project_discussion_content_indices,
+    project_discussion_vote_stances,
 )
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
@@ -94,24 +98,36 @@ def _day_cognition_from_belief(
     belief_response,
     observation,
     *,
-    actions=(DiscussionAct("no_commitment", None),),
+    content_actions=(),
+    vote_stance=NO_STANCE,
     evidence_claim_ids=(),
 ):
     payload = json.loads(belief_response)
     snapshot = freeze_discussion_candidates(observation)
-    payload["public_action_indices"] = [
-        snapshot.index(action) for action in actions
+    payload["public_content_action_indices"] = [
+        snapshot.index(action) for action in content_actions
     ]
+    payload["public_vote_stance_index"] = (
+        project_discussion_vote_stances(snapshot).index(vote_stance)
+    )
     payload["evidence_claim_ids"] = list(evidence_claim_ids)
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _day_cognition(observation=None, *, role="unknown", actions=None, evidence=()):
+def _day_cognition(
+    observation=None,
+    *,
+    role="unknown",
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence=(),
+):
     observation = observation or _observation()
     return _day_cognition_from_belief(
         _belief(observation["current_act_idx"], role=role),
         observation,
-        actions=actions or (DiscussionAct("no_commitment", None),),
+        content_actions=content_actions,
+        vote_stance=vote_stance,
         evidence_claim_ids=evidence,
     )
 
@@ -180,7 +196,7 @@ def _parse_day_cognition(raw_response, observation):
     claim_ids = tuple(
         claim.claim_id for claim in build_public_claim_catalog(observation)
     )
-    return parse_day_cognition_response(
+    return parse_day_cognition_response_v2(
         raw_response,
         player_id=observation["current_act_idx"],
         self_role=observation["identity"],
@@ -240,14 +256,14 @@ class GameplayCognitionTest(unittest.TestCase):
         )
         self.assertEqual(set(report.roles.values()), {"unknown"})
 
-    def test_day_cognition_schema_and_valid_intents(self):
+    def test_day_cognition_v2_schema_has_exact_transport_fields(self):
         observation = _observation()
         _exact_roles, role_options = derive_belief_constraints(observation)
         snapshot = freeze_discussion_candidates(observation)
         claim_ids = tuple(
             claim.claim_id for claim in build_public_claim_catalog(observation)
         )
-        response_format = day_cognition_response_format(
+        response_format = day_cognition_response_format_v2(
             supports_json_schema=True,
             role_options=role_options,
             candidate_snapshot=snapshot,
@@ -255,27 +271,38 @@ class GameplayCognitionTest(unittest.TestCase):
         )
         schema = response_format["json_schema"]["schema"]
 
-        self.assertEqual(response_format["json_schema"]["name"], "day_cognition_report")
+        self.assertEqual(
+            response_format["json_schema"]["name"],
+            "day_cognition_report_v2",
+        )
         self.assertEqual(
             set(schema["properties"]),
             {
                 "belief",
                 "concise",
                 "roles",
-                "public_action_indices",
+                "public_content_action_indices",
+                "public_vote_stance_index",
                 "evidence_claim_ids",
             },
         )
+        self.assertNotIn("public_action_indices", schema["properties"])
         self.assertFalse(schema["additionalProperties"])
-        action_schema = schema["properties"]["public_action_indices"]
+        action_schema = schema["properties"]["public_content_action_indices"]
         self.assertEqual(action_schema["type"], "array")
         self.assertNotIn("uniqueItems", action_schema)
-        self.assertEqual(action_schema["minItems"], 1)
-        self.assertEqual(action_schema["maxItems"], 3)
+        self.assertEqual(action_schema["minItems"], 0)
+        self.assertEqual(action_schema["maxItems"], 2)
         self.assertEqual(action_schema["items"]["type"], "integer")
         self.assertEqual(
             action_schema["items"]["enum"],
-            list(range(len(snapshot))),
+            list(project_discussion_content_indices(snapshot)),
+        )
+        stance_schema = schema["properties"]["public_vote_stance_index"]
+        self.assertEqual(stance_schema["type"], "integer")
+        self.assertEqual(
+            stance_schema["enum"],
+            list(range(len(project_discussion_vote_stances(snapshot)))),
         )
         evidence_schema = schema["properties"]["evidence_claim_ids"]
         self.assertEqual(evidence_schema["type"], "array")
@@ -288,25 +315,59 @@ class GameplayCognitionTest(unittest.TestCase):
             ["claim_000"],
         )
 
-        one_action = _parse_day_cognition(_day_cognition(observation), observation)
-        self.assertIsInstance(one_action, DayCognitionReport)
-        self.assertEqual(len(one_action.public_action_indices), 1)
-        three_actions = _parse_day_cognition(
-            _day_cognition(
-                observation,
-                actions=(
-                    DiscussionAct("support", 2),
-                    DiscussionAct("oppose", 2),
-                    DiscussionAct("point_as_werewolf", 2),
-                ),
-                evidence=("claim_000",),
-            ),
-            observation,
-        )
-        self.assertEqual(len(three_actions.public_action_indices), 3)
-        self.assertEqual(three_actions.evidence_claim_ids, ("claim_000",))
+    def test_day_cognition_v2_compiles_all_representation_cases(self):
+        observation = _observation()
+        snapshot = freeze_discussion_candidates(observation)
 
-    def test_day_cognition_parser_rejects_invalid_intent_without_repair(self):
+        def compile_response(content_actions=(), vote_stance=NO_STANCE):
+            report = _parse_day_cognition(
+                _day_cognition(
+                    observation,
+                    content_actions=content_actions,
+                    vote_stance=vote_stance,
+                ),
+                observation,
+            )
+            self.assertIsInstance(report, DayCognitionReportV2)
+            return compile_discussion_intent_v2(
+                snapshot,
+                public_content_action_indices=(
+                    report.public_content_action_indices
+                ),
+                public_vote_stance_index=report.public_vote_stance_index,
+            )
+
+        oppose_seven = DiscussionAct("oppose", 7)
+        abstain = DiscussionAct("abstain_intent", None)
+        vote_six = DiscussionAct("vote_intent", 6)
+        seer_claim = DiscussionAct("point_as_seer", 1)
+        check_six = DiscussionAct("check_as_werewolf", 6)
+
+        self.assertEqual(
+            compile_response(),
+            (DiscussionAct("no_commitment", None),),
+        )
+        self.assertEqual(compile_response((oppose_seven,)), (oppose_seven,))
+        self.assertEqual(compile_response(vote_stance=abstain), (abstain,))
+        self.assertEqual(
+            compile_response((oppose_seven,), abstain),
+            (oppose_seven, abstain),
+        )
+        self.assertEqual(
+            compile_response((seer_claim, check_six), vote_six),
+            (seer_claim, check_six, vote_six),
+        )
+        self.assertEqual(
+            compile_response((check_six, seer_claim)),
+            (check_six, seer_claim),
+        )
+        contradictory = (
+            DiscussionAct("support", 3),
+            DiscussionAct("oppose", 3),
+        )
+        self.assertEqual(compile_response(contradictory), contradictory)
+
+    def test_day_cognition_v2_parser_rejects_residual_transport_errors(self):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
         base = json.loads(_day_cognition(observation))
@@ -316,42 +377,41 @@ class GameplayCognitionTest(unittest.TestCase):
         invalid_payloads = {
             "duplicate indices": {
                 **base,
-                "public_action_indices": [index("support", 2)] * 2,
+                "public_content_action_indices": [index("support", 2)] * 2,
             },
             "out of range": {
                 **base,
-                "public_action_indices": [len(snapshot)],
+                "public_content_action_indices": [len(snapshot)],
             },
-            "empty actions": {**base, "public_action_indices": []},
             "too many actions": {
                 **base,
-                "public_action_indices": [
+                "public_content_action_indices": [
                     index("support", 2),
                     index("oppose", 3),
                     index("point_as_seer", 1),
-                    index("point_as_witch", 4),
                 ],
             },
-            "no commitment combination": {
+            "vote intent as content": {
                 **base,
-                "public_action_indices": [
-                    index("no_commitment"),
-                    index("support", 2),
-                ],
+                "public_content_action_indices": [index("vote_intent", 2)],
             },
-            "two vote intents": {
+            "abstain as content": {
                 **base,
-                "public_action_indices": [
-                    index("vote_intent", 2),
-                    index("vote_intent", 4),
-                ],
+                "public_content_action_indices": [index("abstain_intent")],
             },
-            "vote and abstain": {
+            "no commitment as content": {
                 **base,
-                "public_action_indices": [
-                    index("vote_intent", 2),
-                    index("abstain_intent"),
-                ],
+                "public_content_action_indices": [index("no_commitment")],
+            },
+            "invalid stance": {
+                **base,
+                "public_vote_stance_index": len(
+                    project_discussion_vote_stances(snapshot)
+                ),
+            },
+            "stance is not scalar": {
+                **base,
+                "public_vote_stance_index": [0],
             },
             "unknown evidence": {
                 **base,
@@ -364,6 +424,10 @@ class GameplayCognitionTest(unittest.TestCase):
             "too much evidence": {
                 **base,
                 "evidence_claim_ids": ["claim_000", "claim_001", "claim_002"],
+            },
+            "old V1 field": {
+                **base,
+                "public_action_indices": [index("support", 2)],
             },
         }
 
@@ -642,7 +706,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 for call in backend.calls
                 if "response_format" in call
                 and call["response_format"]["json_schema"]["name"]
-                == "day_cognition_report"
+                == "day_cognition_report_v2"
             ]
             self.assertEqual(len(belief_calls), 1)
             records = [json.loads(line) for line in path.read_text().splitlines()]
@@ -708,11 +772,15 @@ class GameplayCognitionTest(unittest.TestCase):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
         invalid_index = json.loads(_day_cognition(observation))
-        invalid_index["public_action_indices"] = [len(snapshot)]
+        invalid_index["public_content_action_indices"] = [len(snapshot)]
         invalid_evidence = json.loads(_day_cognition(observation))
         invalid_evidence["evidence_claim_ids"] = ["claim_999"]
+        old_v1_payload = json.loads(_day_cognition(observation))
+        old_v1_payload["public_action_indices"] = [0]
+        del old_v1_payload["public_content_action_indices"]
+        del old_v1_payload["public_vote_stance_index"]
 
-        for payload in (invalid_index, invalid_evidence):
+        for payload in (invalid_index, invalid_evidence, old_v1_payload):
             with self.subTest(payload=payload):
                 backend = MetadataBackend([json.dumps(payload)])
                 agent = self._agent(backend)
@@ -785,10 +853,7 @@ class GameplayCognitionTest(unittest.TestCase):
         backend = MetadataBackend([
             _day_cognition(
                 observation,
-                actions=(
-                    DiscussionAct("oppose", 2),
-                    DiscussionAct("support", 4),
-                ),
+                content_actions=(DiscussionAct("oppose", 2),),
                 evidence=("claim_000",),
             ),
         ])
@@ -801,14 +866,13 @@ class GameplayCognitionTest(unittest.TestCase):
                 "speech",
                 "此前公开发言中，[第1天白天 / speech] player2 曾说："
                 "“我觉得3号可疑。”\n"
-                "我质疑 player2。\n"
-                "我支持 player4。",
+                "我质疑 player2。",
             ),
         )
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(
             backend.calls[0]["response_format"]["json_schema"]["name"],
-            "day_cognition_report",
+            "day_cognition_report_v2",
         )
         day_schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
         self.assertEqual(
@@ -817,7 +881,8 @@ class GameplayCognitionTest(unittest.TestCase):
                 "belief",
                 "concise",
                 "roles",
-                "public_action_indices",
+                "public_content_action_indices",
+                "public_vote_stance_index",
                 "evidence_claim_ids",
             },
         )
@@ -837,10 +902,11 @@ class GameplayCognitionTest(unittest.TestCase):
             _day_cognition_from_belief(
                 _belief_for(role_options),
                 observation,
-                actions=(
+                content_actions=(
                     DiscussionAct("point_as_seer", 3),
                     DiscussionAct("check_as_werewolf", 6),
                 ),
+                vote_stance=DiscussionAct("vote_intent", 6),
             ),
         ])
         agent = self._agent(backend)
@@ -849,7 +915,9 @@ class GameplayCognitionTest(unittest.TestCase):
             agent.act(observation),
             (
                 "speech",
-                "我是预言家。\n我查验过 player6，结果是狼人。",
+                "我是预言家。\n"
+                "我查验过 player6，结果是狼人。\n"
+                "这一轮我建议投票放逐 player6。",
             ),
         )
         self.assertEqual(len(backend.calls), 1)
@@ -857,6 +925,26 @@ class GameplayCognitionTest(unittest.TestCase):
             "Actual role supplied by the Environment: Werewolf",
             backend.calls[0]["messages"][0]["content"],
         )
+
+    def test_content_then_abstain_stance_uses_one_cognition_call(self):
+        observation = _observation()
+        backend = MetadataBackend([
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("oppose", 7),),
+                vote_stance=DiscussionAct("abstain_intent", None),
+            ),
+        ])
+        agent = self._agent(backend)
+
+        self.assertEqual(
+            agent.act(observation),
+            (
+                "speech",
+                "我质疑 player7。\n这一轮我选择弃票。",
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
 
     def test_no_commitment_is_deterministic_with_one_cognition_call(self):
         backend = MetadataBackend([_day_cognition()])
@@ -887,10 +975,8 @@ class GameplayCognitionTest(unittest.TestCase):
         backend = MetadataBackend([
             _day_cognition(
                 observation,
-                actions=(
-                    DiscussionAct("oppose", 3),
-                    DiscussionAct("vote_intent", 5),
-                ),
+                content_actions=(DiscussionAct("oppose", 3),),
+                vote_stance=DiscussionAct("vote_intent", 5),
             ),
         ])
         agent = self._agent(backend)
@@ -903,6 +989,21 @@ class GameplayCognitionTest(unittest.TestCase):
             ),
         )
         self.assertEqual(len(backend.calls), 1)
+        snapshot = freeze_discussion_candidates(observation)
+        self.assertEqual(
+            project_discussion_vote_stances(snapshot),
+            (
+                NO_STANCE,
+                DiscussionAct("vote_intent", 2),
+                DiscussionAct("vote_intent", 3),
+                DiscussionAct("vote_intent", 5),
+                DiscussionAct("abstain_intent", None),
+            ),
+        )
+        stance_schema = backend.calls[0]["response_format"]["json_schema"][
+            "schema"
+        ]["properties"]["public_vote_stance_index"]
+        self.assertEqual(stance_schema["enum"], [0, 1, 2, 3, 4])
 
     def test_day_logs_only_cognition_stage(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -529,10 +529,11 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
                     f"player{player_id}": "unknown"
                     for player_id in range(2, 8)
                 },
-                "public_action_indices": [0],
+                "public_content_action_indices": [],
+                "public_vote_stance_index": 0,
                 "evidence_claim_ids": [],
             }, ensure_ascii=False)
-            if response_name == "day_cognition_report"
+            if response_name == "day_cognition_report_v2"
             else "这是公开发言。"
         )
         return _success_response(request, content=content)
@@ -582,7 +583,10 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
         }
     )
 
-    assert action == ("speech", "我是狼人。")
+    assert action == (
+        "speech",
+        "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+    )
     assert len(calls) == 1
     assert {url for url, _payload in calls} == {
         "http://127.0.0.1:8000/v1/chat/completions"

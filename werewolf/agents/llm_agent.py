@@ -14,6 +14,8 @@ from werewolf.agents.prompt_template_v0 import (
     STRICT_CLASSIC7_GAME_DESCRIPTION,
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
     STRICT_CLASSIC7_ROLE_COUNTS,
+    project_discussion_content_indices,
+    project_discussion_vote_stances,
 )
 from werewolf.agents.base_agent import Agent
 from werewolf.backends import BackendError
@@ -89,11 +91,12 @@ class BeliefReport:
 
 
 @dataclass(frozen=True)
-class DayCognitionReport:
+class DayCognitionReportV2:
     belief: str
     concise: str
     roles: dict[str, str]
-    public_action_indices: tuple[int, ...]
+    public_content_action_indices: tuple[int, ...]
+    public_vote_stance_index: int
     evidence_claim_ids: tuple[str, ...]
 
 
@@ -133,7 +136,7 @@ def belief_response_format(*, supports_json_schema, role_options):
     }
 
 
-def day_cognition_response_format(
+def day_cognition_response_format_v2(
     *,
     supports_json_schema,
     role_options,
@@ -160,6 +163,8 @@ def day_cognition_response_format(
         raise TypeError("claim_ids must be a tuple of strings")
 
     unresolved_players = list(role_options)
+    content_indices = project_discussion_content_indices(candidate_snapshot)
+    vote_stances = project_discussion_vote_stances(candidate_snapshot)
     evidence_items = (
         {"type": "string", "enum": list(claim_ids)}
         if claim_ids
@@ -168,7 +173,7 @@ def day_cognition_response_format(
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "day_cognition_report",
+            "name": "day_cognition_report_v2",
             "strict": True,
             "schema": {
                 "type": "object",
@@ -177,7 +182,8 @@ def day_cognition_response_format(
                     "belief",
                     "concise",
                     "roles",
-                    "public_action_indices",
+                    "public_content_action_indices",
+                    "public_vote_stance_index",
                     "evidence_claim_ids",
                 ],
                 "properties": {
@@ -195,14 +201,18 @@ def day_cognition_response_format(
                             for player in unresolved_players
                         },
                     },
-                    "public_action_indices": {
+                    "public_content_action_indices": {
                         "type": "array",
-                        "minItems": 1,
-                        "maxItems": 3,
+                        "minItems": 0,
+                        "maxItems": 2,
                         "items": {
                             "type": "integer",
-                            "enum": list(range(len(candidate_snapshot))),
+                            "enum": list(content_indices),
                         },
+                    },
+                    "public_vote_stance_index": {
+                        "type": "integer",
+                        "enum": list(range(len(vote_stances))),
                     },
                     "evidence_claim_ids": {
                         "type": "array",
@@ -273,7 +283,7 @@ def parse_belief_response(
     )
 
 
-def parse_day_cognition_response(
+def parse_day_cognition_response_v2(
     raw_response,
     *,
     player_id,
@@ -295,7 +305,8 @@ def parse_day_cognition_response(
         "belief",
         "concise",
         "roles",
-        "public_action_indices",
+        "public_content_action_indices",
+        "public_vote_stance_index",
         "evidence_claim_ids",
     }
     if not isinstance(payload, dict) or set(payload) != required_fields:
@@ -315,32 +326,33 @@ def parse_day_cognition_response(
     ):
         raise BeliefValidationError(f"invalid public claim catalog ({context})")
 
-    indices = payload["public_action_indices"]
+    content_indices = payload["public_content_action_indices"]
+    valid_content_indices = set(
+        project_discussion_content_indices(candidate_snapshot)
+    )
     if (
-        not isinstance(indices, list)
-        or not 1 <= len(indices) <= 3
+        not isinstance(content_indices, list)
+        or len(content_indices) > 2
         or any(
             isinstance(index, bool) or not isinstance(index, int)
-            for index in indices
+            for index in content_indices
         )
-        or len(set(indices)) != len(indices)
-        or any(not 0 <= index < len(candidate_snapshot) for index in indices)
+        or len(set(content_indices)) != len(content_indices)
+        or any(index not in valid_content_indices for index in content_indices)
     ):
         raise BeliefValidationError(
-            f"invalid public_action_indices ({context})"
+            f"invalid public_content_action_indices ({context})"
         )
-    selected_actions = [candidate_snapshot[index].action for index in indices]
+
+    vote_stance_index = payload["public_vote_stance_index"]
+    vote_stances = project_discussion_vote_stances(candidate_snapshot)
     if (
-        ("no_commitment" in selected_actions and len(selected_actions) != 1)
-        or selected_actions.count("vote_intent") > 1
-        or selected_actions.count("abstain_intent") > 1
-        or (
-            "vote_intent" in selected_actions
-            and "abstain_intent" in selected_actions
-        )
+        isinstance(vote_stance_index, bool)
+        or not isinstance(vote_stance_index, int)
+        or not 0 <= vote_stance_index < len(vote_stances)
     ):
         raise BeliefValidationError(
-            f"invalid discussion action combination ({context})"
+            f"invalid public_vote_stance_index ({context})"
         )
 
     evidence_claim_ids = payload["evidence_claim_ids"]
@@ -369,11 +381,12 @@ def parse_day_cognition_response(
         exact_roles=exact_roles,
         role_options=role_options,
     )
-    return DayCognitionReport(
+    return DayCognitionReportV2(
         belief=belief_report.belief,
         concise=belief_report.concise,
         roles=belief_report.roles,
-        public_action_indices=tuple(indices),
+        public_content_action_indices=tuple(content_indices),
+        public_vote_stance_index=vote_stance_index,
         evidence_claim_ids=tuple(evidence_claim_ids),
     )
 
@@ -390,7 +403,7 @@ def validate_role_report(
     """Validate one role report without judging subjective guesses by truth."""
 
     context = f"player={player_id}, phase={phase}"
-    if not isinstance(report, (BeliefReport, DayCognitionReport)):
+    if not isinstance(report, (BeliefReport, DayCognitionReportV2)):
         raise RoleReportValidationError(f"invalid role report ({context})")
     final_players = {
         f"player{candidate}"

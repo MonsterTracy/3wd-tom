@@ -291,7 +291,8 @@ def test_strict_day_cognition_is_one_audited_gameplay_call(
                     f"player{player_id}": "unknown"
                     for player_id in range(2, 8)
                 },
-                "public_action_indices": [0],
+                "public_content_action_indices": [],
+                "public_vote_stance_index": 0,
                 "evidence_claim_ids": [],
             }, ensure_ascii=False),
         ],
@@ -324,7 +325,10 @@ def test_strict_day_cognition_is_one_audited_gameplay_call(
         observation=observation,
         public_events=_public_events(),
     ):
-        assert agent.act(observation) == ("speech", "我是狼人。")
+        assert agent.act(observation) == (
+            "speech",
+            "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+        )
     writer.close()
 
     records, _serialized = _records(tmp_path / "audit.jsonl")

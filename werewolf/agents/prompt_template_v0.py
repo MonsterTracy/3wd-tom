@@ -92,6 +92,9 @@ _SELF_ROLE_CLAIM_REALIZATIONS = {
 }
 _ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:6]
 _NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[6:10]
+_PUBLIC_CONTENT_ACTIONS = DISCUSSION_ACTIONS[:10]
+_PUBLIC_VOTE_STANCE_ACTIONS = {"vote_intent", "abstain_intent"}
+NO_STANCE = "NO_STANCE"
 
 
 @dataclass(frozen=True)
@@ -262,6 +265,46 @@ def freeze_discussion_candidates(observation):
         )
     )
     return tuple(candidates)
+
+
+def project_discussion_content_indices(candidate_snapshot):
+    """Project canonical candidates into the V2 public-content view."""
+
+    return tuple(
+        index
+        for index, act in enumerate(candidate_snapshot)
+        if act.action in _PUBLIC_CONTENT_ACTIONS
+    )
+
+
+def project_discussion_vote_stances(candidate_snapshot):
+    """Project canonical candidates into the V2 public vote-stance view."""
+
+    return (NO_STANCE,) + tuple(
+        act
+        for act in candidate_snapshot
+        if act.action in _PUBLIC_VOTE_STANCE_ACTIONS
+    )
+
+
+def compile_discussion_intent_v2(
+    candidate_snapshot,
+    *,
+    public_content_action_indices,
+    public_vote_stance_index,
+):
+    """Compile one parser-valid V2 transport into DiscussionAct V1."""
+
+    discussion_acts = tuple(
+        candidate_snapshot[index]
+        for index in public_content_action_indices
+    )
+    vote_stance = project_discussion_vote_stances(candidate_snapshot)[
+        public_vote_stance_index
+    ]
+    if vote_stance != NO_STANCE:
+        discussion_acts += (vote_stance,)
+    return discussion_acts or (DiscussionAct("no_commitment", None),)
 
 
 def render_discussion_act(act):
@@ -997,9 +1040,17 @@ def build_day_cognition_prompt(
         exact_roles,
         role_options,
     )
-    candidate_text = "\n".join(
+    content_indices = project_discussion_content_indices(candidate_snapshot)
+    content_candidate_text = "\n".join(
         f"{index}: {render_discussion_act(act)}"
         for index, act in enumerate(candidate_snapshot)
+        if index in content_indices
+    )
+    vote_stance_text = "\n".join(
+        f"{index}: {stance if stance == NO_STANCE else render_discussion_act(stance)}"
+        for index, stance in enumerate(
+            project_discussion_vote_stances(candidate_snapshot)
+        )
     )
     claim_ids = [claim.claim_id for claim in claim_catalog]
     return f"""{context}
@@ -1011,16 +1062,15 @@ DISCUSSION ACTION SEMANTICS
 These are communication semantics only. They are never truth labels.
 
 DISCUSSION INTENT OUTPUT
-DISCUSSION ACTION COMPATIBILITY
-The selected public_action_indices must form a mutually compatible subset
-satisfying exactly these rules:
-- no_commitment must be selected alone and cannot be combined with any other DiscussionAct.
-- Select at most one vote_intent.
-- Select at most one abstain_intent.
-- vote_intent and abstain_intent are mutually exclusive.
-Do not infer any additional DiscussionAct combination restriction.
-Choose 1 to 3 unique public_action_indices from this frozen candidate snapshot:
-{candidate_text}
+Choose 0 to 2 unique public_content_action_indices, in intended public order,
+from this deterministic projection of the frozen canonical candidate snapshot:
+{content_candidate_text}
+Choose exactly one public_vote_stance_index from this deterministic projection:
+{vote_stance_text}
+NO_STANCE means no publicly stated voting tendency in this speech.
+The public vote stance is speech intent, not the authoritative later Vote-phase ballot.
+no_commitment is not selectable. When public content is empty and NO_STANCE is
+selected, the program represents the empty discussion intent canonically.
 These indices describe only what the current speaker intends to communicate
 publicly. They are public claim/positioning primitives, not truth labels.
 Strategic deception and bluff remain allowed within this frozen candidate space.
@@ -1029,8 +1079,9 @@ Choose 0 to 2 unique evidence_claim_ids from the visible public claim catalog:
 Selected claim IDs are the only prior raw public utterances that the final public
 speech may explicitly reference. Do not provide a reason, confidence, strategy
 name, expected reaction, or any free-text public plan.
-Return only the JSON object required by the response schema. The five fields are
-belief, concise, roles, public_action_indices and evidence_claim_ids."""
+Return only the JSON object required by the response schema. The six fields are
+belief, concise, roles, public_content_action_indices, public_vote_stance_index
+and evidence_claim_ids."""
 
 
 def build_public_speech_prompt(
