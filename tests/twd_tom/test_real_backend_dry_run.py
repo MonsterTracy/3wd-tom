@@ -327,7 +327,10 @@ def test_strict_day_cognition_is_one_audited_gameplay_call(
     ):
         assert agent.act(observation) == (
             "speech",
-            "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+            {
+                "raw_text": "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                "sp_actions": [["player1", "no_commitment", None]],
+            },
         )
     writer.close()
 

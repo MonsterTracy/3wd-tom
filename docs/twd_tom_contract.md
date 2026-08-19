@@ -19,7 +19,7 @@ Each public speech follows:
 `H_t -> B_t -> A_t -> H_{t+1}`
 
 `H_t` is the already committed prefix of the sole append-only
-`public_events` history (`classic7_public_event_sequence_v2`). It contains
+`public_events` history (`classic7_public_event_sequence_v3`). It contains
 public phase changes, turn starts, complete public speeches, revealed
 voter-target results, exile results, and death announcements in publication
 order. Before the current speaker generates `A_t`, every alive observer

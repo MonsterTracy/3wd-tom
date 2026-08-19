@@ -4,6 +4,7 @@ import json, os
 import numpy as np
 import gymnasium as gym
 from collections import Counter
+from collections.abc import Mapping
 import json
 
 from werewolf.helper.log_utils import Log
@@ -160,12 +161,12 @@ class WerewolfTextEnvV0(gym.Env):
             "event_type": event_type,
             **payload,
         }
-        self.public_events.append(
-            normalize_public_event(
-                event,
-                expected_idx=len(self.public_events),
-            )
+        normalized = normalize_public_event(
+            event,
+            expected_idx=len(self.public_events),
         )
+        self.public_events.append(normalized)
+        return normalized
 
     def _append_public_phase(self):
         self._append_public_event(
@@ -337,18 +338,34 @@ class WerewolfTextEnvV0(gym.Env):
             reward, done, info = self.end_night()
         elif self.phase == 'speech' or self.phase == 'speech_pk':
             assert action_type == 'speech' or action_type == 'speech_pk'
-            try:
+            if isinstance(action_content, Mapping):
+                expected_fields = {"raw_text", "sp_actions"}
+                if set(action_content) != expected_fields:
+                    missing = sorted(expected_fields - set(action_content))
+                    extra = sorted(set(action_content) - expected_fields)
+                    raise ValueError(
+                        "structured speech field set mismatch; "
+                        f"missing={missing}, extra={extra}"
+                    )
+                raw_text = action_content["raw_text"]
+                sp_actions = action_content["sp_actions"]
+            elif isinstance(action_content, str):
+                raw_text = action_content
                 sp_actions = self.speech_perceiver.parse(
                     speaker=self.current_act_idx + 1,
-                    speech=action_content,
+                    speech=raw_text,
                     day=self.day,
                     phase=self.phase,
-            )
-            except Exception:
-                sp_actions = []
+                )
+            else:
+                raise TypeError("speech content must be text or a mapping")
 
-            if not isinstance(sp_actions, list):
-                sp_actions = []
+            speech_event = self._append_public_event(
+                "public_speech",
+                speaker=normalize_player(self.current_act_idx + 1),
+                raw_text=raw_text,
+                sp_actions=sp_actions,
+            )
 
             self.game_log.append(
                 Log(
@@ -356,19 +373,13 @@ class WerewolfTextEnvV0(gym.Env):
                     source=self.current_act_idx,
                     target=[i for i in range(self.n_player)],
                     content={
-                        'speech_content': action_content,
-                        'sp_actions': sp_actions,
+                        'speech_content': speech_event["raw_text"],
+                        'sp_actions': deepcopy(speech_event["sp_actions"]),
                     },
                     day=self.day,
                     time=self.get_time(),
                     event=self.phase,
                 )
-            )
-            self._append_public_event(
-                "public_speech",
-                speaker=normalize_player(self.current_act_idx + 1),
-                raw_text=action_content,
-                sp_actions=sp_actions,
             )
             if len(self.speech_queue) > 0:
                 self.current_act_idx = self.speech_queue.pop(0)

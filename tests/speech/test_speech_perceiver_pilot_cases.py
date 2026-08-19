@@ -452,7 +452,7 @@ class SpeechPerceiverPilotCasesTest(
                     response=response,
                 )
                 self.assertEqual(actions, expected)
-                self.assertIn("穷尽抽取所有明确属于上述13类的命题", prompt)
+                self.assertIn("穷尽抽取所有明确属于上述可表示类别的命题", prompt)
                 self.assertIn(
                     "vote_intent不等于环境实际vote，也不自动产生oppose",
                     prompt,

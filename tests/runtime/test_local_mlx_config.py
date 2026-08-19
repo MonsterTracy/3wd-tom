@@ -462,7 +462,7 @@ def test_server_qwen35_config_validates_five_game_collection_plan(
         }
     ]
     assert parsed["pipeline"]["public_event_schema_version"] == (
-        "classic7_public_event_sequence_v2"
+        "classic7_public_event_sequence_v3"
     )
     assert parsed["pipeline"]["collection"] == {
         "game_count": 3,
@@ -495,7 +495,7 @@ def test_server_qwen35_config_validates_five_game_collection_plan(
     assert result["seeds"] == [343, 344, 345, 346, 347]
     assert result["plan"]["versions"][
         "public_event_schema_version"
-    ] == "classic7_public_event_sequence_v2"
+    ] == "classic7_public_event_sequence_v3"
     assert {
         group: Path(result["plan"][group]["run_dir"]).resolve()
         for group in ("data", "logs", "outputs")
@@ -585,7 +585,10 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
 
     assert action == (
         "speech",
-        "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+        {
+            "raw_text": "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+            "sp_actions": [["player1", "no_commitment", None]],
+        },
     )
     assert len(calls) == 1
     assert {url for url, _payload in calls} == {

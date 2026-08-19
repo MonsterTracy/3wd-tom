@@ -28,6 +28,7 @@ from werewolf.agents.prompt_template_v0 import (
     render_deterministic_public_speech,
 )
 from werewolf.backends import BackendError
+from werewolf.models.twd_tom.schema import normalize_player
 from . import agent_registry as AgentRegistry
 
 
@@ -89,12 +90,31 @@ class GPTAgent(LLMAgent):
                     day_cognition.public_vote_stance_index
                 ),
             )
+            speaker = normalize_player(
+                observation.get("current_act_idx")
+            )
+            raw_text = render_deterministic_public_speech(
+                observation.get("current_act_idx"),
+                discussion_acts=discussion_acts,
+            )
+            sp_actions = [
+                [
+                    speaker,
+                    discussion_act.action,
+                    (
+                        None
+                        if discussion_act.target is None
+                        else normalize_player(discussion_act.target)
+                    ),
+                ]
+                for discussion_act in discussion_acts
+            ]
             return (
                 "speech",
-                render_deterministic_public_speech(
-                    observation.get("current_act_idx"),
-                    discussion_acts=discussion_acts,
-                ),
+                {
+                    "raw_text": raw_text,
+                    "sp_actions": sp_actions,
+                },
             )
 
         if is_vote and is_strict:

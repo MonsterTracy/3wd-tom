@@ -36,7 +36,7 @@ def _events(speaker="player2", actions=None):
 
 
 def test_frozen_snapshot_has_exact_time_alignment_and_digest():
-    actions = [["player2", "point_as_werewolf", "player7"]]
+    actions = [["player1", "point_as_werewolf", "player7"]]
     events = _events(actions=actions)
     snapshot = freeze_public_snapshot(
         game_id="game_001", step_idx=8, phase="1_day_speech",

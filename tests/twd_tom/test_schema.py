@@ -3,6 +3,7 @@ import pytest
 from werewolf.models.twd_tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
+    NONE_TOKEN,
     PLAYER_TO_ID,
     SpeechAction,
     parse_speech_action,
@@ -16,15 +17,15 @@ def test_action_vocabulary_is_minimal_and_fixed():
         "point_as_villager",
         "point_as_seer",
         "point_as_witch",
-        "point_as_guard",
         "support",
         "oppose",
         "check_as_good",
         "check_as_werewolf",
         "save",
         "poison",
-        "guard",
         "vote_intent",
+        "abstain_intent",
+        "no_commitment",
     )
 
     assert "suspect" not in ACTION_NAMES
@@ -37,6 +38,8 @@ def test_padding_ids_are_separate_from_real_values():
     assert PLAYER_TO_ID["<pad>"] == 0
     assert PLAYER_TO_ID["player1"] == 1
     assert PLAYER_TO_ID["player7"] == 7
+    assert PLAYER_TO_ID[NONE_TOKEN] == 8
+    assert PLAYER_TO_ID[NONE_TOKEN] != PLAYER_TO_ID["<pad>"]
 
     assert ACTION_TO_ID["<pad>"] == 0
     assert ACTION_TO_ID == {
@@ -45,15 +48,15 @@ def test_padding_ids_are_separate_from_real_values():
         "point_as_villager": 2,
         "point_as_seer": 3,
         "point_as_witch": 4,
-        "point_as_guard": 5,
-        "support": 6,
-        "oppose": 7,
-        "check_as_good": 8,
-        "check_as_werewolf": 9,
-        "save": 10,
-        "poison": 11,
-        "guard": 12,
-        "vote_intent": 13,
+        "support": 5,
+        "oppose": 6,
+        "check_as_good": 7,
+        "check_as_werewolf": 8,
+        "save": 9,
+        "poison": 10,
+        "vote_intent": 11,
+        "abstain_intent": 12,
+        "no_commitment": 13,
     }
     assert len(set(ACTION_TO_ID.values())) == len(ACTION_TO_ID)
 
@@ -101,7 +104,6 @@ def test_unsupported_action_is_rejected(action_name):
         "check_as_werewolf",
         "save",
         "poison",
-        "guard",
         "vote_intent",
     ),
 )
@@ -109,6 +111,27 @@ def test_extended_actions_use_canonical_validation(action_name):
     assert parse_speech_action(
         ["player1", action_name, "player2"]
     ).to_list() == ["player1", action_name, "player2"]
+
+
+@pytest.mark.parametrize("action_name", ("abstain_intent", "no_commitment"))
+def test_targetless_actions_require_none_object(action_name):
+    assert parse_speech_action(
+        ["player1", action_name, None]
+    ).to_list() == ["player1", action_name, None]
+
+    with pytest.raises(ValueError, match="must use object=None"):
+        parse_speech_action(["player1", action_name, "player2"])
+
+
+def test_targeted_actions_reject_none_object():
+    with pytest.raises(ValueError, match="requires a canonical player object"):
+        parse_speech_action(["player1", "oppose", None])
+
+
+@pytest.mark.parametrize("action_name", ("point_as_guard", "guard"))
+def test_guard_predicates_are_not_active(action_name):
+    with pytest.raises(ValueError, match="unsupported speech action"):
+        parse_speech_action(["player1", action_name, "player2"])
 
 
 @pytest.mark.parametrize(

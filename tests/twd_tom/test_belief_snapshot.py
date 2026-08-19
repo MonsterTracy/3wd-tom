@@ -84,7 +84,7 @@ def _snapshot(observers=(1, 3, 7)):
                 "event_type": "public_speech",
                 "speaker": "player7",
                 "raw_text": "earlier speech",
-                "sp_actions": [["player3", "oppose", "player7"]],
+                "sp_actions": [["player7", "oppose", "player3"]],
             },
             {
                 "event_idx": 2,

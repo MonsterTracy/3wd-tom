@@ -266,7 +266,7 @@ def test_nested_speech_actions_do_not_change_the_synchronized_boundary():
             "event_type": "public_speech",
             "speaker": "player4",
             "raw_text": "completed speech",
-            "sp_actions": [["player3", "support", "player2"]],
+            "sp_actions": [["player4", "support", "player2"]],
         },
         {
             "event_idx": 2,

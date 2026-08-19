@@ -225,7 +225,7 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             actions,
         )
 
-    def test_parser_exception_does_not_interrupt_speech(self):
+    def test_parser_exception_prevents_raw_speech_commit(self):
         env = self.make_env(
             RaisingPerceiver()
         )
@@ -236,25 +236,12 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             current_act_idx=0,
         )
 
-        env.step(
-            (
-                "speech",
-                "发言",
-            )
-        )
+        before_events = list(env.public_events)
+        with self.assertRaisesRegex(RuntimeError, "parse failed"):
+            env.step(("speech", "发言"))
+        self.assertEqual(env.public_events, before_events)
 
-        speech_log = next(
-            log
-            for log in reversed(env.game_log)
-            if log.event == "speech"
-        )
-
-        self.assertEqual(
-            speech_log.content["sp_actions"],
-            [],
-        )
-
-    def test_non_list_result_becomes_empty_list(self):
+    def test_non_sequence_result_prevents_raw_speech_commit(self):
         env = self.make_env(
             NonListPerceiver()
         )
@@ -265,23 +252,10 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             current_act_idx=0,
         )
 
-        env.step(
-            (
-                "speech",
-                "发言",
-            )
-        )
-
-        speech_log = next(
-            log
-            for log in reversed(env.game_log)
-            if log.event == "speech"
-        )
-
-        self.assertEqual(
-            speech_log.content["sp_actions"],
-            [],
-        )
+        before_events = list(env.public_events)
+        with self.assertRaisesRegex(TypeError, "must be a sequence"):
+            env.step(("speech", "发言"))
+        self.assertEqual(env.public_events, before_events)
 
     def test_random_game_logs_sp_actions_lists(self):
         random.seed(7)

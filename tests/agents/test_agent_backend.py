@@ -79,6 +79,23 @@ def _belief(player_id=1, *, role="unknown"):
     )
 
 
+def _structured_speech(speaker, raw_text, *actions):
+    return (
+        "speech",
+        {
+            "raw_text": raw_text,
+            "sp_actions": [
+                [
+                    f"player{speaker}",
+                    action,
+                    None if target is None else f"player{target}",
+                ]
+                for action, target in actions
+            ],
+        },
+    )
+
+
 def _belief_for(role_options, assignments=None):
     assignments = assignments or {}
     return json.dumps(
@@ -560,9 +577,10 @@ class GameplayCognitionTest(unittest.TestCase):
         agent = self._agent(backend)
         self.assertEqual(
             agent.act(observation),
-            (
-                "speech",
+            _structured_speech(
+                2,
                 "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
             ),
         )
         self.assertEqual(len(backend.calls), 1)
@@ -632,7 +650,11 @@ class GameplayCognitionTest(unittest.TestCase):
         agent = self._agent(backend)
         self.assertEqual(
             agent.act(observation),
-            ("speech", "这一轮我暂不作明确的身份、查验、技能或投票表态。"),
+            _structured_speech(
+                3,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
         )
         self.assertEqual(len(backend.calls), 1)
 
@@ -690,9 +712,10 @@ class GameplayCognitionTest(unittest.TestCase):
             try:
                 self.assertEqual(
                     agent.act(observation),
-                    (
-                        "speech",
+                    _structured_speech(
+                        1,
                         "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                        ("no_commitment", None),
                     ),
                 )
             finally:
@@ -725,7 +748,11 @@ class GameplayCognitionTest(unittest.TestCase):
         agent = self._agent(backend)
         self.assertEqual(
             agent.act(observation),
-            ("speech", "这一轮我暂不作明确的身份、查验、技能或投票表态。"),
+            _structured_speech(
+                1,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
         )
         self.assertEqual(len(backend.calls), 1)
 
@@ -860,7 +887,11 @@ class GameplayCognitionTest(unittest.TestCase):
         result = agent.act(observation)
         self.assertEqual(
             result,
-            ("speech", "我质疑 player2。"),
+            _structured_speech(
+                1,
+                "我质疑 player2。",
+                ("oppose", 2),
+            ),
         )
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(
@@ -884,9 +915,9 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertIn("PUBLIC CONVERSATION", cognition_prompt)
         self.assertIn("claim_000", cognition_prompt)
         self.assertIn("claim_001", cognition_prompt)
-        self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1])
+        self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1]["raw_text"])
         for private_cognition in ("当前信息有限。", "继续观察。", '"roles"'):
-            self.assertNotIn(private_cognition, result[1])
+            self.assertNotIn(private_cognition, result[1]["raw_text"])
 
     def test_evidence_linkage_cannot_republish_nested_raw_claims(self):
         observation = _observation()
@@ -945,7 +976,13 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(
             speeches,
-            (("speech", "我质疑 player6。"),) * len(evidence_selections),
+            (
+                _structured_speech(
+                    1,
+                    "我质疑 player6。",
+                    ("oppose", 6),
+                ),
+            ) * len(evidence_selections),
         )
         self.assertEqual(len(backend.calls), len(evidence_selections))
         for call in backend.calls:
@@ -962,8 +999,8 @@ class GameplayCognitionTest(unittest.TestCase):
             evidence_selections,
         )
         for _action, speech in speeches:
-            self.assertNotIn(raw_claim, speech)
-            self.assertNotIn(nested_claim, speech)
+            self.assertNotIn(raw_claim, speech["raw_text"])
+            self.assertNotIn(nested_claim, speech["raw_text"])
 
     def test_strategic_self_role_bluff_survives_deterministic_realization(self):
         observation = _role_observation("Werewolf", 3)
@@ -983,11 +1020,14 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(
             agent.act(observation),
-            (
-                "speech",
+            _structured_speech(
+                3,
                 "我是预言家。\n"
                 "我查验过 player6，结果是狼人。\n"
                 "这一轮我建议投票放逐 player6。",
+                ("point_as_seer", 3),
+                ("check_as_werewolf", 6),
+                ("vote_intent", 6),
             ),
         )
         self.assertEqual(len(backend.calls), 1)
@@ -1009,9 +1049,11 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(
             agent.act(observation),
-            (
-                "speech",
+            _structured_speech(
+                1,
                 "我质疑 player7。\n这一轮我选择弃票。",
+                ("oppose", 7),
+                ("abstain_intent", None),
             ),
         )
         self.assertEqual(len(backend.calls), 1)
@@ -1022,7 +1064,11 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(
             agent.act(_observation()),
-            ("speech", "这一轮我暂不作明确的身份、查验、技能或投票表态。"),
+            _structured_speech(
+                1,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
         )
         self.assertEqual(len(backend.calls), 1)
 
@@ -1053,9 +1099,11 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(
             agent.act(observation),
-            (
-                "speech",
+            _structured_speech(
+                1,
                 "我质疑 player3。\n这一轮我建议投票放逐 player5。",
+                ("oppose", 3),
+                ("vote_intent", 5),
             ),
         )
         self.assertEqual(len(backend.calls), 1)

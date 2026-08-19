@@ -56,14 +56,12 @@ def test_formal_action_vocabulary_has_exact_core_thirteen_ids():
         ("2号是平民。", "point_as_villager"),
         ("2号是预言家。", "point_as_seer"),
         ("2号是女巫。", "point_as_witch"),
-        ("2号是守卫。", "point_as_guard"),
         ("我支持2号的观点。", "support"),
         ("我反对2号的观点。", "oppose"),
         ("我查验2号是好人。", "check_as_good"),
         ("我查验2号是狼人。", "check_as_werewolf"),
         ("我救了2号。", "save"),
         ("我毒了2号。", "poison"),
-        ("我守了2号。", "guard"),
         ("我准备投2号。", "vote_intent"),
     ],
 )
@@ -149,15 +147,6 @@ def test_generic_good_or_non_wolf_does_not_become_villager(speech):
                 ["player1", "poison", "player5"],
             ],
         ),
-        (
-            "K",
-            "我是守卫，昨晚守了2号",
-            "player1 | guard | player2",
-            [
-                ["player1", "point_as_guard", "player1"],
-                ["player1", "guard", "player2"],
-            ],
-        ),
     ],
     ids=lambda value: value if isinstance(value, str) and len(value) == 1 else None,
 )
@@ -165,7 +154,7 @@ def test_core_thirteen_regression_cases(case, speech, response, expected):
     actions, perceiver = parse(speech, response)
     assert actions == expected
     prompt = perceiver.backend.calls[0]["messages"][0]["content"]
-    assert "上述13类" in prompt
+    assert "上述可表示类别" in prompt
     if case in {"B", "C", "H"}:
         assert "most-specific-source" in prompt
 

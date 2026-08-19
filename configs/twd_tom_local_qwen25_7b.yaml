@@ -33,7 +33,7 @@ agent_config:
       sample_ratio: 1.0
 
 pipeline:
-  public_event_schema_version: classic7_public_event_sequence_v2
+  public_event_schema_version: classic7_public_event_sequence_v3
   raw_schema_version: classic7_pre_speech_player_suspicion_v2
   projected_schema_version: classic7_pre_speech_suspicion_pair_distribution_v2
   projection_version: classic7_player_suspicion_pair_projection_base2_v1

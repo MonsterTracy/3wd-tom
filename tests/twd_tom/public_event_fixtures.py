@@ -105,7 +105,7 @@ def make_training_sample(
         observers = (speaker_id,) if tom_order == 1 else (1, 2, 3, 5)
     if public_events is None:
         actions = (
-            [["player3", "support", "player4"]]
+            [[f"player{speaker_id}", "support", "player4"]]
             if with_latest_action
             else []
         )
@@ -202,7 +202,7 @@ def make_full_history_training_sample(*, game_id="synthetic_full_history"):
             "event_type": "public_speech",
             "speaker": "player2",
             "raw_text": "synthetic speech",
-            "sp_actions": [["player3", "support", "player4"]],
+            "sp_actions": [["player2", "support", "player4"]],
         },
         {"event_idx": 3, "event_type": "phase_change", "phase": "1_day_vote"},
         {

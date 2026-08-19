@@ -49,7 +49,6 @@ _SELF_ROLE_ACTIONS = {
     "平民": "point_as_villager",
     "预言家": "point_as_seer",
     "女巫": "point_as_witch",
-    "守卫": "point_as_guard",
 }
 
 # This intentionally covers only literal first-person role declarations.
@@ -64,14 +63,14 @@ _SELF_ROLE_CLAIM_PATTERN = re.compile(
     r"|我身份(?:是|为|：|:)\s*"
     r")"
     r"(?:一名|一个|普通的?)?\s*"
-    r"(?P<role>狼人|村民|平民|预言家|女巫|守卫)"
+    r"(?P<role>狼人|村民|平民|预言家|女巫)"
 )
 
 
 def _load_tom_schema():
     """Load the ToM schema lazily to avoid package import cycles."""
 
-    from werewolf.models.tom.schema import (
+    from werewolf.models.twd_tom.schema import (
         ACTION_NAMES,
         SpeechAction,
     )
@@ -420,15 +419,13 @@ object 必须是 player1 到 player7。
 2. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。“好人”“非狼”“好人阵营”“可信”都不能产生该动作。
 3. point_as_seer：明确判断目标是预言家。
 4. point_as_witch：明确判断目标是女巫。
-5. point_as_guard：明确判断目标是守卫。
-6. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验好人自动推导。
-7. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
-8. check_as_good：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
-9. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
-10. save：speaker明确公开声称自己救了目标。
-11. poison：speaker明确公开声称自己毒了目标。
-12. guard：speaker明确公开声称自己守护了目标。
-13. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
+5. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验好人自动推导。
+6. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
+7. check_as_good：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
+8. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
+9. save：speaker明确公开声称自己救了目标。
+10. poison：speaker明确公开声称自己毒了目标。
+11. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
 
 抽取规则：
 - 只抽取发言直接表达的命题，不得根据常识或其他动作推导。
@@ -436,16 +433,16 @@ object 必须是 player1 到 player7。
 - 不得从代词、省略宾语、“这个/那个玩家/他/她”、前一句、前一个action、discourse context或多个可能antecedent之一推断目标；动作含义明确但同一支持命题未显式点名目标时，不输出该动作。
 - 第一人称明确自报具体身份（如“我是预言家”）中，“我”明确指向当前发言者，仍必须抽取对当前speaker的 point_as_* ；这不是target推断。
 - 原文明示的显式连续编号范围（如“2号到4号”）仍按范围顺序展开每个目标；这不是discourse antecedent推断。
-- 穷尽抽取所有明确属于上述13类的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
+- 穷尽抽取所有明确属于上述可表示类别的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
 - 第一人称明确自报具体身份必须抽取。
 - “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级为 point_as_werewolf。
 - most-specific-source：同一个semantic claim只使用最具体predicate，不得从一个specific claim自动派生generic actions。
 - 查验来源的好人/非狼只产生check_as_good，不自动产生point_as_villager或support；查验来源的狼人只产生check_as_werewolf，不自动产生point_as_werewolf、oppose或vote_intent。
 - 只有原文另外、独立地明确表达第二个formal proposition时，才允许为同一目标输出第二个action。
-- save、poison、guard只表示speaker公开声称的技能动作，不自动产生任何身份判断；不得读取真实角色或环境技能记录进行truth validation。
+- save、poison只表示speaker公开声称的技能动作，不自动产生任何身份判断；不得读取真实角色或环境技能记录进行truth validation。
 - vote_intent不等于环境实际vote，也不自动产生oppose；“大家应该关注3号”不构成speaker自己的投票意图。
 - “查验 player5 是好人”等查验结果单独存在时不得产生 support；只有另有“支持、相信、说得对”等明确认可文本才产生 support。
-- 查验结果为“好人”不得产生 point_as_villager、point_as_seer、point_as_witch 或 point_as_guard；只有另外明确说出具体角色判断时才抽取对应 point_as_*。
+- 查验结果为“好人”不得产生 point_as_villager、point_as_seer 或 point_as_witch；只有另外明确说出具体角色判断时才抽取对应 point_as_*。
 - “player4 是预言家”等明确具体角色判断必须抽取；parser只忠实表示原文，不判断游戏机制是否合理。
 - 转述别人的身份声明或立场，不视为当前发言者自己的立场。
 - “我是好人”和“我不是狼人”都不能产生 point_as_villager。
@@ -596,10 +593,7 @@ player{speaker}: {speech}"""
                 ):
                     continue
 
-                normalized = [
-                    str(value)
-                    for value in action
-                ]
+                normalized = list(action)
                 key = tuple(normalized)
 
                 if key in seen:

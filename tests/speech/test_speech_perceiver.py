@@ -142,10 +142,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             "point_as_werewolf",
             prompt,
         )
-        self.assertIn(
-            "point_as_guard",
-            prompt,
-        )
+        self.assertNotIn("point_as_guard", prompt)
         self.assertIn(
             "support",
             prompt,
@@ -159,10 +156,12 @@ class SpeechPerceiverTest(unittest.TestCase):
             "check_as_werewolf",
             "save",
             "poison",
-            "guard",
             "vote_intent",
+            "abstain_intent",
+            "no_commitment",
         ):
             self.assertIn(f"- {action_name}", prompt)
+        self.assertNotIn("- guard", prompt)
         for unsupported_alias in (
             "check_good",
             "checked_good",
@@ -206,17 +205,19 @@ class SpeechPerceiverTest(unittest.TestCase):
             "point_as_villager",
             "point_as_seer",
             "point_as_witch",
-            "point_as_guard",
             "support",
             "oppose",
             "check_as_good",
             "check_as_werewolf",
             "save",
             "poison",
-            "guard",
             "vote_intent",
+            "abstain_intent",
+            "no_commitment",
         ):
             self.assertIn(f"- {action_name}", prompt)
+        self.assertNotIn("point_as_guard", prompt)
+        self.assertNotIn("- guard", prompt)
         self.assertIn("好人阵营", prompt)
         self.assertIn("可信", prompt)
         self.assertIn("都不能产生该动作", prompt)
@@ -374,14 +375,13 @@ class SpeechPerceiverTest(unittest.TestCase):
 
         self.assertIn("第一人称明确自报具体身份必须抽取", prompt)
 
-    def test_existing_specific_self_claim_actions_remain_unchanged(
+    def test_active_specific_self_claim_actions_remain_unchanged(
         self,
     ):
         expected_actions = {
             "村民": "point_as_villager",
             "预言家": "point_as_seer",
             "女巫": "point_as_witch",
-            "守卫": "point_as_guard",
         }
 
         for role, action_name in expected_actions.items():
@@ -675,7 +675,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_strict_accepts_core_thirteen_actions_in_pipe_and_complete_json(
+    def test_strict_accepts_targeted_actions_in_pipe_and_complete_json(
         self,
     ):
         expected = [
@@ -683,7 +683,6 @@ class SpeechPerceiverTest(unittest.TestCase):
             ["player1", "check_as_werewolf", "player3"],
             ["player1", "save", "player4"],
             ["player1", "poison", "player5"],
-            ["player1", "guard", "player6"],
             ["player1", "vote_intent", "player7"],
         ]
         responses = [
@@ -707,6 +706,21 @@ class SpeechPerceiverTest(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_strict_accepts_targetless_actions_with_null_object(self):
+        expected = [
+            ["player1", "abstain_intent", None],
+            ["player1", "no_commitment", None],
+        ]
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(json.dumps(expected)),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse_strict(1, "公开发言", 1, "speech"),
+            expected,
+        )
 
     def test_extracts_first_legacy_json_array_from_text(
         self,

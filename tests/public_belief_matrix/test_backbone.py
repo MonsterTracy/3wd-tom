@@ -73,7 +73,7 @@ def test_embedding_cardinalities_cover_canonical_id_spaces(model):
     assert (
         model.subject_embedding.num_embeddings
         == max(PLAYER_TO_ID.values()) + 1
-        == 8
+        == 9
     )
     assert (
         model.action_embedding.num_embeddings
@@ -83,7 +83,7 @@ def test_embedding_cardinalities_cover_canonical_id_spaces(model):
     assert (
         model.object_embedding.num_embeddings
         == max(PLAYER_TO_ID.values()) + 1
-        == 8
+        == 9
     )
     assert model.event_type_embedding.num_embeddings == max(
         STRUCTURED_TOKEN_TO_ID.values()
