@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 import torch
+
+import script.twd_tom.eval as eval_module
 from torch.optim import AdamW
 from transformers import Qwen2Model
 
@@ -17,6 +19,10 @@ from script.twd_tom.eval import (
     resolve_training_dataset_path,
 )
 from script.twd_tom.train import (
+    CANONICAL_D_TRAINING_INTEGRATION_VERSION,
+    TOM2_TARGET_SEMANTICS,
+    TOM2_TEMPORAL_SUPERVISION_POLICY,
+    TRAINING_MANIFEST_SCHEMA_VERSION,
     TrainingConfig,
     build_model,
     checkpoint_payload,
@@ -38,7 +44,31 @@ from werewolf.models.twd_tom.schema import (
     SECOND_ORDER_TARGET_ENCODING,
 )
 from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.dataset import CYCLIC_ROTATION_VERSION
+from werewolf.models.twd_tom.dataset import (
+    CYCLIC_ROTATION_VERSION,
+    D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+    PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE,
+)
+from script.twd_tom.split_offline_d_training_data import (
+    SPLIT_MANIFEST_SCHEMA_VERSION,
+    SPLIT_POLICY_VERSION,
+    split_offline_d_training_data,
+)
+from werewolf.offline_annotation import OFFLINE_ANNOTATION_SCHEMA_VERSION
+from werewolf.offline_materialization import (
+    D_MATERIALIZATION_POLICY_VERSION,
+    D_SCHEMA_VERSION,
+    OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+    OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+    TOM1_MODEL_INPUT_SCOPE,
+    TOM1_OBSERVER_PROVENANCE,
+    TOM1_PRIVATE_FIELDS_USAGE,
+    TOM2_MODEL_INPUT_SCOPE,
+    TOM2_OBSERVER_PROVENANCE,
+    TOM2_PRIVATE_FIELDS_USAGE,
+)
+from werewolf.trajectory import canonical_digest, canonical_json
+from tests.twd_tom.test_twd_tom_dataset import d_sample
 from tests.twd_tom.public_event_fixtures import make_training_sample
 from werewolf.models.twd_tom.belief_backbone import (
     GPT2_BLOCK_BACKBONE_NAME,
@@ -55,6 +85,7 @@ def make_checkpoint(
     tom_order=1,
     backbone=QWEN2_BACKBONE_NAME,
     public_only=False,
+    canonical_d=False,
 ):
     config = TrainingConfig(
         tom_order=tom_order,
@@ -74,7 +105,90 @@ def make_checkpoint(
         sha256_file(validation_path) if validation_path.is_file() else "0" * 64
     )
     dataset_contract = None
-    if public_only:
+    training_manifest = None
+    training_manifest_sha256 = None
+    if canonical_d:
+        if tom_order == 1:
+            dataset_contract = {
+                "source_schema_version": D_SCHEMA_VERSION,
+                "model_input_scope": TOM1_MODEL_INPUT_SCOPE,
+                "belief_information_scope": PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE,
+                "private_fields_usage": TOM1_PRIVATE_FIELDS_USAGE,
+                "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+                "label_provenance": TOM1_OBSERVER_PROVENANCE,
+                "source_label_provenance": TOM1_OBSERVER_PROVENANCE,
+            }
+            task = OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK
+        else:
+            dataset_contract = {
+                "source_schema_version": D_SCHEMA_VERSION,
+                "model_input_scope": TOM2_MODEL_INPUT_SCOPE,
+                "belief_information_scope": D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+                "private_fields_usage": TOM2_PRIVATE_FIELDS_USAGE,
+                "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+                "label_provenance": TOM2_OBSERVER_PROVENANCE,
+                "source_label_provenance": TOM2_OBSERVER_PROVENANCE,
+            }
+            task = OFFLINE_PUBLIC_ONLY_TOM2_TASK
+        is_tom2 = tom_order == 2
+        training_manifest = {
+            "schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+            "integration_version": CANONICAL_D_TRAINING_INTEGRATION_VERSION,
+            "training_code_commit": "1" * 40,
+            "git_worktree_clean": True,
+            "tom_order": tom_order,
+            "split_manifest_schema_version": SPLIT_MANIFEST_SCHEMA_VERSION,
+            "split_policy_version": SPLIT_POLICY_VERSION,
+            "split_seed": 17,
+            "split_manifest_sha256": "b" * 64,
+            "split_manifest_digest": "d" * 64,
+            "d_schema_version": D_SCHEMA_VERSION,
+            "d_materialization_policy_version": D_MATERIALIZATION_POLICY_VERSION,
+            "materialization_task": task,
+            "materializer_code_commits": ["2" * 40],
+            "belief_information_scope": dataset_contract[
+                "belief_information_scope"
+            ],
+            "model_input_scope": dataset_contract["model_input_scope"],
+            "private_fields_usage": dataset_contract["private_fields_usage"],
+            "annotation_schema_version": dataset_contract[
+                "annotation_schema_version"
+            ],
+            "label_provenance": dataset_contract["label_provenance"],
+            "source_label_provenance": dataset_contract[
+                "source_label_provenance"
+            ],
+            "train_dataset_relative_path": f"tom{tom_order}/train.jsonl",
+            "validation_dataset_relative_path": (
+                f"tom{tom_order}/validation.jsonl"
+            ),
+            "train_dataset_sha256": "3" * 64,
+            "validation_dataset_sha256": "4" * 64,
+            "train_game_ids": ["synthetic_train"],
+            "validation_game_ids": ["synthetic_validation"],
+            "train_source_row_count": 1,
+            "validation_source_row_count": 1,
+            "train_effective_supervised_snapshot_count": 1,
+            "validation_effective_supervised_snapshot_count": 1,
+            "tom2_target_semantics": TOM2_TARGET_SEMANTICS if is_tom2 else None,
+            "tom2_temporal_supervision_policy": (
+                TOM2_TEMPORAL_SUPERVISION_POLICY if is_tom2 else None
+            ),
+            "train_cyclic_rotation_enabled": is_tom2,
+            "validation_cyclic_rotation_enabled": False,
+            "cyclic_rotation_version": CYCLIC_ROTATION_VERSION if is_tom2 else None,
+            "augmentation_seed": 42 if is_tom2 else None,
+            "training_config": {"fixture": True},
+            "python_version": "test",
+            "torch_version": str(torch.__version__),
+            "transformers_version": "test",
+            "platform": "test",
+            "requested_device": "auto",
+            "resolved_device": "cpu",
+        }
+        training_manifest["manifest_digest"] = canonical_digest(training_manifest)
+        training_manifest_sha256 = "c" * 64
+    elif public_only:
         dataset_contract = {
             "source_schema_version": PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
             "model_input_scope": PUBLIC_ONLY_MODEL_INPUT_SCOPE,
@@ -113,7 +227,74 @@ def make_checkpoint(
             "seed": 42,
         },
         dataset_contract=dataset_contract,
+        training_manifest=training_manifest,
+        training_manifest_sha256=training_manifest_sha256,
     )
+
+
+def _redigest_d_record(record: dict, *, game_id: str, step_idx: int) -> dict:
+    value = dict(record)
+    value["game_id"] = game_id
+    value["step_idx"] = step_idx
+    value["label_cutoff_step_idx"] = step_idx
+    value["boundary_id"] = f"{game_id}:step_{step_idx:06d}:PRE_PUBLIC_SPEECH"
+    value.pop("record_digest", None)
+    value["record_digest"] = canonical_digest(value)
+    return value
+
+
+def _canonical_d_split_fixture(tmp_path: Path):
+    game_ids = ["eval_d_game_001", "eval_d_game_002", "eval_d_game_003"]
+    tom1_rows = [
+        _redigest_d_record(d_sample(1), game_id=game_id, step_idx=10 + index)
+        for index, game_id in enumerate(game_ids)
+    ]
+    tom2_rows = []
+    for index, game_id in enumerate(game_ids):
+        base_step = 20 + index * 2
+        tom2_rows.extend(
+            [
+                _redigest_d_record(
+                    d_sample(2, with_latest_action=False),
+                    game_id=game_id,
+                    step_idx=base_step,
+                ),
+                _redigest_d_record(
+                    d_sample(2, with_latest_action=True),
+                    game_id=game_id,
+                    step_idx=base_step + 1,
+                ),
+            ]
+        )
+    tom1_source = tmp_path / "eval_source_tom1.jsonl"
+    tom2_source = tmp_path / "eval_source_tom2.jsonl"
+    tom1_source.write_text(
+        "".join(canonical_json(row) + "\n" for row in tom1_rows),
+        encoding="utf-8",
+    )
+    tom2_source.write_text(
+        "".join(canonical_json(row) + "\n" for row in tom2_rows),
+        encoding="utf-8",
+    )
+    split_root = tmp_path / "eval_canonical_split"
+    manifest = split_offline_d_training_data(
+        tom1_path=tom1_source,
+        tom2_path=tom2_source,
+        output_dir=split_root,
+        split_seed=17,
+        train_game_count=1,
+        validation_game_count=1,
+        test_game_count=1,
+    )
+    return split_root, manifest
+
+
+def _bind_checkpoint_to_split(checkpoint: dict, split_root: Path, manifest: dict) -> dict:
+    checkpoint["split_manifest_sha256"] = sha256_file(split_root / "manifest.json")
+    checkpoint["split_manifest_schema_version"] = manifest["schema_version"]
+    checkpoint["split_policy_version"] = manifest["split_policy_version"]
+    checkpoint["split_seed"] = manifest["split_seed"]
+    return checkpoint
 
 
 @pytest.mark.parametrize("tom_order", [1, 2])
@@ -180,6 +361,31 @@ def test_public_only_checkpoint_with_mixed_lineage_is_rejected(
     checkpoint[field] = value
 
     with pytest.raises(ValueError, match=field):
+        build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+
+@pytest.mark.parametrize("tom_order", [1, 2])
+def test_canonical_d_checkpoint_restores_strictly(tmp_path, tom_order):
+    checkpoint = make_checkpoint(tmp_path, tom_order=tom_order, canonical_d=True)
+    restored = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+    assert restored.tom_order == tom_order
+    assert checkpoint["schema_version"] == D_SCHEMA_VERSION
+    assert checkpoint["training_manifest_schema_version"] == (
+        TRAINING_MANIFEST_SCHEMA_VERSION
+    )
+    if tom_order == 2:
+        assert checkpoint["tom2_target_semantics"] == TOM2_TARGET_SEMANTICS
+        assert checkpoint["tom2_temporal_supervision_policy"] == (
+            TOM2_TEMPORAL_SUPERVISION_POLICY
+        )
+    else:
+        assert "tom2_target_semantics" not in checkpoint
+
+
+def test_canonical_d_checkpoint_rejects_wrong_lineage(tmp_path):
+    checkpoint = make_checkpoint(tmp_path, tom_order=2, canonical_d=True)
+    checkpoint["materialization_task"] = OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK
+    with pytest.raises(ValueError, match="materialization_task"):
         build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
 
 
@@ -354,6 +560,112 @@ def test_one_validation_sample_can_be_evaluated_against_explicit_training_data(
     assert summary["tom_order"] == 1
     assert summary["evaluation_sample_count"] == 1
     assert summary["evaluation_supervised_subject_count"] == 1
+
+
+@pytest.mark.parametrize("evaluation_split", ["validation", "test"])
+def test_canonical_d_evaluation_uses_matching_split_manifest(
+    tmp_path, monkeypatch, evaluation_split
+):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    checkpoint = _bind_checkpoint_to_split(
+        make_checkpoint(tmp_path, tom_order=2, canonical_d=True),
+        split_root,
+        manifest,
+    )
+    checkpoint_path = tmp_path / "d_checkpoint.pt"
+    torch.save(checkpoint, checkpoint_path)
+    monkeypatch.setattr(
+        eval_module,
+        "count_supervised_subjects",
+        lambda _loader: 1,
+    )
+    monkeypatch.setattr(
+        eval_module,
+        "evaluate_model",
+        lambda *_args, **_kwargs: {"mean_loss": 0.5, "valid_subject_count": 1},
+    )
+    summary = evaluate_checkpoint(
+        EvaluationConfig(
+            checkpoint_path=str(checkpoint_path),
+            dataset_path=str(split_root / "tom2" / f"{evaluation_split}.jsonl"),
+            split_manifest_path=str(split_root / "manifest.json"),
+            batch_size=1,
+            device="cpu",
+        )
+    )
+    assert summary["schema_version"] == D_SCHEMA_VERSION
+    assert summary["evaluation_split"] == evaluation_split
+    assert summary["split_manifest_sha256"] == sha256_file(
+        split_root / "manifest.json"
+    )
+    assert summary["evaluation_source_sample_count"] == 2
+    assert summary["evaluation_effective_supervised_snapshot_count"] == 1
+    assert summary["tom2_target_semantics"] == TOM2_TARGET_SEMANTICS
+    assert summary["tom2_temporal_supervision_policy"] == (
+        TOM2_TEMPORAL_SUPERVISION_POLICY
+    )
+    assert summary["training_dataset_path"] is None
+    assert summary["training_game_ids"] == sorted(manifest["game_ids"]["train"])
+
+
+def test_canonical_d_evaluation_requires_split_manifest(tmp_path):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    checkpoint = _bind_checkpoint_to_split(
+        make_checkpoint(tmp_path, tom_order=1, canonical_d=True),
+        split_root,
+        manifest,
+    )
+    checkpoint_path = tmp_path / "d_checkpoint.pt"
+    torch.save(checkpoint, checkpoint_path)
+    with pytest.raises(ValueError, match="requires --split-manifest"):
+        evaluate_checkpoint(
+            EvaluationConfig(
+                checkpoint_path=str(checkpoint_path),
+                dataset_path=str(split_root / "tom1" / "validation.jsonl"),
+                device="cpu",
+            )
+        )
+
+
+def test_canonical_d_evaluation_rejects_wrong_manifest_sha(tmp_path):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    checkpoint = _bind_checkpoint_to_split(
+        make_checkpoint(tmp_path, tom_order=1, canonical_d=True),
+        split_root,
+        manifest,
+    )
+    checkpoint["split_manifest_sha256"] = "f" * 64
+    checkpoint_path = tmp_path / "d_checkpoint.pt"
+    torch.save(checkpoint, checkpoint_path)
+    with pytest.raises(ValueError, match="split manifest SHA-256"):
+        evaluate_checkpoint(
+            EvaluationConfig(
+                checkpoint_path=str(checkpoint_path),
+                dataset_path=str(split_root / "tom1" / "validation.jsonl"),
+                split_manifest_path=str(split_root / "manifest.json"),
+                device="cpu",
+            )
+        )
+
+
+def test_canonical_d_train_split_cannot_be_evaluated(tmp_path):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    checkpoint = _bind_checkpoint_to_split(
+        make_checkpoint(tmp_path, tom_order=1, canonical_d=True),
+        split_root,
+        manifest,
+    )
+    checkpoint_path = tmp_path / "d_checkpoint.pt"
+    torch.save(checkpoint, checkpoint_path)
+    with pytest.raises(ValueError, match="train split cannot"):
+        evaluate_checkpoint(
+            EvaluationConfig(
+                checkpoint_path=str(checkpoint_path),
+                dataset_path=str(split_root / "tom1" / "train.jsonl"),
+                split_manifest_path=str(split_root / "manifest.json"),
+                device="cpu",
+            )
+        )
 
 
 def test_checkpoint_load_has_no_unsafe_fallback(tmp_path, monkeypatch):
