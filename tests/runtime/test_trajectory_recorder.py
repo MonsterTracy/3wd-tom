@@ -57,18 +57,31 @@ def _players():
     ]
 
 
-def _recorder(tmp_path, *, name="game"):
+def _recorder(
+    tmp_path,
+    *,
+    name="game",
+    environment_seed=402,
+    runtime_config=None,
+):
     return CanonicalGameInteractionTrajectoryRecorder(
         tmp_path / f"{name}.trajectory.json",
         tmp_path / f"{name}.observer_views.json",
         game_id=name,
         run_id="run_001",
         source_commit="35142cb7e8f6175679904d66fa154b72584b8c4e",
-        environment_seed=402,
-        runtime_config={
+        environment_seed=environment_seed,
+        runtime_config=runtime_config or {
             "gameplay_max_tokens": 512,
             "api_key_env": "VLLM_API_KEY",
-            "api_key": "DO-NOT-SAVE",
+            "token_env": "TOKEN_ENV",
+            "api_key": "API-SECRET",
+            "token": "TOKEN-SECRET",
+            "x-api-key": "X-API-SECRET",
+            "x_auth_token": "AUTH-TOKEN-SECRET",
+            "service_secret": "SERVICE-SECRET",
+            "database_password": "PASSWORD-SECRET",
+            "client_credentials": "CREDENTIAL-SECRET",
             "nested": {
                 "authorization_headers": {"Authorization": "Bearer SECRET"},
                 "safe": True,
@@ -291,7 +304,9 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
 
     trajectory, provenance = _read_outputs(tmp_path)
     assert trajectory["schema_version"] == TRAJECTORY_SCHEMA_VERSION
+    assert trajectory["observation_schema_version"] == OBSERVATION_SCHEMA_VERSION
     assert trajectory["simulator_baseline"] == SIMULATOR_BASELINE
+    assert trajectory["environment_seed"] == 402
     assert trajectory["public_event_schema_version"] == (
         "classic7_public_event_sequence_v3"
     )
@@ -299,9 +314,16 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
         range(1, 8)
     )
     assert "api_key" not in trajectory["runtime_config"]
+    assert "token" not in trajectory["runtime_config"]
+    assert "x-api-key" not in trajectory["runtime_config"]
+    assert "x_auth_token" not in trajectory["runtime_config"]
+    assert "service_secret" not in trajectory["runtime_config"]
+    assert "database_password" not in trajectory["runtime_config"]
+    assert "client_credentials" not in trajectory["runtime_config"]
     assert "authorization_headers" not in trajectory["runtime_config"]["nested"]
     assert trajectory["runtime_config"]["gameplay_max_tokens"] == 512
     assert trajectory["runtime_config"]["api_key_env"] == "VLLM_API_KEY"
+    assert trajectory["runtime_config"]["token_env"] == "TOKEN_ENV"
     assert trajectory["runtime_config_digest"] == canonical_digest(
         trajectory["runtime_config"]
     )
@@ -352,6 +374,15 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
     assert provenance["schema_version"] == (
         OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION
     )
+    assert provenance["observation_schema_version"] == OBSERVATION_SCHEMA_VERSION
+    assert provenance["source_commit"] == trajectory["source_commit"]
+    assert provenance["simulator_baseline"] == trajectory["simulator_baseline"]
+    assert provenance["trajectory_digest"] == trajectory["trajectory_digest"]
+    provenance_without_digest = dict(provenance)
+    provenance_without_digest.pop("artifact_digest")
+    assert provenance["artifact_digest"] == canonical_digest(
+        provenance_without_digest
+    )
     assert [boundary["boundary_type"] for boundary in provenance["boundaries"]] == [
         PRE_PUBLIC_SPEECH,
         POST_PUBLIC_SPEECH,
@@ -388,7 +419,12 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
 
 def test_agent_failure_writes_longest_committed_prefix(tmp_path):
     env = TrajectoryEnvironment()
-    failure = RuntimeError("agent failed; password=DO-NOT-SAVE")
+    failure = RuntimeError(
+        "agent failed; token=TOKEN-VALUE x-api-key=API-VALUE "
+        "x_auth_token=AUTH-VALUE service_secret=SECRET-VALUE "
+        "database_password=PASSWORD-VALUE credentials=CREDENTIAL-VALUE "
+        "api_key_env=VLLM_API_KEY token_env=TOKEN_ENV"
+    )
     recorder = _recorder(tmp_path, name="agent_failure")
     agents = _agents(second=ScriptedAgent(error=failure))
 
@@ -414,7 +450,17 @@ def test_agent_failure_writes_longest_committed_prefix(tmp_path):
     )
     assert failure_context["submitted_action"] is None
     assert failure_context["exception_type"] == "RuntimeError"
-    assert "DO-NOT-SAVE" not in failure_context["exception_message"]
+    for secret in (
+        "TOKEN-VALUE",
+        "API-VALUE",
+        "AUTH-VALUE",
+        "SECRET-VALUE",
+        "PASSWORD-VALUE",
+        "CREDENTIAL-VALUE",
+    ):
+        assert secret not in failure_context["exception_message"]
+    assert "api_key_env=VLLM_API_KEY" in failure_context["exception_message"]
+    assert "token_env=TOKEN_ENV" in failure_context["exception_message"]
     assert len(provenance["boundaries"]) == 2
 
 
@@ -457,6 +503,92 @@ def test_recorder_refuses_to_overwrite_outputs(tmp_path, existing_output):
 
 def test_eval_recorder_default_is_none():
     assert inspect.signature(eval).parameters["trajectory_recorder"].default is None
+
+
+@pytest.mark.parametrize("invalid_seed", [None, True, 402.0, "402"])
+def test_recorder_requires_explicit_integer_environment_seed(
+    tmp_path,
+    invalid_seed,
+):
+    with pytest.raises(TypeError, match="environment_seed"):
+        _recorder(
+            tmp_path,
+            name=f"invalid_seed_{type(invalid_seed).__name__}",
+            environment_seed=invalid_seed,
+        )
+
+
+@pytest.mark.parametrize("invalid_step_idx", [True, -1, 1, 1.0, "0"])
+def test_first_step_idx_must_be_integer_zero(tmp_path, invalid_step_idx):
+    env = TrajectoryEnvironment(start_phase="vote")
+    recorder = _recorder(
+        tmp_path,
+        name=f"invalid_first_step_{type(invalid_step_idx).__name__}",
+    )
+    observation = env.reset(ROLES)
+    recorder.start(env, roles=ROLES)
+
+    with pytest.raises((TypeError, ValueError), match="step_idx"):
+        recorder.before_agent_act(
+            env,
+            step_idx=invalid_step_idx,
+            acting_player_id=1,
+            delivered_observation=observation,
+            speech_kind=None,
+        )
+
+
+@pytest.mark.parametrize("invalid_step_idx", [0, 2])
+def test_duplicate_or_skipped_step_idx_is_rejected(tmp_path, invalid_step_idx):
+    env = TrajectoryEnvironment(start_phase="vote")
+    recorder = _recorder(tmp_path, name=f"invalid_next_step_{invalid_step_idx}")
+    observation = env.reset(ROLES)
+    recorder.start(env, roles=ROLES)
+    recorder.before_agent_act(
+        env,
+        step_idx=0,
+        acting_player_id=1,
+        delivered_observation=observation,
+        speech_kind=None,
+    )
+    recorder.after_agent_act(("vote", 1))
+    recorder.after_env_step(
+        env,
+        observation_after=observation,
+        terminal_after=False,
+    )
+
+    with pytest.raises(ValueError, match="step_idx"):
+        recorder.before_agent_act(
+            env,
+            step_idx=invalid_step_idx,
+            acting_player_id=1,
+            delivered_observation=observation,
+            speech_kind=None,
+        )
+
+
+def test_submitted_speech_kind_must_equal_pending_kind(tmp_path):
+    env = TrajectoryEnvironment()
+    recorder = _recorder(tmp_path, name="speech_kind_mismatch")
+    observation = env.reset(ROLES)
+    recorder.start(env, roles=ROLES)
+    recorder.before_agent_act(
+        env,
+        step_idx=0,
+        acting_player_id=1,
+        delivered_observation=observation,
+        speech_kind="speech_pk",
+    )
+    recorder.after_agent_act(STRICT_SPEECH_ACTION)
+    observation_after, _, done, _ = env.step(STRICT_SPEECH_ACTION)
+
+    with pytest.raises(ValueError, match="kind mismatch"):
+        recorder.after_env_step(
+            env,
+            observation_after=observation_after,
+            terminal_after=done,
+        )
 
 
 def test_explicit_abort_preserves_committed_prefix(tmp_path):

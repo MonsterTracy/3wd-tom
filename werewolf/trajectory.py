@@ -38,24 +38,10 @@ _LOG_FIELDS = (
     "time",
     "event",
 )
-_SECRET_CONFIG_KEYS = frozenset(
-    {
-        "api_key",
-        "authorization",
-        "authorization_header",
-        "authorization_headers",
-        "bearer_token",
-        "credential",
-        "credentials",
-        "password",
-        "refresh_token",
-        "secret",
-        "access_token",
-    }
-)
-_SECRET_MESSAGE_PATTERN = re.compile(
-    r"(?i)(api[_-]?key|authorization|bearer|credential|password|secret|"
-    r"access[_-]?token|refresh[_-]?token)(\s*[:=]\s*)([^\s,;]+)"
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?P<key>[A-Za-z][A-Za-z0-9_-]*)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?P<value>[^\s,;]+)"
 )
 _BEARER_MESSAGE_PATTERN = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
 
@@ -113,6 +99,32 @@ def observation_record(observation: Any) -> dict[str, Any]:
     }
 
 
+def _normalized_secret_key(key: str) -> str:
+    camel_separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    return re.sub(r"[^a-z0-9]+", "_", camel_separated.lower()).strip("_")
+
+
+def _is_secret_key(key: str) -> bool:
+    normalized = _normalized_secret_key(key)
+    if normalized.endswith("_env"):
+        return False
+    secret_suffixes = (
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "credentials",
+        "authorization",
+        "authorization_header",
+        "authorization_headers",
+    )
+    return any(
+        normalized == suffix or normalized.endswith(f"_{suffix}")
+        for suffix in secret_suffixes
+    )
+
+
 def _sanitize_runtime_config(value: Any) -> Any:
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
@@ -120,7 +132,7 @@ def _sanitize_runtime_config(value: Any) -> Any:
         return {
             key: _sanitize_runtime_config(item)
             for key, item in value.items()
-            if key.lower().replace("-", "_") not in _SECRET_CONFIG_KEYS
+            if not _is_secret_key(key)
         }
     if isinstance(value, (tuple, list)):
         return [_sanitize_runtime_config(item) for item in value]
@@ -130,7 +142,17 @@ def _sanitize_runtime_config(value: Any) -> Any:
 def _sanitize_exception_message(exception: BaseException) -> str:
     message = " ".join(str(exception).splitlines()).strip()
     message = _BEARER_MESSAGE_PATTERN.sub("Bearer <redacted>", message)
-    return _SECRET_MESSAGE_PATTERN.sub(r"\1\2<redacted>", message)
+
+    def redact_assignment(match: re.Match[str]) -> str:
+        if not _is_secret_key(match.group("key")):
+            return match.group(0)
+        return (
+            f"{match.group('key')}"
+            f"{match.group('separator')}"
+            "<redacted>"
+        )
+
+    return _SECRET_ASSIGNMENT_PATTERN.sub(redact_assignment, message)
 
 
 def _alive_player_ids(env) -> list[int]:
@@ -184,7 +206,7 @@ class CanonicalGameInteractionTrajectoryRecorder:
         game_id: str,
         run_id: str,
         source_commit: str,
-        environment_seed: int | None,
+        environment_seed: int,
         runtime_config: Mapping[str, Any],
         players: Sequence[Mapping[str, Any]],
         simulator_baseline: str = SIMULATOR_BASELINE,
@@ -197,11 +219,11 @@ class CanonicalGameInteractionTrajectoryRecorder:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be non-empty text")
-        if environment_seed is not None and (
-            isinstance(environment_seed, bool)
-            or not isinstance(environment_seed, int)
+        if isinstance(environment_seed, bool) or not isinstance(
+            environment_seed,
+            int,
         ):
-            raise TypeError("environment_seed must be an integer or None")
+            raise TypeError("environment_seed must be an integer")
         if not isinstance(runtime_config, Mapping):
             raise TypeError("runtime_config must be a mapping")
 
@@ -229,6 +251,7 @@ class CanonicalGameInteractionTrajectoryRecorder:
             "runtime_config_digest": canonical_digest(sanitized_config),
             "players": _normalize_players(players),
             "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
+            "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
         }
         self._initial_public_events: list[dict[str, Any]] | None = None
         self._transitions: list[dict[str, Any]] = []
@@ -257,6 +280,13 @@ class CanonicalGameInteractionTrajectoryRecorder:
         self._require_active()
         if self._pending is not None:
             raise RuntimeError("previous trajectory step is still pending")
+        if isinstance(step_idx, bool) or not isinstance(step_idx, int):
+            raise TypeError("step_idx must be an integer")
+        if step_idx != len(self._transitions):
+            raise ValueError(
+                f"step_idx must equal the next committed index "
+                f"{len(self._transitions)}"
+            )
         delivered = observation_record(delivered_observation)
         phase_before = delivered["observation"].get("phase")
         if not isinstance(phase_before, str):
@@ -484,7 +514,7 @@ class CanonicalGameInteractionTrajectoryRecorder:
         action = pending["submitted_action"]
         if not isinstance(action, list) or len(action) != 2:
             raise TypeError("submitted speech action must be a pair")
-        if action[0] not in PUBLIC_SPEECH_KINDS:
+        if action[0] != speech_kind:
             raise ValueError("submitted speech action kind mismatch")
         content = action[1]
         if isinstance(content, dict):
@@ -524,8 +554,13 @@ class CanonicalGameInteractionTrajectoryRecorder:
             "schema_version": OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION,
             "game_id": self._base["game_id"],
             "run_id": self._base["run_id"],
+            "source_commit": self._base["source_commit"],
+            "simulator_baseline": self._base["simulator_baseline"],
+            "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
+            "trajectory_digest": trajectory["trajectory_digest"],
             "boundaries": self._boundaries,
         }
+        provenance["artifact_digest"] = canonical_digest(provenance)
         trajectory_text = canonical_json(trajectory)
         provenance_text = canonical_json(provenance)
         with self.trajectory_output_path.open("x", encoding="utf-8") as output:
