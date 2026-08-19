@@ -68,6 +68,9 @@ class RoleReportValidationError(ValueError):
 
 
 BELIEF_ROLES = STRICT_BELIEF_CONCRETE_ROLES + ("unknown",)
+COGNITION_TEXT_MIN_LENGTH = 1
+BELIEF_TEXT_MAX_LENGTH = 256
+CONCISE_TEXT_MAX_LENGTH = 96
 
 
 @dataclass(frozen=True)
@@ -116,8 +119,16 @@ def belief_response_format(*, supports_json_schema, role_options):
                 "additionalProperties": False,
                 "required": ["belief", "concise", "roles"],
                 "properties": {
-                    "belief": {"type": "string", "minLength": 1},
-                    "concise": {"type": "string", "minLength": 1},
+                    "belief": {
+                        "type": "string",
+                        "minLength": COGNITION_TEXT_MIN_LENGTH,
+                        "maxLength": BELIEF_TEXT_MAX_LENGTH,
+                    },
+                    "concise": {
+                        "type": "string",
+                        "minLength": COGNITION_TEXT_MIN_LENGTH,
+                        "maxLength": CONCISE_TEXT_MAX_LENGTH,
+                    },
                     "roles": {
                         "type": "object",
                         "additionalProperties": False,
@@ -187,8 +198,16 @@ def day_cognition_response_format_v2(
                     "evidence_claim_ids",
                 ],
                 "properties": {
-                    "belief": {"type": "string", "minLength": 1},
-                    "concise": {"type": "string", "minLength": 1},
+                    "belief": {
+                        "type": "string",
+                        "minLength": COGNITION_TEXT_MIN_LENGTH,
+                        "maxLength": BELIEF_TEXT_MAX_LENGTH,
+                    },
+                    "concise": {
+                        "type": "string",
+                        "minLength": COGNITION_TEXT_MIN_LENGTH,
+                        "maxLength": CONCISE_TEXT_MAX_LENGTH,
+                    },
                     "roles": {
                         "type": "object",
                         "additionalProperties": False,
@@ -246,6 +265,14 @@ def parse_belief_response(
         raise BeliefValidationError(f"belief fields do not match contract ({context})")
     if any(not isinstance(payload[field], str) or not payload[field].strip() for field in ("belief", "concise")):
         raise BeliefValidationError(f"belief text fields must be non-empty ({context})")
+    for field, max_length in (
+        ("belief", BELIEF_TEXT_MAX_LENGTH),
+        ("concise", CONCISE_TEXT_MAX_LENGTH),
+    ):
+        if len(payload[field]) > max_length:
+            raise BeliefValidationError(
+                f"{field} exceeds {max_length} characters ({context})"
+            )
     final_players = [
         f"player{candidate}"
         for candidate in range(1, 8)

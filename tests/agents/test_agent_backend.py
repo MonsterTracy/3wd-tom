@@ -260,6 +260,14 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertEqual(set(schema["properties"]), {"belief", "concise", "roles"})
         self.assertEqual(schema["required"], ["belief", "concise", "roles"])
         self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["belief"],
+            {"type": "string", "minLength": 1, "maxLength": 256},
+        )
+        self.assertEqual(
+            schema["properties"]["concise"],
+            {"type": "string", "minLength": 1, "maxLength": 96},
+        )
         role_schema = schema["properties"]["roles"]
         self.assertNotIn("player1", role_schema["properties"])
         self.assertEqual(set(role_schema["required"]), set(role_schema["properties"]))
@@ -272,6 +280,31 @@ class GameplayCognitionTest(unittest.TestCase):
             observation,
         )
         self.assertEqual(set(report.roles.values()), {"unknown"})
+
+    def test_belief_parser_enforces_unicode_character_bounds(self):
+        observation = _observation()
+        accepted = json.loads(_belief())
+        accepted["belief"] = "信" * 256
+        accepted["concise"] = "结" * 96
+        report = _parse_belief(
+            json.dumps(accepted, ensure_ascii=False),
+            observation,
+        )
+        self.assertEqual(len(report.belief), 256)
+        self.assertEqual(len(report.concise), 96)
+
+        for field, value in (
+            ("belief", "信" * 257),
+            ("concise", "结" * 97),
+        ):
+            with self.subTest(field=field):
+                rejected = dict(accepted)
+                rejected[field] = value
+                with self.assertRaises(BeliefValidationError):
+                    _parse_belief(
+                        json.dumps(rejected, ensure_ascii=False),
+                        observation,
+                    )
 
     def test_day_cognition_v2_schema_has_exact_transport_fields(self):
         observation = _observation()
@@ -305,6 +338,14 @@ class GameplayCognitionTest(unittest.TestCase):
         )
         self.assertNotIn("public_action_indices", schema["properties"])
         self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["belief"],
+            {"type": "string", "minLength": 1, "maxLength": 256},
+        )
+        self.assertEqual(
+            schema["properties"]["concise"],
+            {"type": "string", "minLength": 1, "maxLength": 96},
+        )
         action_schema = schema["properties"]["public_content_action_indices"]
         self.assertEqual(action_schema["type"], "array")
         self.assertNotIn("uniqueItems", action_schema)
@@ -331,6 +372,31 @@ class GameplayCognitionTest(unittest.TestCase):
             evidence_schema["items"]["enum"],
             ["claim_000"],
         )
+
+    def test_day_cognition_parser_enforces_unicode_character_bounds(self):
+        observation = _observation()
+        accepted = json.loads(_day_cognition(observation))
+        accepted["belief"] = "信" * 256
+        accepted["concise"] = "结" * 96
+        report = _parse_day_cognition(
+            json.dumps(accepted, ensure_ascii=False),
+            observation,
+        )
+        self.assertEqual(len(report.belief), 256)
+        self.assertEqual(len(report.concise), 96)
+
+        for field, value in (
+            ("belief", "信" * 257),
+            ("concise", "结" * 97),
+        ):
+            with self.subTest(field=field):
+                rejected = dict(accepted)
+                rejected[field] = value
+                with self.assertRaises(BeliefValidationError):
+                    _parse_day_cognition(
+                        json.dumps(rejected, ensure_ascii=False),
+                        observation,
+                    )
 
     def test_day_cognition_v2_compiles_all_representation_cases(self):
         observation = _observation()
