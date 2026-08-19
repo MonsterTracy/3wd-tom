@@ -941,6 +941,43 @@ def test_d_tasks_require_matching_requested_tom_order():
         TWDToMDataset([second], tom_order=1)
 
 
+@pytest.mark.parametrize("d_first", [False, True])
+def test_dataset_rejects_mixed_legacy_and_d_tom1_lineages(d_first):
+    legacy = raw_sample(1)
+    d_record = d_sample(1)
+    rows = [d_record, legacy] if d_first else [legacy, d_record]
+
+    with pytest.raises(
+        ValueError,
+        match="one Dataset cannot mix legacy and D V1 input lineages",
+    ):
+        TWDToMDataset(rows, tom_order=1)
+
+
+def test_dataset_allows_multiple_legacy_private_rows():
+    first = raw_sample(1)
+    second = raw_sample(1)
+    second["game_id"] = "synthetic_game_002"
+
+    dataset = TWDToMDataset([first, second], tom_order=1)
+    assert len(dataset) == 2
+
+
+def test_dataset_allows_multiple_d_tom1_rows():
+    first = d_sample(1)
+    second = d_sample(1)
+    second["game_id"] = "synthetic_game_002"
+    second["boundary_id"] = (
+        f"{second['game_id']}:step_{second['step_idx']:06d}:"
+        "PRE_PUBLIC_SPEECH"
+    )
+    second.pop("record_digest")
+    second["record_digest"] = canonical_digest(second)
+
+    dataset = TWDToMDataset([first, second], tom_order=1)
+    assert len(dataset) == 2
+
+
 def test_d_strict_validator_is_called_and_rejects_redigested_malformed_row(
     monkeypatch,
 ):

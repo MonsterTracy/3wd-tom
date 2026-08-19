@@ -806,6 +806,13 @@ class TWDToMDataset(Dataset):
             _normalize_sample(sample, tom_order=self.tom_order)
             for sample in self._raw_samples
         ]
+        input_kinds = {
+            sample["_dataset_input_kind"] for sample in self.samples
+        }
+        if len(input_kinds) > 1:
+            raise ValueError(
+                "one Dataset cannot mix legacy and D V1 input lineages"
+            )
         scopes = {
             sample["_belief_information_scope"] for sample in self.samples
         }
