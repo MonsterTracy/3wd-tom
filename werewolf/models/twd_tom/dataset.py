@@ -69,6 +69,9 @@ ANNOTATED_LABEL_PROVENANCE = FORMAL_LABEL_PROVENANCE
 SOURCE_LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
 PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE = "private_conditioned"
 CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
+D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE = (
+    "public_only_observer_suspicion_compatibility_v1"
+)
 
 SUBJECT_MAPPING_FIELDS = (
     "suspected_werewolves",
@@ -336,8 +339,24 @@ def cyclically_rotate_second_order_sample(
     return rotated
 
 
-def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
-    """Validate one current raw training record without repairing it."""
+def _normalize_internal_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
+    """Validate one detached Dataset symbolic representation."""
+
+    # Local imports avoid the reporter -> twd_tom package initialization cycle.
+    from werewolf.offline_annotation import (
+        OFFLINE_ANNOTATION_SCHEMA_VERSION,
+        PRIVATE_PROMPT_VERSION,
+        PUBLIC_PROMPT_VERSION,
+    )
+    from werewolf.offline_materialization import (
+        D_SCHEMA_VERSION,
+        TOM1_MODEL_INPUT_SCOPE,
+        TOM1_OBSERVER_PROVENANCE,
+        TOM1_PRIVATE_FIELDS_USAGE,
+        TOM2_MODEL_INPUT_SCOPE,
+        TOM2_OBSERVER_PROVENANCE,
+        TOM2_PRIVATE_FIELDS_USAGE,
+    )
 
     tom_order = _validate_tom_order(tom_order)
     if not isinstance(sample, Mapping):
@@ -361,6 +380,16 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         PUBLIC_ONLY_LABEL_PROMPT_VERSION,
         PUBLIC_ONLY_LABEL_PROVENANCE,
     )
+    d_private_source_contract = (
+        D_SCHEMA_VERSION,
+        PRIVATE_PROMPT_VERSION,
+        TOM1_OBSERVER_PROVENANCE,
+    )
+    d_public_source_contract = (
+        D_SCHEMA_VERSION,
+        PUBLIC_PROMPT_VERSION,
+        TOM2_OBSERVER_PROVENANCE,
+    )
     if source_contract == private_source_contract:
         belief_information_scope = (
             PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE
@@ -377,6 +406,22 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         expected_label_provenance = PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE
         expected_model_input_scope = PUBLIC_ONLY_MODEL_INPUT_SCOPE
         expected_private_fields_usage = PUBLIC_ONLY_PRIVATE_FIELDS_USAGE
+    elif source_contract == d_private_source_contract:
+        belief_information_scope = (
+            PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE
+        )
+        expected_annotation_schema = OFFLINE_ANNOTATION_SCHEMA_VERSION
+        expected_label_provenance = TOM1_OBSERVER_PROVENANCE
+        expected_model_input_scope = TOM1_MODEL_INPUT_SCOPE
+        expected_private_fields_usage = TOM1_PRIVATE_FIELDS_USAGE
+    elif source_contract == d_public_source_contract:
+        belief_information_scope = (
+            D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE
+        )
+        expected_annotation_schema = OFFLINE_ANNOTATION_SCHEMA_VERSION
+        expected_label_provenance = TOM2_OBSERVER_PROVENANCE
+        expected_model_input_scope = TOM2_MODEL_INPUT_SCOPE
+        expected_private_fields_usage = TOM2_PRIVATE_FIELDS_USAGE
     else:
         raise ValueError("unsupported formal source contract tuple")
     if sample.get("source_schema_version") != sample.get("schema_version"):
@@ -425,7 +470,10 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         )
         for field_name in SUBJECT_MAPPING_FIELDS
     }
-    if belief_information_scope == PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE and (
+    if belief_information_scope in {
+        PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE,
+        D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+    } and (
         any(mappings["known_werewolves"].values())
         or any(mappings["known_non_werewolves"].values())
     ):
@@ -540,6 +588,120 @@ def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
         normalized[field_name] = value
     normalized["_pair_targets"] = targets
     normalized["_belief_information_scope"] = belief_information_scope
+    return normalized
+
+
+def _normalize_d_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
+    """Validate canonical D, then detach it into Dataset symbolic fields."""
+
+    from werewolf.offline_materialization import (
+        D_SCHEMA_VERSION,
+        OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+        OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+        validate_offline_tom_training_record,
+    )
+
+    validated = validate_offline_tom_training_record(sample)
+    task = validated["materialization_task"]
+    expected_tom_order = {
+        OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK: 1,
+        OFFLINE_PUBLIC_ONLY_TOM2_TASK: 2,
+    }[task]
+    if tom_order != expected_tom_order:
+        raise ValueError(
+            f"{task} requires requested tom_order={expected_tom_order}"
+        )
+
+    public_events = normalize_public_events(validated["public_events"])
+    full_phase = next(
+        event["phase"]
+        for event in reversed(public_events)
+        if event["event_type"] == "phase_change"
+    )
+    phase_category = parse_public_phase(full_phase)[1]
+    expected_d_phase = {
+        "day_speech": "speech",
+        "day_speech_pk": "speech_pk",
+    }.get(phase_category)
+    if validated["phase"] != expected_d_phase:
+        raise ValueError("D phase does not match latest public phase_change")
+
+    provenance_values = set(validated["observer_label_provenance"].values())
+    if len(provenance_values) != 1:
+        raise ValueError("D observer label provenance must be uniform")
+    label_provenance = next(iter(provenance_values))
+    internal = {
+        "agent_backend_ids": deepcopy(validated["reporter_backend_ids"]),
+        "annotation_schema_version": validated[
+            "source_annotation_schema_version"
+        ],
+        "belief_errors": deepcopy(validated["belief_errors"]),
+        "belief_status": deepcopy(validated["belief_status"]),
+        "current_action_used": validated["current_action_used"],
+        "expert_labels_used_as_later_evidence": validated[
+            "expert_labels_used_as_later_evidence"
+        ],
+        "future_information_used": validated["future_information_used"],
+        "game_id": validated["game_id"],
+        "known_non_werewolves": deepcopy(validated["known_non_werewolves"]),
+        "known_werewolves": deepcopy(validated["known_werewolves"]),
+        "label_cutoff_step_idx": validated["label_cutoff_step_idx"],
+        "label_prompt_version": validated["source_prompt_version"],
+        "label_provenance": label_provenance,
+        "model_input_scope": validated["model_input_scope"],
+        "observer_annotation_confidence": deepcopy(
+            validated["observer_annotation_confidence"]
+        ),
+        "observer_ids": deepcopy(validated["observer_ids"]),
+        "observer_label_provenance": deepcopy(
+            validated["observer_label_provenance"]
+        ),
+        "phase": full_phase,
+        "private_fields_usage": validated["private_fields_usage"],
+        "public_action_count": validated["public_action_count"],
+        "public_event_digest": validated["public_event_digest"],
+        "public_event_schema_version": validated[
+            "public_event_schema_version"
+        ],
+        "public_events": deepcopy(public_events),
+        "report_trigger": validated["report_trigger"],
+        "schema_version": D_SCHEMA_VERSION,
+        "source_belief_errors": deepcopy(validated["belief_errors"]),
+        "source_belief_status": deepcopy(validated["belief_status"]),
+        "source_label_provenance": label_provenance,
+        "source_schema_version": D_SCHEMA_VERSION,
+        "speaker_id": validated["speaker_id"],
+        "step_idx": validated["step_idx"],
+        "structured_input_digest": validated["structured_input_digest"],
+        "suspected_werewolves": deepcopy(validated["suspected_werewolves"]),
+        "tom_order": validated["tom_order"],
+    }
+    normalized = _normalize_internal_sample(internal, tom_order=tom_order)
+    normalized["_dataset_input_kind"] = "d_v1"
+    normalized["_dataset_source_metadata"] = {
+        "schema_version": validated["schema_version"],
+        "materialization_task": validated["materialization_task"],
+        "materialization_policy_version": validated[
+            "materialization_policy_version"
+        ],
+        "materializer_code_commit": validated["materializer_code_commit"],
+        "source_annotation_task": validated["source_annotation_task"],
+        "model_input_scope": validated["model_input_scope"],
+    }
+    return normalized
+
+
+def _normalize_sample(sample: Any, *, tom_order: int) -> dict[str, Any]:
+    """Dispatch strict persisted sources into detached Dataset symbols."""
+
+    from werewolf.offline_materialization import D_SCHEMA_VERSION
+
+    if isinstance(sample, Mapping) and sample.get("schema_version") == (
+        D_SCHEMA_VERSION
+    ):
+        return _normalize_d_sample(sample, tom_order=tom_order)
+    normalized = _normalize_internal_sample(sample, tom_order=tom_order)
+    normalized["_dataset_input_kind"] = "legacy"
     return normalized
 
 
@@ -748,11 +910,26 @@ class TWDToMDataset(Dataset):
                 epoch=self._epoch,
                 sample_index=index,
             )
-            rotated = cyclically_rotate_second_order_sample(
-                self._raw_samples[index],
-                shift=shift,
-            )
-            sample = _normalize_sample(rotated, tom_order=2)
+            if sample["_dataset_input_kind"] == "d_v1":
+                rotated = cyclically_rotate_second_order_sample(
+                    sample,
+                    shift=shift,
+                )
+                internal = {
+                    field_name: rotated[field_name]
+                    for field_name in RAW_TRAINING_SAMPLE_FIELDS
+                }
+                sample = _normalize_internal_sample(internal, tom_order=2)
+                sample["_dataset_input_kind"] = "d_v1"
+                sample["_dataset_source_metadata"] = deepcopy(
+                    self.samples[index]["_dataset_source_metadata"]
+                )
+            else:
+                rotated = cyclically_rotate_second_order_sample(
+                    self._raw_samples[index],
+                    shift=shift,
+                )
+                sample = _normalize_sample(rotated, tom_order=2)
         features = self.feature_builder.encode_events(sample["public_events"])
         targets = torch.zeros(
             (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES),
@@ -780,6 +957,7 @@ class TWDToMDataset(Dataset):
             "known_werewolves": deepcopy(sample["known_werewolves"]),
             "known_non_werewolves": deepcopy(sample["known_non_werewolves"]),
         }
+        metadata.update(deepcopy(sample.get("_dataset_source_metadata", {})))
         item: dict[str, Any] = {
             **features,
             "pair_targets": targets,
@@ -889,6 +1067,7 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
 
 __all__ = [
     "CYCLIC_ROTATION_VERSION",
+    "D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE",
     "RAW_TRAINING_SAMPLE_FIELDS",
     "SUBJECT_MAPPING_FIELDS",
     "TOM_INPUT_SCOPES",

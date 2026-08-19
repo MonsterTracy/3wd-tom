@@ -1,6 +1,7 @@
 """Tests for strict current raw first-/second-order data adaptation."""
 
 import hashlib
+import json
 from collections import Counter
 from copy import deepcopy
 from pathlib import Path
@@ -9,8 +10,10 @@ import pytest
 import torch
 
 import werewolf.models.twd_tom.dataset as dataset_module
+import werewolf.offline_materialization as offline_materialization_module
 from werewolf.models.twd_tom.belief_labels import suspicion_set_to_pair_target
 from werewolf.models.twd_tom.dataset import (
+    D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
     SUBJECT_MAPPING_FIELDS,
     TWDToMDataset,
     collate_twd_tom_samples,
@@ -32,6 +35,26 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_TO_ID,
     canonical_wolf_pairs,
 )
+from werewolf.offline_annotation import (
+    OFFLINE_ANNOTATION_SCHEMA_VERSION,
+    PRIVATE_CONDITIONED_SUSPICION_TASK,
+    PRIVATE_PROMPT_VERSION,
+    PUBLIC_ONLY_SUSPICION_TASK,
+    PUBLIC_PROMPT_VERSION,
+)
+from werewolf.offline_materialization import (
+    D_MATERIALIZATION_POLICY_VERSION,
+    D_SCHEMA_VERSION,
+    OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+    OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+    TOM1_MODEL_INPUT_SCOPE,
+    TOM1_OBSERVER_PROVENANCE,
+    TOM1_PRIVATE_FIELDS_USAGE,
+    TOM2_MODEL_INPUT_SCOPE,
+    TOM2_OBSERVER_PROVENANCE,
+    TOM2_PRIVATE_FIELDS_USAGE,
+)
+from werewolf.trajectory import canonical_digest
 from tests.twd_tom.public_event_fixtures import (
     make_full_history_training_sample,
     make_public_only_training_sample,
@@ -57,6 +80,116 @@ def second_order_sample(*, with_latest_action):
 
 def second_order_sample_with_sparse_latest_actor_target():
     return make_training_sample(2, observers=(1, 3, 5))
+
+
+def d_sample(
+    tom_order,
+    *,
+    with_latest_action=True,
+    phase="1_day_speech",
+):
+    speaker_id = 2
+    observers = (speaker_id,) if tom_order == 1 else (1, 3, 5)
+    legacy = make_training_sample(
+        tom_order,
+        observers=observers,
+        with_latest_action=with_latest_action,
+        phase=phase,
+    )
+    subjects = [f"player{observer_id}" for observer_id in observers]
+    is_private = tom_order == 1
+    materialization_task = (
+        OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK
+        if is_private
+        else OFFLINE_PUBLIC_ONLY_TOM2_TASK
+    )
+    source_task = (
+        PRIVATE_CONDITIONED_SUSPICION_TASK
+        if is_private
+        else PUBLIC_ONLY_SUSPICION_TASK
+    )
+    prompt_version = PRIVATE_PROMPT_VERSION if is_private else PUBLIC_PROMPT_VERSION
+    provenance = (
+        TOM1_OBSERVER_PROVENANCE if is_private else TOM2_OBSERVER_PROVENANCE
+    )
+    semantic_phase = "speech_pk" if phase.endswith("speech_pk") else "speech"
+    record = {
+        "schema_version": D_SCHEMA_VERSION,
+        "materialization_task": materialization_task,
+        "materialization_policy_version": D_MATERIALIZATION_POLICY_VERSION,
+        "materializer_code_commit": "0123456789abcdef0123456789abcdef01234567",
+        "game_id": legacy["game_id"],
+        "source_trajectory_commit": "1234567890abcdef1234567890abcdef12345678",
+        "trajectory_digest": "1" * 64,
+        "observer_view_artifact_digest": "2" * 64,
+        "boundary_id": (
+            f"{legacy['game_id']}:step_{legacy['step_idx']:06d}:"
+            "PRE_PUBLIC_SPEECH"
+        ),
+        "step_idx": legacy["step_idx"],
+        "phase": semantic_phase,
+        "speaker_id": speaker_id,
+        "report_trigger": (
+            "pre_public_speech_pk"
+            if semantic_phase == "speech_pk"
+            else "pre_public_speech"
+        ),
+        "public_event_schema_version": legacy["public_event_schema_version"],
+        "public_events": deepcopy(legacy["public_events"]),
+        "public_event_digest": legacy["public_event_digest"],
+        "structured_input_digest": legacy["structured_input_digest"],
+        "public_action_count": legacy["public_action_count"],
+        "label_cutoff_step_idx": legacy["label_cutoff_step_idx"],
+        "tom_order": tom_order,
+        "model_input_scope": (
+            TOM1_MODEL_INPUT_SCOPE if is_private else TOM2_MODEL_INPUT_SCOPE
+        ),
+        "private_fields_usage": (
+            TOM1_PRIVATE_FIELDS_USAGE
+            if is_private
+            else TOM2_PRIVATE_FIELDS_USAGE
+        ),
+        "observer_ids": list(observers),
+        "suspected_werewolves": deepcopy(legacy["suspected_werewolves"]),
+        "known_werewolves": deepcopy(legacy["known_werewolves"]),
+        "known_non_werewolves": deepcopy(legacy["known_non_werewolves"]),
+        "belief_status": {subject: "ok" for subject in subjects},
+        "belief_errors": {subject: None for subject in subjects},
+        "source_annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+        "source_annotation_task": source_task,
+        "source_prompt_version": prompt_version,
+        "source_annotation_run_ids": {
+            subject: "annotation_run" for subject in subjects
+        },
+        "source_annotation_code_commits": {
+            subject: "234567890abcdef1234567890abcdef123456789"
+            for subject in subjects
+        },
+        "source_annotation_record_digests": {
+            subject: f"{observer_id}" * 64
+            for subject, observer_id in zip(subjects, observers)
+        },
+        "reporter_backend_ids": {
+            subject: "reporter_backend" for subject in subjects
+        },
+        "reporter_model_ids": {
+            subject: "reporter_model" for subject in subjects
+        },
+        "observer_label_provenance": {
+            subject: provenance for subject in subjects
+        },
+        "observer_annotation_confidence": {
+            subject: "model_reported_source" for subject in subjects
+        },
+        "current_action_used": False,
+        "expert_labels_used_as_later_evidence": False,
+        "future_information_used": False,
+    }
+    if not is_private:
+        record["known_werewolves"] = {subject: [] for subject in subjects}
+        record["known_non_werewolves"] = {subject: [] for subject in subjects}
+    record["record_digest"] = canonical_digest(record)
+    return record
 
 
 def test_second_order_formal_split_files_are_unchanged(
@@ -776,6 +909,233 @@ def test_train_rotation_is_deterministic_epoch_dependent_and_train_only():
             tom_order=1,
             enable_cyclic_rotation=True,
         )
+
+
+def test_legacy_private_and_public_only_inputs_keep_existing_identity_and_behavior():
+    private = raw_sample(1)
+    public = make_public_only_training_sample(2)
+    private_original = deepcopy(private)
+    public_original = deepcopy(public)
+
+    private_item = TWDToMDataset([private], tom_order=1)[0]
+    public_item = TWDToMDataset([public], tom_order=2)[0]
+
+    assert private == private_original
+    assert public == public_original
+    assert private_item["metadata"]["schema_version"] == private["schema_version"]
+    assert public_item["metadata"]["schema_version"] == public["schema_version"]
+    assert "materialization_task" not in private_item["metadata"]
+    assert "materialization_task" not in public_item["metadata"]
+    assert "known_werewolves" in private_item
+    assert "known_werewolves" not in public_item
+
+
+def test_d_tasks_require_matching_requested_tom_order():
+    first = d_sample(1)
+    second = d_sample(2)
+    assert len(TWDToMDataset([first], tom_order=1)) == 1
+    assert len(TWDToMDataset([second], tom_order=2)) == 1
+    with pytest.raises(ValueError, match="requires requested tom_order=1"):
+        TWDToMDataset([first], tom_order=2)
+    with pytest.raises(ValueError, match="requires requested tom_order=2"):
+        TWDToMDataset([second], tom_order=1)
+
+
+def test_d_strict_validator_is_called_and_rejects_redigested_malformed_row(
+    monkeypatch,
+):
+    record = d_sample(1)
+    calls = []
+    strict_validator = (
+        offline_materialization_module.validate_offline_tom_training_record
+    )
+
+    def recording_validator(value):
+        calls.append(value)
+        return strict_validator(value)
+
+    monkeypatch.setattr(
+        offline_materialization_module,
+        "validate_offline_tom_training_record",
+        recording_validator,
+    )
+    TWDToMDataset([record], tom_order=1)
+    assert calls == [record]
+
+    malformed = deepcopy(record)
+    malformed["pair_targets"] = []
+    malformed.pop("record_digest")
+    malformed["record_digest"] = canonical_digest(malformed)
+    with pytest.raises(ValueError, match="fields"):
+        TWDToMDataset([malformed], tom_order=1)
+
+
+@pytest.mark.parametrize(
+    ("semantic_phase", "full_phase", "report_trigger"),
+    [
+        ("speech", "1_day_speech", "pre_public_speech"),
+        ("speech_pk", "1_day_speech_pk", "pre_public_speech_pk"),
+    ],
+)
+def test_d_phase_maps_to_full_public_phase_and_metadata_is_honest(
+    semantic_phase,
+    full_phase,
+    report_trigger,
+):
+    record = d_sample(2, phase=full_phase)
+    original = deepcopy(record)
+    dataset = TWDToMDataset([record], tom_order=2)
+    item = dataset[0]
+    metadata = item["metadata"]
+
+    assert record == original
+    assert record["phase"] == semantic_phase
+    assert dataset.samples[0]["phase"] == full_phase
+    assert dataset.samples[0]["report_trigger"] == report_trigger
+    assert metadata["phase"] == full_phase
+    assert metadata["schema_version"] == D_SCHEMA_VERSION
+    assert metadata["materialization_task"] == (
+        OFFLINE_PUBLIC_ONLY_TOM2_TASK
+    )
+    assert metadata["materialization_policy_version"] == (
+        D_MATERIALIZATION_POLICY_VERSION
+    )
+    assert metadata["materializer_code_commit"] == record[
+        "materializer_code_commit"
+    ]
+    assert metadata["source_annotation_task"] == PUBLIC_ONLY_SUSPICION_TASK
+    assert metadata["model_input_scope"] == TOM2_MODEL_INPUT_SCOPE
+    assert metadata["speaker_id"] == record["speaker_id"]
+    assert metadata["observer_ids"] == record["observer_ids"]
+    assert "record_digest" not in metadata
+    assert "record_digest" not in dataset.samples[0]
+    assert dataset.source_schema_version == D_SCHEMA_VERSION
+    assert dataset.belief_information_scope == (
+        D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE
+    )
+
+
+def test_d_phase_mismatch_is_rejected():
+    record = d_sample(2)
+    record["phase"] = "speech_pk"
+    record["report_trigger"] = "pre_public_speech_pk"
+    record.pop("record_digest")
+    record["record_digest"] = canonical_digest(record)
+    with pytest.raises(ValueError, match="phase"):
+        TWDToMDataset([record], tom_order=2)
+
+
+def test_d_tom1_reuses_pair_projection_and_private_hard_knowledge_tensors():
+    record = d_sample(1)
+    subject = f"player{record['speaker_id']}"
+    item = TWDToMDataset([record], tom_order=1)[0]
+    expected = suspicion_set_to_pair_target(
+        record["suspected_werewolves"][subject],
+        record["known_werewolves"][subject],
+        record["known_non_werewolves"][subject],
+    )
+    subject_index = record["speaker_id"] - 1
+
+    torch.testing.assert_close(item["pair_targets"][subject_index], expected)
+    for player in record["known_werewolves"][subject]:
+        assert item["known_werewolves"][
+            subject_index, PLAYER_TO_ID[player] - 1
+        ] == 1
+    for player in record["known_non_werewolves"][subject]:
+        assert item["known_non_werewolves"][
+            subject_index, PLAYER_TO_ID[player] - 1
+        ] == 1
+    assert item["known_werewolves"].sum().item() == len(
+        record["known_werewolves"][subject]
+    )
+    assert item["known_non_werewolves"].sum().item() == len(
+        record["known_non_werewolves"][subject]
+    )
+
+
+def test_d_tom2_keeps_public_only_model_input_reasoning_player_and_mask():
+    record = d_sample(2)
+    item = TWDToMDataset([record], tom_order=2)[0]
+
+    assert "known_werewolves" not in item
+    assert "known_non_werewolves" not in item
+    assert item["reasoning_player_id"].item() == record["speaker_id"]
+    effective = second_order_effective_subject_mask(
+        item["subject_mask"],
+        item["reasoning_player_id"],
+    )
+    assert not effective[record["speaker_id"] - 1]
+    assert effective.sum().item() == len(record["observer_ids"])
+
+
+def test_d_tom2_temporal_gate_stays_in_dataset_supervised_index_selection():
+    first_turn = d_sample(2, with_latest_action=False)
+    post_speech = d_sample(2, with_latest_action=True)
+    first_dataset = TWDToMDataset([first_turn], tom_order=2)
+    post_dataset = TWDToMDataset([post_speech], tom_order=2)
+
+    assert not first_dataset[0]["post_completed_public_speech_pre_next_action"]
+    assert first_dataset.second_order_supervised_indices() == ()
+    assert post_dataset[0]["post_completed_public_speech_pre_next_action"]
+    assert post_dataset.second_order_supervised_indices() == (0,)
+
+
+def test_d_tom2_rotation_happens_after_validation_without_mutating_artifact():
+    record = d_sample(2)
+    original = deepcopy(record)
+    dataset = TWDToMDataset(
+        [record],
+        tom_order=2,
+        enable_cyclic_rotation=True,
+        augmentation_seed=3,
+    )
+    canonical_internal = deepcopy(dataset.samples[0])
+    item = dataset[0]
+    rotated = cyclically_rotate_second_order_sample(
+        canonical_internal,
+        shift=3,
+    )
+
+    assert record == original
+    assert "pair_targets" not in record
+    assert "record_digest" not in canonical_internal
+    assert item["metadata"]["schema_version"] == D_SCHEMA_VERSION
+    assert item["metadata"]["speaker_id"] == 5
+    assert item["metadata"]["observer_ids"] == [4, 6, 1]
+    for subject, suspicion in rotated["suspected_werewolves"].items():
+        expected = suspicion_set_to_pair_target(
+            suspicion,
+            rotated["known_werewolves"][subject],
+            rotated["known_non_werewolves"][subject],
+        )
+        torch.testing.assert_close(
+            item["pair_targets"][PLAYER_TO_ID[subject] - 1],
+            expected,
+        )
+    effective = second_order_effective_subject_mask(
+        item["subject_mask"],
+        item["reasoning_player_id"],
+    )
+    assert not effective[4]
+
+
+def test_d_from_jsonl_and_collate_preserve_existing_output_contract(tmp_path):
+    first_path = tmp_path / "tom1.jsonl"
+    second_path = tmp_path / "tom2.jsonl"
+    first_path.write_text(json.dumps(d_sample(1)) + "\n", encoding="utf-8")
+    second_path.write_text(json.dumps(d_sample(2)) + "\n", encoding="utf-8")
+    first_item = TWDToMDataset.from_jsonl(first_path, tom_order=1)[0]
+    second_item = TWDToMDataset.from_jsonl(second_path, tom_order=2)[0]
+    first_batch = collate_twd_tom_samples([first_item])
+    second_batch = collate_twd_tom_samples([second_item])
+
+    assert first_batch["pair_targets"].shape == (1, 7, 21)
+    assert first_batch["known_werewolves"].shape == (1, 7, 7)
+    assert second_batch["pair_targets"].shape == (1, 7, 21)
+    assert second_batch["reasoning_player_id"].shape == (1,)
+    assert second_batch[
+        "post_completed_public_speech_pre_next_action"
+    ].shape == (1,)
 
 
 def test_cyclic_rotation_rejects_illegal_player_id():
