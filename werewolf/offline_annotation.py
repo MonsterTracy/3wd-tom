@@ -576,6 +576,27 @@ def _public_source(
     }
 
 
+def validate_offline_annotation_sources(
+    trajectory: Mapping[str, Any],
+    observer_view_provenance: Mapping[str, Any],
+) -> tuple[
+    list[dict[str, Any]],
+    list[tuple[Mapping[str, Any], list[dict[str, Any]]]],
+]:
+    """Validate frozen A/C0 and return canonical events plus PRE cutoffs."""
+
+    public_events = _validate_frozen_inputs(
+        trajectory,
+        observer_view_provenance,
+    )
+    boundaries = _validated_pre_boundaries(
+        trajectory,
+        observer_view_provenance,
+        public_events,
+    )
+    return public_events, boundaries
+
+
 def _private_prompt(
     *,
     boundary: Mapping[str, Any],
@@ -723,14 +744,9 @@ def annotate_pre_speech_suspicion(
         "extra_body": deepcopy(ANNOTATION_EXTRA_BODY),
     }
 
-    public_events = _validate_frozen_inputs(
+    public_events, boundaries = validate_offline_annotation_sources(
         trajectory,
         observer_view_provenance,
-    )
-    boundaries = _validated_pre_boundaries(
-        trajectory,
-        observer_view_provenance,
-        public_events,
     )
     is_private = annotation_task == PRIVATE_CONDITIONED_SUSPICION_TASK
     records = []
@@ -927,5 +943,6 @@ __all__ = [
     "PUBLIC_PROMPT_VERSION",
     "annotate_pre_speech_suspicion",
     "validate_offline_annotation_record",
+    "validate_offline_annotation_sources",
     "write_annotation_jsonl",
 ]
