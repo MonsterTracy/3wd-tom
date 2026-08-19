@@ -20,9 +20,14 @@ from werewolf.models.twd_tom.dataset import (
 )
 from werewolf.models.twd_tom.public_events import (
     is_post_completed_public_speech_pre_next_action,
+    normalize_public_events,
+    public_event_digest,
     structured_event_tokens,
+    structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import (
+    ACTION_TO_ID,
+    NONE_TOKEN,
     PLAYER_NAMES,
     PLAYER_TO_ID,
     canonical_wolf_pairs,
@@ -640,6 +645,61 @@ def test_cyclic_rotation_updates_every_structured_player_field():
         for event in sample["public_events"]
         if event["event_type"] == "public_speech"
     ]
+
+
+def test_cyclic_rotation_preserves_targetless_speech_action_objects():
+    sample = make_training_sample(2)
+    speech = next(
+        event
+        for event in sample["public_events"]
+        if event["event_type"] == "public_speech"
+    )
+    speech["sp_actions"] = [
+        ["player2", "oppose", "player5"],
+        ["player2", "abstain_intent", None],
+        ["player2", "no_commitment", None],
+    ]
+    sample["public_action_count"] = 3
+    sample["public_event_digest"] = public_event_digest(
+        sample["public_events"]
+    )
+    sample["structured_input_digest"] = structured_input_digest(
+        sample["public_events"]
+    )
+
+    rotated = cyclically_rotate_second_order_sample(sample, shift=3)
+    rotated_speech = next(
+        event
+        for event in rotated["public_events"]
+        if event["event_type"] == "public_speech"
+    )
+    assert rotated_speech["sp_actions"] == [
+        ["player5", "oppose", "player1"],
+        ["player5", "abstain_intent", None],
+        ["player5", "no_commitment", None],
+    ]
+    assert normalize_public_events(rotated["public_events"]) == (
+        rotated["public_events"]
+    )
+    assert rotated["public_event_digest"] == public_event_digest(
+        rotated["public_events"]
+    )
+    assert rotated["structured_input_digest"] == structured_input_digest(
+        rotated["public_events"]
+    )
+
+    dataset = TWDToMDataset(
+        [sample],
+        tom_order=2,
+        enable_cyclic_rotation=True,
+        augmentation_seed=3,
+    )
+    item = dataset[0]
+    abstain_index = item["action_ids"].tolist().index(
+        ACTION_TO_ID["abstain_intent"]
+    )
+    assert PLAYER_TO_ID[NONE_TOKEN] == 8
+    assert item["object_ids"][abstain_index].item() == 8
 
 
 def test_rotated_one_hot_pair_target_uses_canonical_pair_class():

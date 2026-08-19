@@ -286,7 +286,11 @@ def cyclically_rotate_second_order_sample(
                 [
                     _rotate_player_name(action[0], shift=shift),
                     action[1],
-                    _rotate_player_name(action[2], shift=shift),
+                    (
+                        None
+                        if action[2] is None
+                        else _rotate_player_name(action[2], shift=shift)
+                    ),
                 ]
                 for action in event["sp_actions"]
             ]
