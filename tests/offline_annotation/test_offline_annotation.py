@@ -25,6 +25,7 @@ from werewolf.offline_annotation import (
     PUBLIC_ONLY_SUSPICION_TASK,
     PUBLIC_PROMPT_VERSION,
     annotate_pre_speech_suspicion,
+    validate_offline_annotation_record,
     write_annotation_jsonl,
 )
 from werewolf.trajectory import (
@@ -39,6 +40,7 @@ from werewolf.trajectory import (
 
 
 SOURCE_COMMIT = "bded8b52bbf51d0107e86f8d469eb8a7d621036b"
+ANNOTATION_CODE_COMMIT = "d257d827dfd465c57bd33a1a710df9bb857b3280"
 
 
 class Backend:
@@ -220,6 +222,11 @@ def _redigest_provenance(provenance, *, boundaries=False):
     provenance["artifact_digest"] = canonical_digest(provenance)
 
 
+def _redigest_record(record):
+    record.pop("record_digest", None)
+    record["record_digest"] = canonical_digest(record)
+
+
 def _annotate(task, backend, *, artifacts=None):
     trajectory, provenance = artifacts or _artifacts()
     return annotate_pre_speech_suspicion(
@@ -227,7 +234,7 @@ def _annotate(task, backend, *, artifacts=None):
         provenance,
         annotation_task=task,
         annotation_run_id="annotation_run_001",
-        annotation_code_commit="annotation-code-commit",
+        annotation_code_commit=ANNOTATION_CODE_COMMIT,
         backend=backend,
         backend_id="reporter_backend",
         model_name="reporter_model",
@@ -317,6 +324,7 @@ def test_multiple_pre_boundaries_sort_by_step_then_observer():
     trajectory["transitions"] = [
         {
             "step_idx": 0,
+            "acting_player_id": 2,
             "public_event_count_before": 2,
             "public_events_appended": [],
         }
@@ -599,3 +607,170 @@ def test_atomic_jsonl_writer_preserves_order_and_refuses_overwrite(tmp_path):
     mixed[1]["record_digest"] = canonical_digest(mixed[1])
     with pytest.raises(ValueError, match="one annotation_task"):
         write_annotation_jsonl(tmp_path / "mixed.jsonl", mixed)
+
+
+def test_strict_validator_rejects_redigested_malformed_records(tmp_path):
+    records = _annotate(
+        PUBLIC_ONLY_SUSPICION_TASK,
+        Backend([
+            '{"suspected_werewolves":[]}',
+            '{"suspected_werewolves":[]}',
+        ]),
+    )
+    baseline = records[0]
+    malformed = []
+
+    missing = deepcopy(baseline)
+    missing.pop("prompt_version")
+    malformed.append(missing)
+
+    extra = deepcopy(baseline)
+    extra["unexpected"] = True
+    malformed.append(extra)
+
+    wrong_scope = deepcopy(baseline)
+    wrong_scope["information_scope"] = PRIVATE_INFORMATION_SCOPE
+    malformed.append(wrong_scope)
+
+    wrong_prompt_digest = deepcopy(baseline)
+    wrong_prompt_digest["prompt_digest"] = "0" * 64
+    malformed.append(wrong_prompt_digest)
+
+    wrong_request = deepcopy(baseline)
+    wrong_request["request_parameters"]["max_tokens"] = 97
+    malformed.append(wrong_request)
+
+    status_mismatch = deepcopy(baseline)
+    status_mismatch["status"] = "parse_error"
+    status_mismatch["error"] = "invalid"
+    malformed.append(status_mismatch)
+
+    private_injection = deepcopy(baseline)
+    private_injection["source"]["observation_digest"] = "0" * 64
+    malformed.append(private_injection)
+
+    invalid_commit = deepcopy(baseline)
+    invalid_commit["annotation_code_commit"] = "not-a-git-sha"
+    malformed.append(invalid_commit)
+
+    for index, record in enumerate(malformed):
+        with pytest.raises((TypeError, ValueError)):
+            _redigest_record(record)
+            validate_offline_annotation_record(record)
+        with pytest.raises((TypeError, ValueError)):
+            write_annotation_jsonl(tmp_path / f"malformed_{index}.jsonl", [record])
+
+
+def test_private_ok_result_must_satisfy_derived_hard_knowledge():
+    record = _annotate(
+        PRIVATE_CONDITIONED_SUSPICION_TASK,
+        Backend([
+            '{"suspected_werewolves":["player3"]}',
+            '{"suspected_werewolves":[]}',
+        ]),
+    )[0]
+    record["result"] = {"suspected_werewolves": []}
+    record["raw_response"] = '{"suspected_werewolves":[]}'
+    _redigest_record(record)
+    with pytest.raises(ValueError, match="known_werewolves"):
+        validate_offline_annotation_record(record)
+
+
+def test_annotation_code_commit_must_be_lowercase_40_hex():
+    trajectory, provenance = _artifacts()
+    with pytest.raises(ValueError, match="annotation_code_commit"):
+        annotate_pre_speech_suspicion(
+            trajectory,
+            provenance,
+            annotation_task=PUBLIC_ONLY_SUSPICION_TASK,
+            annotation_run_id="annotation_run_001",
+            annotation_code_commit="invalid",
+            backend=Backend([]),
+            backend_id="reporter_backend",
+            model_name="reporter_model",
+        )
+
+
+def test_pre_boundary_id_must_be_canonical():
+    trajectory, provenance = _artifacts()
+    pre = next(
+        boundary
+        for boundary in provenance["boundaries"]
+        if boundary["boundary_type"] == PRE_PUBLIC_SPEECH
+    )
+    pre["boundary_id"] = "wrong"
+    _redigest_provenance(provenance, boundaries=True)
+    with pytest.raises(ValueError, match="boundary_id"):
+        _annotate(
+            PUBLIC_ONLY_SUSPICION_TASK,
+            Backend([]),
+            artifacts=(trajectory, provenance),
+        )
+
+
+def test_pre_speaker_must_match_final_turn_start():
+    trajectory, provenance = _artifacts()
+    pre = next(
+        boundary
+        for boundary in provenance["boundaries"]
+        if boundary["boundary_type"] == PRE_PUBLIC_SPEECH
+    )
+    pre["speaker_id"] = 3
+    _redigest_provenance(provenance, boundaries=True)
+    with pytest.raises(ValueError, match="turn_start"):
+        _annotate(
+            PUBLIC_ONLY_SUSPICION_TASK,
+            Backend([]),
+            artifacts=(trajectory, provenance),
+        )
+
+
+def test_committed_transition_actor_must_match_pre_speaker():
+    trajectory, provenance = _artifacts()
+    trajectory["transitions"] = [
+        {
+            "step_idx": 0,
+            "acting_player_id": 1,
+            "public_event_count_before": 2,
+            "public_events_appended": [],
+        }
+    ]
+    trajectory.pop("trajectory_digest")
+    trajectory["trajectory_digest"] = canonical_digest(trajectory)
+    provenance["trajectory_digest"] = trajectory["trajectory_digest"]
+    _redigest_provenance(provenance)
+    with pytest.raises(ValueError, match="transition actor"):
+        _annotate(
+            PUBLIC_ONLY_SUSPICION_TASK,
+            Backend([]),
+            artifacts=(trajectory, provenance),
+        )
+
+
+def test_private_observation_actor_must_match_pre_speaker_but_public_ignores_it():
+    trajectory, provenance = _artifacts()
+    pre = next(
+        boundary
+        for boundary in provenance["boundaries"]
+        if boundary["boundary_type"] == PRE_PUBLIC_SPEECH
+    )
+    view = pre["observer_views"][0]
+    view["observation"]["current_act_idx"] = 7
+    view["observation_digest"] = canonical_digest(view["observation"])
+    _redigest_provenance(provenance, boundaries=True)
+
+    with pytest.raises(ValueError, match="current actor"):
+        _annotate(
+            PRIVATE_CONDITIONED_SUSPICION_TASK,
+            Backend([]),
+            artifacts=(trajectory, provenance),
+        )
+    records = _annotate(
+        PUBLIC_ONLY_SUSPICION_TASK,
+        Backend([
+            '{"suspected_werewolves":[]}',
+            '{"suspected_werewolves":[]}',
+        ]),
+        artifacts=(trajectory, provenance),
+    )
+    assert len(records) == 2

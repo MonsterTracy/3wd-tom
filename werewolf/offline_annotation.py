@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -84,11 +85,87 @@ OFFLINE_SUSPICION_JSON_SCHEMA = {
         },
     },
 }
+_GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_COMMON_RECORD_FIELDS = frozenset(
+    {
+        "schema_version",
+        "annotation_task",
+        "annotation_run_id",
+        "annotation_code_commit",
+        "game_id",
+        "source_trajectory_commit",
+        "trajectory_digest",
+        "observer_view_artifact_digest",
+        "boundary_id",
+        "boundary_type",
+        "step_idx",
+        "observer_id",
+        "information_scope",
+        "source",
+        "prompt_version",
+        "prompt",
+        "prompt_digest",
+        "reporter_backend_id",
+        "reporter_model_id",
+        "request_parameters",
+        "raw_response",
+        "status",
+        "error",
+        "result",
+        "record_digest",
+    }
+)
+_PUBLIC_SOURCE_FIELDS = frozenset(
+    {
+        "public_event_count",
+        "public_event_digest",
+        "structured_input_digest",
+        "public_action_count",
+    }
+)
+_PRIVATE_SOURCE_FIELDS = frozenset(
+    {
+        *_PUBLIC_SOURCE_FIELDS,
+        "observation_digest",
+        "derived_hard_knowledge",
+    }
+)
+_TASK_CONTRACTS = {
+    PRIVATE_CONDITIONED_SUSPICION_TASK: {
+        "information_scope": PRIVATE_INFORMATION_SCOPE,
+        "prompt_version": PRIVATE_PROMPT_VERSION,
+        "source_fields": _PRIVATE_SOURCE_FIELDS,
+    },
+    PUBLIC_ONLY_SUSPICION_TASK: {
+        "information_scope": PUBLIC_INFORMATION_SCOPE,
+        "prompt_version": PUBLIC_PROMPT_VERSION,
+        "source_fields": _PUBLIC_SOURCE_FIELDS,
+    },
+}
 
 
 def _required_text(value: Any, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be non-empty text")
+    return value
+
+
+def _validate_sha(value: Any, *, field_name: str, pattern) -> str:
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must be lowercase hexadecimal")
+    return value
+
+
+def _validate_player_set(value: Any, *, field_name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise TypeError(f"{field_name} must be a list")
+    if any(player not in PLAYER_NAMES for player in value):
+        raise ValueError(f"{field_name} contains a non-canonical player")
+    if len(value) != len(set(value)):
+        raise ValueError(f"{field_name} contains duplicate players")
+    if value != sorted(value, key=PLAYER_NAMES.index):
+        raise ValueError(f"{field_name} must use canonical player order")
     return value
 
 
@@ -105,6 +182,197 @@ def _response_format(*, supports_json_schema: bool) -> dict[str, Any]:
             "schema": deepcopy(OFFLINE_SUSPICION_JSON_SCHEMA),
         },
     }
+
+
+def validate_offline_annotation_record(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Fail closed unless one value is an exact canonical C1 V1 record."""
+
+    if not isinstance(record, Mapping):
+        raise TypeError("offline annotation record must be a mapping")
+    if set(record) != _COMMON_RECORD_FIELDS:
+        raise ValueError("offline annotation record fields do not match contract")
+    if record.get("schema_version") != OFFLINE_ANNOTATION_SCHEMA_VERSION:
+        raise ValueError("unsupported offline annotation schema")
+    task = record.get("annotation_task")
+    if task not in _TASK_CONTRACTS:
+        raise ValueError("unsupported annotation_task")
+    contract = _TASK_CONTRACTS[task]
+    if record.get("information_scope") != contract["information_scope"]:
+        raise ValueError("annotation information_scope does not match task")
+    if record.get("prompt_version") != contract["prompt_version"]:
+        raise ValueError("annotation prompt_version does not match task")
+    if record.get("boundary_type") != PRE_PUBLIC_SPEECH:
+        raise ValueError("offline annotation requires PRE_PUBLIC_SPEECH")
+
+    for field_name in (
+        "annotation_run_id",
+        "game_id",
+        "boundary_id",
+        "prompt",
+        "reporter_backend_id",
+        "reporter_model_id",
+    ):
+        _required_text(record.get(field_name), field_name=field_name)
+    _validate_sha(
+        record.get("annotation_code_commit"),
+        field_name="annotation_code_commit",
+        pattern=_GIT_SHA_PATTERN,
+    )
+    _validate_sha(
+        record.get("source_trajectory_commit"),
+        field_name="source_trajectory_commit",
+        pattern=_GIT_SHA_PATTERN,
+    )
+    for field_name in (
+        "trajectory_digest",
+        "observer_view_artifact_digest",
+        "prompt_digest",
+        "record_digest",
+    ):
+        _validate_sha(
+            record.get(field_name),
+            field_name=field_name,
+            pattern=_SHA256_PATTERN,
+        )
+    for field_name in ("step_idx", "observer_id"):
+        value = record.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"{field_name} must be an integer")
+    if record["step_idx"] < 0:
+        raise ValueError("step_idx must be non-negative")
+    if not 1 <= record["observer_id"] <= 7:
+        raise ValueError("observer_id must be in [1, 7]")
+    expected_boundary_id = (
+        f"{record['game_id']}:step_{record['step_idx']:06d}:"
+        f"{PRE_PUBLIC_SPEECH}"
+    )
+    if record["boundary_id"] != expected_boundary_id:
+        raise ValueError("record boundary_id is not canonical")
+
+    source = record.get("source")
+    if not isinstance(source, Mapping) or set(source) != contract["source_fields"]:
+        raise ValueError("annotation source fields do not match task contract")
+    for field_name in (
+        "public_event_count",
+        "public_action_count",
+    ):
+        value = source.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"source.{field_name} must be non-negative integer")
+    for field_name in ("public_event_digest", "structured_input_digest"):
+        _validate_sha(
+            source.get(field_name),
+            field_name=f"source.{field_name}",
+            pattern=_SHA256_PATTERN,
+        )
+    hard_knowledge = None
+    if task == PRIVATE_CONDITIONED_SUSPICION_TASK:
+        _validate_sha(
+            source.get("observation_digest"),
+            field_name="source.observation_digest",
+            pattern=_SHA256_PATTERN,
+        )
+        hard_knowledge = source.get("derived_hard_knowledge")
+        if not isinstance(hard_knowledge, Mapping) or set(hard_knowledge) != {
+            "known_werewolves",
+            "known_non_werewolves",
+        }:
+            raise ValueError("derived_hard_knowledge fields do not match contract")
+        known_werewolves = _validate_player_set(
+            hard_knowledge["known_werewolves"],
+            field_name="known_werewolves",
+        )
+        known_non_werewolves = _validate_player_set(
+            hard_knowledge["known_non_werewolves"],
+            field_name="known_non_werewolves",
+        )
+        if set(known_werewolves) & set(known_non_werewolves):
+            raise ValueError("derived hard knowledge conflicts")
+
+    if record["prompt_digest"] != canonical_digest(record["prompt"]):
+        raise ValueError("prompt_digest does not match prompt")
+    request_parameters = record.get("request_parameters")
+    if not isinstance(request_parameters, Mapping) or set(request_parameters) != {
+        "temperature",
+        "max_tokens",
+        "response_format",
+        "extra_body",
+    }:
+        raise ValueError("request_parameters fields do not match contract")
+    if (
+        type(request_parameters["temperature"]) is not float
+        or request_parameters["temperature"] != ANNOTATION_TEMPERATURE
+    ):
+        raise ValueError("request temperature does not match V1")
+    if (
+        type(request_parameters["max_tokens"]) is not int
+        or request_parameters["max_tokens"] != ANNOTATION_MAX_TOKENS
+    ):
+        raise ValueError("request max_tokens does not match V1")
+    if request_parameters["extra_body"] != ANNOTATION_EXTRA_BODY:
+        raise ValueError("request extra_body does not match V1")
+    if request_parameters["response_format"] not in (
+        {"type": "json_object"},
+        _response_format(supports_json_schema=True),
+    ):
+        raise ValueError("request response_format does not match V1")
+
+    status = record.get("status")
+    if status not in ANNOTATION_STATUSES:
+        raise ValueError("unsupported annotation status")
+    raw_response = record.get("raw_response")
+    error = record.get("error")
+    result = record.get("result")
+    if status == STATUS_OK:
+        if not isinstance(raw_response, str):
+            raise TypeError("ok annotation requires text raw_response")
+        if error is not None:
+            raise ValueError("ok annotation requires null error")
+        if not isinstance(result, Mapping) or set(result) != {
+            "suspected_werewolves"
+        }:
+            raise ValueError("ok annotation result fields do not match contract")
+        suspected = _validate_player_set(
+            result["suspected_werewolves"],
+            field_name="suspected_werewolves",
+        )
+        try:
+            parsed_response = PlayingAgentBeliefReporter.parse_response(
+                raw_response
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ok raw_response is not a valid result") from exc
+        if parsed_response != suspected:
+            raise ValueError("ok raw_response and result do not match")
+        if hard_knowledge is not None:
+            PlayingAgentBeliefReporter.validate_semantics(
+                observer_id=record["observer_id"],
+                suspected_werewolves=suspected,
+                known_werewolves=hard_knowledge["known_werewolves"],
+                known_non_werewolves=hard_knowledge["known_non_werewolves"],
+            )
+    elif status in {STATUS_PARSE_ERROR, STATUS_SEMANTIC_ERROR}:
+        if not isinstance(raw_response, str):
+            raise TypeError(f"{status} requires text raw_response")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError(f"{status} requires non-empty error")
+        if result is not None:
+            raise ValueError(f"{status} requires null result")
+    else:
+        if raw_response is not None and not isinstance(raw_response, str):
+            raise TypeError("reporter_error raw_response must be text or null")
+        if not isinstance(error, str) or not error.strip():
+            raise ValueError("reporter_error requires non-empty error")
+        if result is not None:
+            raise ValueError("reporter_error requires null result")
+
+    payload = dict(record)
+    payload.pop("record_digest")
+    if record["record_digest"] != canonical_digest(payload):
+        raise ValueError("record_digest does not match record")
+    return dict(record)
 
 
 def _validate_digest(
@@ -144,6 +412,11 @@ def _validate_frozen_inputs(
         raise ValueError("unsupported public-event schema")
     if trajectory.get("simulator_baseline") != SIMULATOR_BASELINE:
         raise ValueError("unsupported simulator baseline")
+    _validate_sha(
+        trajectory.get("source_commit"),
+        field_name="trajectory.source_commit",
+        pattern=_GIT_SHA_PATTERN,
+    )
     if provenance.get("source_commit") != trajectory.get("source_commit"):
         raise ValueError("A/C0 source_commit mismatch")
     if provenance.get("simulator_baseline") != trajectory.get(
@@ -237,11 +510,38 @@ def _validated_pre_boundaries(
         if boundary.get("boundary_type") == PRE_PUBLIC_SPEECH:
             if boundary.get("speech_event_idx") is not None:
                 raise ValueError("PRE boundary cannot have a speech_event_idx")
+            expected_boundary_id = (
+                f"{trajectory['game_id']}:step_{step_idx:06d}:"
+                f"{PRE_PUBLIC_SPEECH}"
+            )
+            if boundary_id != expected_boundary_id:
+                raise ValueError("PRE boundary_id is not canonical")
+            speaker_id = boundary.get("speaker_id")
+            if (
+                isinstance(speaker_id, bool)
+                or not isinstance(speaker_id, int)
+                or not 1 <= speaker_id <= 7
+            ):
+                raise ValueError("PRE speaker_id must be an integer in [1, 7]")
+            if boundary.get("speech_kind") not in {"speech", "speech_pk"}:
+                raise ValueError("PRE speech_kind is not canonical")
+            if (
+                not prefix
+                or prefix[-1].get("event_type") != "turn_start"
+                or prefix[-1].get("speaker") != f"player{speaker_id}"
+            ):
+                raise ValueError(
+                    "PRE public prefix must end with the boundary speaker turn_start"
+                )
             transitions = trajectory["transitions"]
             if step_idx < len(transitions):
                 expected_count = transitions[step_idx][
                     "public_event_count_before"
                 ]
+                if transitions[step_idx].get("acting_player_id") != speaker_id:
+                    raise ValueError(
+                        "PRE boundary speaker does not match transition actor"
+                    )
             elif step_idx == len(transitions):
                 expected_count = len(public_events)
             else:
@@ -403,6 +703,11 @@ def annotate_pre_speech_suspicion(
         annotation_code_commit,
         field_name="annotation_code_commit",
     )
+    _validate_sha(
+        annotation_code_commit,
+        field_name="annotation_code_commit",
+        pattern=_GIT_SHA_PATTERN,
+    )
     backend_id = _required_text(backend_id, field_name="backend_id")
     model_name = _required_text(model_name, field_name="model_name")
     if backend is None or not hasattr(backend, "chat"):
@@ -465,6 +770,15 @@ def annotate_pre_speech_suspicion(
                 observation_digest = observer_view.get("observation_digest")
                 if canonical_digest(observation) != observation_digest:
                     raise ValueError("private observation_digest mismatch")
+                if observation.get("observer_id") != observer_id:
+                    raise ValueError(
+                        "private observation observer_id does not match view"
+                    )
+                if observation.get("current_act_idx") != boundary["speaker_id"]:
+                    raise ValueError(
+                        "private observation current actor does not match "
+                        "PRE speaker"
+                    )
                 hard = BeliefReporter.derive_hard_knowledge(
                     observer_id,
                     observation,
@@ -544,6 +858,7 @@ def annotate_pre_speech_suspicion(
                 "result": result,
             }
             record["record_digest"] = canonical_digest(record)
+            validate_offline_annotation_record(record)
             records.append(record)
     return records
 
@@ -569,7 +884,7 @@ def write_annotation_jsonl(
     if ordering != sorted(ordering):
         raise ValueError("records are not in canonical annotation order")
     for record in materialized:
-        _validate_digest(record, digest_field="record_digest")
+        validate_offline_annotation_record(record)
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -611,5 +926,6 @@ __all__ = [
     "PUBLIC_ONLY_SUSPICION_TASK",
     "PUBLIC_PROMPT_VERSION",
     "annotate_pre_speech_suspicion",
+    "validate_offline_annotation_record",
     "write_annotation_jsonl",
 ]
