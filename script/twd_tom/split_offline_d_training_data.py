@@ -42,12 +42,14 @@ def _sha256(path: Path) -> str:
 
 
 def _split_code_commit() -> str:
+    repo_root = Path(__file__).resolve().parents[2]
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
+            cwd=repo_root,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("cannot resolve the splitter code commit") from exc
@@ -288,7 +290,6 @@ def split_offline_d_training_data(
                 raise RuntimeError("written ToM2 records differ from source D")
 
             split_summaries[split_name] = {
-                "game_ids": split_game_ids[split_name],
                 "game_count": game_counts[split_name],
                 "tom1_row_count": len(reread_tom1),
                 "tom2_row_count": len(reread_tom2),
@@ -321,7 +322,10 @@ def split_offline_d_training_data(
                 tom2_records,
                 materialization_task=OFFLINE_PUBLIC_ONLY_TOM2_TASK,
             ),
-            "game_ids": sorted(tom1_game_ids),
+            "game_ids": {
+                split_name: split_game_ids[split_name]
+                for split_name in SPLIT_NAMES
+            },
             "splits": split_summaries,
             "game_id_sets_equal": True,
             "tom1_step_set_equals_tom2_step_set_required": False,

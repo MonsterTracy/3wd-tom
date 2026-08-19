@@ -212,9 +212,7 @@ def test_split_contract_preserves_d_records_and_provenance(
     assert manifest["d_materialization_policy_version"] == (
         D_MATERIALIZATION_POLICY_VERSION
     )
-    assert manifest["game_ids"] == sorted(
-        {record["game_id"] for record in tom1_source}
-    )
+    assert set(manifest["game_ids"]) == set(SPLIT_NAMES)
     assert manifest["game_id_sets_equal"] is True
     assert manifest["tom1_step_set_equals_tom2_step_set_required"] is False
     assert manifest["game_overlap"] is False
@@ -234,11 +232,11 @@ def test_split_contract_preserves_d_records_and_provenance(
     }
 
     source_by_order = {"tom1": tom1_source, "tom2": tom2_source}
+    source_game_ids = {record["game_id"] for record in tom1_source}
     seen_games = set()
     for split_name in SPLIT_NAMES:
         summary = manifest["splits"][split_name]
         assert set(summary) == {
-            "game_ids",
             "game_count",
             "tom1_row_count",
             "tom2_row_count",
@@ -246,7 +244,10 @@ def test_split_contract_preserves_d_records_and_provenance(
             "tom2_file_sha256",
         }
         assert summary["game_count"] == 1
-        split_games = set(summary["game_ids"])
+        split_games = set(manifest["game_ids"][split_name])
+        assert summary["game_count"] == len(
+            manifest["game_ids"][split_name]
+        )
         assert not seen_games & split_games
         seen_games.update(split_games)
         for tom_order in ("tom1", "tom2"):
@@ -269,7 +270,7 @@ def test_split_contract_preserves_d_records_and_provenance(
             assert summary[f"{tom_order}_row_count"] == len(output_records)
             assert summary[f"{tom_order}_file_sha256"] == _sha256(output_path)
 
-    assert seen_games == set(manifest["game_ids"])
+    assert seen_games == source_game_ids
     assert json.loads((output_dir / "manifest.json").read_text()) == manifest
     payload = deepcopy(manifest)
     digest = payload.pop("manifest_digest")
@@ -303,21 +304,48 @@ def test_hash_assignment_and_output_jsonl_are_input_order_independent(
     first = _split(first_tom1, first_tom2, first_output, split_seed=17)
     second = _split(second_tom1, second_tom2, second_output, split_seed=17)
 
-    ranked = _expected_rank(set(first["game_ids"]), 17)
-    assert first["splits"]["train"]["game_ids"] == ranked[:1]
-    assert first["splits"]["validation"]["game_ids"] == ranked[1:2]
-    assert first["splits"]["test"]["game_ids"] == ranked[2:]
-    assert {
-        name: first["splits"][name]["game_ids"] for name in SPLIT_NAMES
-    } == {
-        name: second["splits"][name]["game_ids"] for name in SPLIT_NAMES
-    }
+    all_game_ids = set().union(
+        *(set(game_ids) for game_ids in first["game_ids"].values())
+    )
+    ranked = _expected_rank(all_game_ids, 17)
+    assert first["game_ids"]["train"] == ranked[:1]
+    assert first["game_ids"]["validation"] == ranked[1:2]
+    assert first["game_ids"]["test"] == ranked[2:]
+    assert first["game_ids"] == second["game_ids"]
     for tom_order in ("tom1", "tom2"):
         for split_name in SPLIT_NAMES:
             relative = Path(tom_order) / f"{split_name}.jsonl"
             assert (first_output / relative).read_bytes() == (
                 second_output / relative
             ).read_bytes()
+
+
+def test_split_code_commit_runs_git_from_splitter_repository(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return type("Result", (), {"stdout": f"{SPLITTER_COMMIT}\n"})()
+
+    monkeypatch.setattr(splitter_module.subprocess, "run", fake_run)
+    assert splitter_module._split_code_commit() == SPLITTER_COMMIT
+    assert calls == [
+        (
+            ["git", "rev-parse", "HEAD"],
+            {
+                "check": True,
+                "capture_output": True,
+                "text": True,
+                "cwd": Path(splitter_module.__file__).resolve().parents[2],
+            },
+        )
+    ]
+
+
+def test_split_code_commit_is_independent_of_process_cwd(tmp_path, monkeypatch):
+    expected = splitter_module._split_code_commit()
+    monkeypatch.chdir(tmp_path)
+    assert splitter_module._split_code_commit() == expected
 
 
 @pytest.mark.parametrize(
