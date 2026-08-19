@@ -102,6 +102,7 @@ def eval(
     call_audit=None,
     tom2_shadow=None,
     tom_collector=None,
+    trajectory_recorder=None,
 ):
     """Run one game and optionally collect subjective ToM samples.
 
@@ -112,6 +113,9 @@ def eval(
     The formal ToM and PBM routes collect after that speech completes and
     before the next action. Formal labels use each alive observer's legal
     post-speech observation.
+
+    The optional trajectory recorder materializes PRE views before legacy
+    collectors and POST views immediately after a successful environment step.
     """
 
     for agent in agent_list:
@@ -121,6 +125,11 @@ def eval(
     obs = env.reset(
         roles=roles_,
     )
+    if trajectory_recorder is not None:
+        trajectory_recorder.start(
+            env,
+            roles=roles_,
+        )
     step_idx = 0
     info = None
 
@@ -131,6 +140,19 @@ def eval(
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
         action_round = getattr(env, "day", None)
+
+        if trajectory_recorder is not None:
+            trajectory_recorder.before_agent_act(
+                env,
+                step_idx=step_idx,
+                acting_player_id=current_act_idx,
+                delivered_observation=obs,
+                speech_kind=(
+                    trigger
+                    if trigger in PUBLIC_SPEECH_EVENTS
+                    else None
+                ),
+            )
 
         post_speech_collection = (
             sample_collector is not None
@@ -168,12 +190,41 @@ def eval(
             if call_audit is not None
             else nullcontext()
         )
-        with audit_context:
-            action = agent_list[current_act_idx - 1].act(obs)
+        action = None
+        try:
+            with audit_context:
+                action = agent_list[current_act_idx - 1].act(obs)
+        except Exception as exc:
+            if trajectory_recorder is not None:
+                if action is not None:
+                    trajectory_recorder.after_agent_act(action)
+                trajectory_recorder.fail(
+                    failure_stage="agent_act",
+                    exception=exc,
+                )
+            raise
 
-        obs, _, done, info = env.step(
-            action
-        )
+        if trajectory_recorder is not None:
+            trajectory_recorder.after_agent_act(action)
+
+        try:
+            obs, _, done, info = env.step(
+                action
+            )
+        except Exception as exc:
+            if trajectory_recorder is not None:
+                trajectory_recorder.fail(
+                    failure_stage="env_step",
+                    exception=exc,
+                )
+            raise
+
+        if trajectory_recorder is not None:
+            trajectory_recorder.after_env_step(
+                env,
+                observation_after=obs,
+                terminal_after=done,
+            )
 
         if trigger in PUBLIC_SPEECH_EVENTS and tom_collector is not None:
             tom_collector.record(
@@ -201,9 +252,19 @@ def eval(
         )
 
     if info.get("Werewolf") == 1:
+        if trajectory_recorder is not None:
+            trajectory_recorder.complete(
+                env,
+                winner="Werewolf",
+            )
         return "Werewolf win"
 
     if info.get("Werewolf") == -1:
+        if trajectory_recorder is not None:
+            trajectory_recorder.complete(
+                env,
+                winner="Villager",
+            )
         return "Villager win"
 
     raise RuntimeError(
