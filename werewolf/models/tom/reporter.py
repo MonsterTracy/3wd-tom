@@ -23,8 +23,19 @@ FORMAL_REPORTER_JSON_INSTRUCTION = (
 
 def _log_payload(log: Any) -> dict[str, Any]:
     fields = ("event", "source", "target", "content", "day", "time")
+    if isinstance(log, Mapping):
+        if set(log) != {*fields, "viewer"}:
+            raise TypeError(
+                "serialized observation game_log fields do not match contract"
+            )
+        return {
+            field: deepcopy(log[field])
+            for field in fields
+        }
     if any(not hasattr(log, field) for field in fields):
-        raise TypeError("observation game_log entries must be Log objects")
+        raise TypeError(
+            "observation game_log entries must be Log objects or mappings"
+        )
     return {
         field: deepcopy(getattr(log, field))
         for field in fields
