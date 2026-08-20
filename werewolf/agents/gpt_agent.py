@@ -66,6 +66,7 @@ class GPTAgent(LLMAgent):
     def act(self, observation):
         phase = observation["phase"]
         is_speech = "speech" in phase
+        speech_kind = "speech_pk" if "speech_pk" in phase else "speech"
         is_vote = "vote" in phase
         is_night = any(name in phase for name in _CONSTRAINED_NIGHT_PHASES)
         is_strict = self.gameplay_prompt_profile == STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
@@ -110,7 +111,7 @@ class GPTAgent(LLMAgent):
                 for discussion_act in discussion_acts
             ]
             return (
-                "speech",
+                speech_kind,
                 {
                     "raw_text": raw_text,
                     "sp_actions": sp_actions,
@@ -151,7 +152,7 @@ class GPTAgent(LLMAgent):
                 player_id=observation.get("current_act_idx"),
                 phase=phase,
             )
-            return ("speech", self.extract_answer(content.strip()))
+            return (speech_kind, self.extract_answer(content.strip()))
 
         if is_vote:
             raise BackendError(

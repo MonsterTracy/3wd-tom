@@ -84,9 +84,9 @@ def _belief(player_id=1, *, role="unknown"):
     )
 
 
-def _structured_speech(speaker, raw_text, *actions):
+def _structured_speech(speaker, raw_text, *actions, kind="speech"):
     return (
-        "speech",
+        kind,
         {
             "raw_text": raw_text,
             "sp_actions": [
@@ -1501,6 +1501,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 "我质疑 player3。\n这一轮我建议投票放逐 player5。",
                 ("oppose", 3),
                 ("vote_intent", 5),
+                kind="speech_pk",
             ),
         )
         self.assertEqual(len(backend.calls), 1)
@@ -1519,6 +1520,21 @@ class GameplayCognitionTest(unittest.TestCase):
             "schema"
         ]["properties"]["public_vote_stance_index"]
         self.assertEqual(stance_schema["enum"], [0, 1, 2, 3, 4])
+
+    def test_legacy_pk_speech_preserves_environment_action_kind(self):
+        backend = MetadataBackend(["公开发言"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="legacy",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(_observation("2_day_speech_pk")),
+            ("speech_pk", "公开发言"),
+        )
+        self.assertEqual(len(backend.calls), 1)
 
     def test_day_logs_only_cognition_stage(self):
         with tempfile.TemporaryDirectory() as tmp:
