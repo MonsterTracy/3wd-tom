@@ -103,6 +103,16 @@ class DayCognitionReportV2:
     evidence_claim_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class DayCognitionReportV3:
+    belief: str
+    concise: str
+    roles: dict[str, str]
+    public_content_action_indices: tuple[int, ...]
+    public_vote_stance_index: int
+    evidence_claim_ids: tuple[str, ...]
+
+
 def belief_response_format(*, supports_json_schema, role_options):
     if supports_json_schema is not True:
         raise BackendError("belief generation requires backend JSON Schema support")
@@ -243,6 +253,94 @@ def day_cognition_response_format_v2(
             },
         },
     }
+
+
+def _ranked_selection_schema(*, first_field, first_schema, candidate_count):
+    variants = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["mode"],
+            "properties": {
+                "mode": {"type": "string", "enum": ["none"]},
+            },
+        }
+    ]
+    if candidate_count >= 1:
+        variants.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mode", first_field],
+                "properties": {
+                    "mode": {"type": "string", "enum": ["one"]},
+                    first_field: first_schema,
+                },
+            }
+        )
+    if candidate_count >= 2:
+        variants.append(
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mode", first_field, "second_rank"],
+                "properties": {
+                    "mode": {"type": "string", "enum": ["two"]},
+                    first_field: first_schema,
+                    "second_rank": {
+                        "type": "integer",
+                        "enum": list(range(candidate_count - 1)),
+                    },
+                },
+            }
+        )
+    return {"oneOf": variants}
+
+
+def day_cognition_response_format_v3(
+    *,
+    supports_json_schema,
+    role_options,
+    candidate_snapshot,
+    claim_ids,
+):
+    response_format = day_cognition_response_format_v2(
+        supports_json_schema=supports_json_schema,
+        role_options=role_options,
+        candidate_snapshot=candidate_snapshot,
+        claim_ids=claim_ids,
+    )
+    if len(set(claim_ids)) != len(claim_ids):
+        raise TypeError("claim_ids must be a unique tuple of strings")
+
+    content_indices = project_discussion_content_indices(candidate_snapshot)
+    response_format["json_schema"]["name"] = "day_cognition_report_v3"
+    schema = response_format["json_schema"]["schema"]
+    schema["required"] = [
+        "belief",
+        "concise",
+        "roles",
+        "public_content_selection",
+        "public_vote_stance_index",
+        "evidence_selection",
+    ]
+    properties = schema["properties"]
+    properties.pop("public_content_action_indices")
+    properties.pop("evidence_claim_ids")
+    properties["public_content_selection"] = _ranked_selection_schema(
+        first_field="first_index",
+        first_schema={
+            "type": "integer",
+            "enum": list(content_indices),
+        },
+        candidate_count=len(content_indices),
+    )
+    properties["evidence_selection"] = _ranked_selection_schema(
+        first_field="first_claim_id",
+        first_schema={"type": "string", "enum": list(claim_ids)},
+        candidate_count=len(claim_ids),
+    )
+    return response_format
 
 
 def parse_belief_response(
@@ -418,6 +516,155 @@ def parse_day_cognition_response_v2(
     )
 
 
+def decode_public_content_selection(selection, *, candidate_snapshot):
+    content_indices = project_discussion_content_indices(candidate_snapshot)
+    if not isinstance(selection, dict):
+        raise BeliefValidationError("invalid public_content_selection")
+    mode = selection.get("mode")
+    expected_fields = {
+        "none": {"mode"},
+        "one": {"mode", "first_index"},
+        "two": {"mode", "first_index", "second_rank"},
+    }.get(mode)
+    if expected_fields is None or set(selection) != expected_fields:
+        raise BeliefValidationError("invalid public_content_selection")
+    if mode == "none":
+        return ()
+
+    first_index = selection["first_index"]
+    if (
+        isinstance(first_index, bool)
+        or not isinstance(first_index, int)
+        or first_index not in content_indices
+    ):
+        raise BeliefValidationError("invalid public content first_index")
+    if mode == "one":
+        return (first_index,)
+
+    second_rank = selection["second_rank"]
+    remaining = tuple(
+        index for index in content_indices if index != first_index
+    )
+    if (
+        isinstance(second_rank, bool)
+        or not isinstance(second_rank, int)
+        or not 0 <= second_rank < len(remaining)
+    ):
+        raise BeliefValidationError("invalid public content second_rank")
+    return (first_index, remaining[second_rank])
+
+
+def decode_evidence_selection(selection, *, claim_ids):
+    if (
+        not isinstance(claim_ids, tuple)
+        or any(not isinstance(claim_id, str) for claim_id in claim_ids)
+        or len(set(claim_ids)) != len(claim_ids)
+    ):
+        raise BeliefValidationError("invalid public claim catalog")
+    if not isinstance(selection, dict):
+        raise BeliefValidationError("invalid evidence_selection")
+    mode = selection.get("mode")
+    expected_fields = {
+        "none": {"mode"},
+        "one": {"mode", "first_claim_id"},
+        "two": {"mode", "first_claim_id", "second_rank"},
+    }.get(mode)
+    if expected_fields is None or set(selection) != expected_fields:
+        raise BeliefValidationError("invalid evidence_selection")
+    if mode == "none":
+        return ()
+
+    first_claim_id = selection["first_claim_id"]
+    if first_claim_id not in claim_ids:
+        raise BeliefValidationError("invalid evidence first_claim_id")
+    if mode == "one":
+        return (first_claim_id,)
+
+    second_rank = selection["second_rank"]
+    remaining = tuple(
+        claim_id for claim_id in claim_ids if claim_id != first_claim_id
+    )
+    if (
+        isinstance(second_rank, bool)
+        or not isinstance(second_rank, int)
+        or not 0 <= second_rank < len(remaining)
+    ):
+        raise BeliefValidationError("invalid evidence second_rank")
+    return (first_claim_id, remaining[second_rank])
+
+
+def parse_day_cognition_response_v3(
+    raw_response,
+    *,
+    player_id,
+    self_role,
+    phase,
+    exact_roles,
+    role_options,
+    candidate_snapshot,
+    claim_ids,
+):
+    context = f"player={player_id}, phase={phase}"
+    try:
+        payload = json.loads(raw_response)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise BeliefValidationError(
+            f"Day cognition response is not valid JSON ({context})"
+        ) from exc
+    required_fields = {
+        "belief",
+        "concise",
+        "roles",
+        "public_content_selection",
+        "public_vote_stance_index",
+        "evidence_selection",
+    }
+    if not isinstance(payload, dict) or set(payload) != required_fields:
+        raise BeliefValidationError(
+            f"Day cognition V3 fields do not match contract ({context})"
+        )
+
+    content_indices = decode_public_content_selection(
+        payload["public_content_selection"],
+        candidate_snapshot=candidate_snapshot,
+    )
+    evidence_claim_ids = decode_evidence_selection(
+        payload["evidence_selection"],
+        claim_ids=claim_ids,
+    )
+    normalized = parse_day_cognition_response_v2(
+        json.dumps(
+            {
+                "belief": payload["belief"],
+                "concise": payload["concise"],
+                "roles": payload["roles"],
+                "public_content_action_indices": list(content_indices),
+                "public_vote_stance_index": payload[
+                    "public_vote_stance_index"
+                ],
+                "evidence_claim_ids": list(evidence_claim_ids),
+            }
+        ),
+        player_id=player_id,
+        self_role=self_role,
+        phase=phase,
+        exact_roles=exact_roles,
+        role_options=role_options,
+        candidate_snapshot=candidate_snapshot,
+        claim_ids=claim_ids,
+    )
+    return DayCognitionReportV3(
+        belief=normalized.belief,
+        concise=normalized.concise,
+        roles=normalized.roles,
+        public_content_action_indices=(
+            normalized.public_content_action_indices
+        ),
+        public_vote_stance_index=normalized.public_vote_stance_index,
+        evidence_claim_ids=normalized.evidence_claim_ids,
+    )
+
+
 def validate_role_report(
     report,
     *,
@@ -430,7 +677,10 @@ def validate_role_report(
     """Validate one role report without judging subjective guesses by truth."""
 
     context = f"player={player_id}, phase={phase}"
-    if not isinstance(report, (BeliefReport, DayCognitionReportV2)):
+    if not isinstance(
+        report,
+        (BeliefReport, DayCognitionReportV2, DayCognitionReportV3),
+    ):
         raise RoleReportValidationError(f"invalid role report ({context})")
     final_players = {
         f"player{candidate}"

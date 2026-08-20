@@ -1049,8 +1049,10 @@ DISCUSSION ACTION SEMANTICS
 These are communication semantics only. They are never truth labels.
 
 DISCUSSION INTENT OUTPUT
-Choose 0 to 2 unique public_content_action_indices, in intended public order,
-from this deterministic projection of the frozen canonical candidate snapshot:
+Set public_content_selection.mode to none, one or two. For one, first_index is
+one absolute index from this deterministic projection of the frozen canonical
+candidate snapshot. For two, first_index is the first absolute index and
+second_rank is the zero-based rank in the same list after removing first_index:
 {content_candidate_text}
 Choose exactly one public_vote_stance_index from this deterministic projection:
 {vote_stance_text}
@@ -1061,7 +1063,9 @@ selected, the program represents the empty discussion intent canonically.
 These indices describe only what the current speaker intends to communicate
 publicly. They are public claim/positioning primitives, not truth labels.
 Strategic deception and bluff remain allowed within this frozen candidate space.
-Choose 0 to 2 unique evidence_claim_ids from the visible public claim catalog:
+Set evidence_selection.mode to none, one or two. For one, first_claim_id is from
+the visible public claim catalog. For two, first_claim_id is first and
+second_rank is the zero-based rank in the catalog after removing that claim:
 {json.dumps(claim_ids)}
 Choose claims you consider relevant evidence for the current cognition and
 discussion-intent decision. The selected IDs form an internal linkage record for
@@ -1070,8 +1074,8 @@ those claims in public speech. Selection does not assert truth or falsity and do
 not prove causal influence on the belief or action. Do not provide a reason,
 confidence, strategy name, expected reaction, or any free-text public plan.
 Return only the JSON object required by the response schema. The six fields are
-belief, concise, roles, public_content_action_indices, public_vote_stance_index
-and evidence_claim_ids."""
+belief, concise, roles, public_content_selection, public_vote_stance_index and
+evidence_selection."""
 
 
 def build_vote_prompt(observation, belief, legal_targets):

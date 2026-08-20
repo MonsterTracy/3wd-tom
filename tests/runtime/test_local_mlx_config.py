@@ -529,11 +529,11 @@ def test_server_qwen_gameplay_limit_reaches_chat_completions(
                     f"player{player_id}": "unknown"
                     for player_id in range(2, 8)
                 },
-                "public_content_action_indices": [],
+                "public_content_selection": {"mode": "none"},
                 "public_vote_stance_index": 0,
-                "evidence_claim_ids": [],
+                "evidence_selection": {"mode": "none"},
             }, ensure_ascii=False)
-            if response_name == "day_cognition_report_v2"
+            if response_name == "day_cognition_report_v3"
             else "这是公开发言。"
         )
         return _success_response(request, content=content)

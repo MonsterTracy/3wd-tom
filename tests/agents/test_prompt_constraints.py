@@ -344,7 +344,12 @@ Villager: {3}""".format(*counts)
         self.assertNotIn("DISCUSSION ACTION COMPATIBILITY", day_prompt)
         self.assertNotIn("public_action_indices", day_prompt)
         self.assertIn(
-            "Choose 0 to 2 unique public_content_action_indices",
+            "Set public_content_selection.mode to none, one or two",
+            day_prompt,
+        )
+        self.assertIn(
+            "second_rank is the zero-based rank in the same list after "
+            "removing first_index",
             day_prompt,
         )
         self.assertIn(
@@ -361,14 +366,23 @@ Villager: {3}""".format(*counts)
         )
         self.assertIn("no_commitment is not selectable", day_prompt)
         self.assertIn(
+            "Set evidence_selection.mode to none, one or two",
+            day_prompt,
+        )
+        self.assertIn(
+            "second_rank is the zero-based rank in the catalog after "
+            "removing that claim",
+            day_prompt,
+        )
+        self.assertIn(
             "public content is empty and NO_STANCE is\n"
             "selected, the program represents the empty discussion intent "
             "canonically",
             day_prompt,
         )
         content_candidates = day_prompt.split(
-            "from this deterministic projection of the frozen canonical "
-            "candidate snapshot:\n",
+            "second_rank is the zero-based rank in the same list after "
+            "removing first_index:\n",
             1,
         )[1].split(
             "\nChoose exactly one public_vote_stance_index",

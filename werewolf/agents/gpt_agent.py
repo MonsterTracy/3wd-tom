@@ -7,10 +7,10 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     RoleReportValidationError,
     belief_response_format,
-    day_cognition_response_format_v2,
+    day_cognition_response_format_v3,
     night_action_response_format,
     parse_belief_response,
-    parse_day_cognition_response_v2,
+    parse_day_cognition_response_v3,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -238,7 +238,7 @@ class GPTAgent(LLMAgent):
             player_log_context={"stage": "belief", "observation": observation},
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=day_cognition_response_format_v2(
+            response_format=day_cognition_response_format_v3(
                 supports_json_schema=getattr(
                     self.backend,
                     "supports_json_schema",
@@ -255,7 +255,7 @@ class GPTAgent(LLMAgent):
                 f"Day cognition response was truncated "
                 f"(player={player_id}, phase={phase!r})"
             )
-        report = parse_day_cognition_response_v2(
+        report = parse_day_cognition_response_v3(
             content,
             player_id=player_id,
             self_role=observation.get("identity"),

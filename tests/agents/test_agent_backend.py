@@ -11,13 +11,18 @@ from werewolf.agents.llm_agent import (
     BELIEF_ROLES,
     BeliefValidationError,
     DayCognitionReportV2,
+    DayCognitionReportV3,
     GameplayActionValidationError,
     GameplaySpeechQualityError,
     RoleReportValidationError,
     belief_response_format,
     day_cognition_response_format_v2,
+    day_cognition_response_format_v3,
+    decode_evidence_selection,
+    decode_public_content_selection,
     parse_belief_response,
     parse_day_cognition_response_v2,
+    parse_day_cognition_response_v3,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -111,7 +116,21 @@ def _belief_for(role_options, assignments=None):
     )
 
 
-def _day_cognition_from_belief(
+def _ranked_selection(selected, candidates, *, first_field):
+    if not selected:
+        return {"mode": "none"}
+    if len(selected) == 1:
+        return {"mode": "one", first_field: selected[0]}
+    first = selected[0]
+    remaining = [candidate for candidate in candidates if candidate != first]
+    return {
+        "mode": "two",
+        first_field: first,
+        "second_rank": remaining.index(selected[1]),
+    }
+
+
+def _day_cognition_v2_from_belief(
     belief_response,
     observation,
     *,
@@ -131,6 +150,37 @@ def _day_cognition_from_belief(
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _day_cognition_from_belief(
+    belief_response,
+    observation,
+    *,
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence_claim_ids=(),
+):
+    payload = json.loads(belief_response)
+    snapshot = freeze_discussion_candidates(observation)
+    content_indices = project_discussion_content_indices(snapshot)
+    selected_indices = tuple(snapshot.index(action) for action in content_actions)
+    payload["public_content_selection"] = _ranked_selection(
+        selected_indices,
+        content_indices,
+        first_field="first_index",
+    )
+    payload["public_vote_stance_index"] = (
+        project_discussion_vote_stances(snapshot).index(vote_stance)
+    )
+    claim_ids = tuple(
+        claim.claim_id for claim in build_public_claim_catalog(observation)
+    )
+    payload["evidence_selection"] = _ranked_selection(
+        evidence_claim_ids,
+        claim_ids,
+        first_field="first_claim_id",
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _day_cognition(
     observation=None,
     *,
@@ -141,6 +191,24 @@ def _day_cognition(
 ):
     observation = observation or _observation()
     return _day_cognition_from_belief(
+        _belief(observation["current_act_idx"], role=role),
+        observation,
+        content_actions=content_actions,
+        vote_stance=vote_stance,
+        evidence_claim_ids=evidence,
+    )
+
+
+def _day_cognition_v2(
+    observation=None,
+    *,
+    role="unknown",
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence=(),
+):
+    observation = observation or _observation()
+    return _day_cognition_v2_from_belief(
         _belief(observation["current_act_idx"], role=role),
         observation,
         content_actions=content_actions,
@@ -208,6 +276,24 @@ def _parse_belief(raw_response, observation):
 
 
 def _parse_day_cognition(raw_response, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    candidate_snapshot = freeze_discussion_candidates(observation)
+    claim_ids = tuple(
+        claim.claim_id for claim in build_public_claim_catalog(observation)
+    )
+    return parse_day_cognition_response_v3(
+        raw_response,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+        candidate_snapshot=candidate_snapshot,
+        claim_ids=claim_ids,
+    )
+
+
+def _parse_day_cognition_v2(raw_response, observation):
     exact_roles, role_options = derive_belief_constraints(observation)
     candidate_snapshot = freeze_discussion_candidates(observation)
     claim_ids = tuple(
@@ -373,6 +459,242 @@ class GameplayCognitionTest(unittest.TestCase):
             ["claim_000"],
         )
 
+    def test_day_cognition_v3_schema_uses_ranked_selection_objects(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        snapshot = freeze_discussion_candidates(observation)
+        content_indices = project_discussion_content_indices(snapshot)
+        claim_ids = ("claim_000", "claim_001", "claim_002")
+        response_format = day_cognition_response_format_v3(
+            supports_json_schema=True,
+            role_options=role_options,
+            candidate_snapshot=snapshot,
+            claim_ids=claim_ids,
+        )
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(
+            response_format["json_schema"]["name"],
+            "day_cognition_report_v3",
+        )
+        self.assertEqual(
+            set(schema["properties"]),
+            {
+                "belief",
+                "concise",
+                "roles",
+                "public_content_selection",
+                "public_vote_stance_index",
+                "evidence_selection",
+            },
+        )
+        self.assertNotIn("public_content_action_indices", schema["properties"])
+        self.assertNotIn("evidence_claim_ids", schema["properties"])
+
+        content_variants = {
+            variant["properties"]["mode"]["enum"][0]: variant
+            for variant in schema["properties"][
+                "public_content_selection"
+            ]["oneOf"]
+        }
+        self.assertEqual(set(content_variants), {"none", "one", "two"})
+        self.assertEqual(content_variants["none"]["required"], ["mode"])
+        self.assertEqual(
+            content_variants["one"]["properties"]["first_index"]["enum"],
+            list(content_indices),
+        )
+        self.assertEqual(
+            content_variants["two"]["properties"]["second_rank"]["enum"],
+            list(range(len(content_indices) - 1)),
+        )
+
+        evidence_variants = {
+            variant["properties"]["mode"]["enum"][0]: variant
+            for variant in schema["properties"]["evidence_selection"][
+                "oneOf"
+            ]
+        }
+        self.assertEqual(set(evidence_variants), {"none", "one", "two"})
+        self.assertEqual(
+            evidence_variants["one"]["properties"]["first_claim_id"][
+                "enum"
+            ],
+            list(claim_ids),
+        )
+        self.assertEqual(
+            evidence_variants["two"]["properties"]["second_rank"]["enum"],
+            [0, 1],
+        )
+        stance_schema = schema["properties"]["public_vote_stance_index"]
+        self.assertEqual(
+            stance_schema["enum"],
+            list(range(len(project_discussion_vote_stances(snapshot)))),
+        )
+
+    def test_v3_public_content_decoder_is_strict_and_duplicate_free(self):
+        snapshot = freeze_discussion_candidates(_observation())
+        candidates = project_discussion_content_indices(snapshot)
+        first = candidates[0]
+        remaining = tuple(index for index in candidates if index != first)
+
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "none"},
+                candidate_snapshot=snapshot,
+            ),
+            (),
+        )
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "one", "first_index": first},
+                candidate_snapshot=snapshot,
+            ),
+            (first,),
+        )
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "two", "first_index": first, "second_rank": 3},
+                candidate_snapshot=snapshot,
+            ),
+            (first, remaining[3]),
+        )
+        for first_index in candidates:
+            for second_rank in range(len(candidates) - 1):
+                decoded = decode_public_content_selection(
+                    {
+                        "mode": "two",
+                        "first_index": first_index,
+                        "second_rank": second_rank,
+                    },
+                    candidate_snapshot=snapshot,
+                )
+                self.assertNotEqual(decoded[0], decoded[1])
+
+        invalid = (
+            {"mode": "one"},
+            {"mode": "two", "first_index": first, "second_rank": -1},
+            {
+                "mode": "two",
+                "first_index": first,
+                "second_rank": len(candidates) - 1,
+            },
+            {"mode": "many", "first_index": first},
+        )
+        for selection in invalid:
+            with self.subTest(selection=selection), self.assertRaises(
+                BeliefValidationError
+            ):
+                decode_public_content_selection(
+                    selection,
+                    candidate_snapshot=snapshot,
+                )
+
+    def test_v3_evidence_decoder_is_strict_and_duplicate_free(self):
+        claim_ids = ("claim_a", "claim_b", "claim_c")
+        self.assertEqual(
+            decode_evidence_selection(
+                {"mode": "none"},
+                claim_ids=claim_ids,
+            ),
+            (),
+        )
+        self.assertEqual(
+            decode_evidence_selection(
+                {"mode": "one", "first_claim_id": "claim_b"},
+                claim_ids=claim_ids,
+            ),
+            ("claim_b",),
+        )
+        self.assertEqual(
+            decode_evidence_selection(
+                {
+                    "mode": "two",
+                    "first_claim_id": "claim_b",
+                    "second_rank": 1,
+                },
+                claim_ids=claim_ids,
+            ),
+            ("claim_b", "claim_c"),
+        )
+        for first_claim_id in claim_ids:
+            for second_rank in range(len(claim_ids) - 1):
+                decoded = decode_evidence_selection(
+                    {
+                        "mode": "two",
+                        "first_claim_id": first_claim_id,
+                        "second_rank": second_rank,
+                    },
+                    claim_ids=claim_ids,
+                )
+                self.assertNotEqual(decoded[0], decoded[1])
+
+        invalid = (
+            {"mode": "one"},
+            {
+                "mode": "two",
+                "first_claim_id": "claim_a",
+                "second_rank": -1,
+            },
+            {
+                "mode": "two",
+                "first_claim_id": "claim_a",
+                "second_rank": 2,
+            },
+            {"mode": "many", "first_claim_id": "claim_a"},
+        )
+        for selection in invalid:
+            with self.subTest(selection=selection), self.assertRaises(
+                BeliefValidationError
+            ):
+                decode_evidence_selection(selection, claim_ids=claim_ids)
+
+    def test_day_cognition_v3_decodes_to_existing_semantic_transport(self):
+        observation = _observation()
+        observation["game_log"].append(
+            Log(
+                viewer=[1, 2, 3, 4, 5, 6, 7],
+                source=3,
+                target=[1, 2, 3, 4, 5, 6, 7],
+                content={"speech_content": "我支持player4。", "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            )
+        )
+        snapshot = freeze_discussion_candidates(observation)
+        actions = (
+            DiscussionAct("support", 4),
+            DiscussionAct("oppose", 6),
+        )
+        report = _parse_day_cognition(
+            _day_cognition(
+                observation,
+                content_actions=actions,
+                evidence=("claim_000", "claim_001"),
+            ),
+            observation,
+        )
+
+        self.assertIsInstance(report, DayCognitionReportV3)
+        self.assertEqual(
+            tuple(snapshot[index] for index in report.public_content_action_indices),
+            actions,
+        )
+        self.assertEqual(
+            report.evidence_claim_ids,
+            ("claim_000", "claim_001"),
+        )
+        self.assertEqual(
+            compile_discussion_intent_v2(
+                snapshot,
+                public_content_action_indices=(
+                    report.public_content_action_indices
+                ),
+                public_vote_stance_index=report.public_vote_stance_index,
+            ),
+            actions,
+        )
+
     def test_day_cognition_parser_enforces_unicode_character_bounds(self):
         observation = _observation()
         accepted = json.loads(_day_cognition(observation))
@@ -403,8 +725,8 @@ class GameplayCognitionTest(unittest.TestCase):
         snapshot = freeze_discussion_candidates(observation)
 
         def compile_response(content_actions=(), vote_stance=NO_STANCE):
-            report = _parse_day_cognition(
-                _day_cognition(
+            report = _parse_day_cognition_v2(
+                _day_cognition_v2(
                     observation,
                     content_actions=content_actions,
                     vote_stance=vote_stance,
@@ -453,7 +775,7 @@ class GameplayCognitionTest(unittest.TestCase):
     def test_day_cognition_v2_parser_rejects_residual_transport_errors(self):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
-        base = json.loads(_day_cognition(observation))
+        base = json.loads(_day_cognition_v2(observation))
         index = lambda action, target=None: snapshot.index(
             DiscussionAct(action, target)
         )
@@ -516,7 +838,7 @@ class GameplayCognitionTest(unittest.TestCase):
 
         for case, payload in invalid_payloads.items():
             with self.subTest(case=case), self.assertRaises(BeliefValidationError):
-                _parse_day_cognition(json.dumps(payload), observation)
+                _parse_day_cognition_v2(json.dumps(payload), observation)
 
     def test_belief_rejects_extra_cognitive_fields_and_self_role(self):
         observation = _observation()
@@ -793,7 +1115,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 for call in backend.calls
                 if "response_format" in call
                 and call["response_format"]["json_schema"]["name"]
-                == "day_cognition_report_v2"
+                == "day_cognition_report_v3"
             ]
             self.assertEqual(len(belief_calls), 1)
             records = [json.loads(line) for line in path.read_text().splitlines()]
@@ -863,12 +1185,18 @@ class GameplayCognitionTest(unittest.TestCase):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
         invalid_index = json.loads(_day_cognition(observation))
-        invalid_index["public_content_action_indices"] = [len(snapshot)]
+        invalid_index["public_content_selection"] = {
+            "mode": "one",
+            "first_index": len(snapshot),
+        }
         invalid_evidence = json.loads(_day_cognition(observation))
-        invalid_evidence["evidence_claim_ids"] = ["claim_999"]
+        invalid_evidence["evidence_selection"] = {
+            "mode": "one",
+            "first_claim_id": "claim_999",
+        }
         old_v1_payload = json.loads(_day_cognition(observation))
         old_v1_payload["public_action_indices"] = [0]
-        del old_v1_payload["public_content_action_indices"]
+        del old_v1_payload["public_content_selection"]
         del old_v1_payload["public_vote_stance_index"]
 
         for payload in (invalid_index, invalid_evidence, old_v1_payload):
@@ -962,7 +1290,7 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertEqual(len(backend.calls), 1)
         self.assertEqual(
             backend.calls[0]["response_format"]["json_schema"]["name"],
-            "day_cognition_report_v2",
+            "day_cognition_report_v3",
         )
         day_schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
         self.assertEqual(
@@ -971,9 +1299,9 @@ class GameplayCognitionTest(unittest.TestCase):
                 "belief",
                 "concise",
                 "roles",
-                "public_content_action_indices",
+                "public_content_selection",
                 "public_vote_stance_index",
-                "evidence_claim_ids",
+                "evidence_selection",
             },
         )
         cognition_prompt = backend.calls[0]["messages"][0]["content"]
@@ -1059,7 +1387,10 @@ class GameplayCognitionTest(unittest.TestCase):
             self.assertIn(nested_claim, prompt)
         self.assertEqual(
             tuple(
-                tuple(json.loads(record["response"])["evidence_claim_ids"])
+                decode_evidence_selection(
+                    json.loads(record["response"])["evidence_selection"],
+                    claim_ids=("claim_000", "claim_001"),
+                )
                 for record in records
             ),
             evidence_selections,
