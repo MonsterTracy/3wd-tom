@@ -4,7 +4,6 @@ from copy import deepcopy
 import pytest
 
 from werewolf.helper.log_utils import Log
-from werewolf.models.tom.reporter import BeliefReporter
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     public_event_digest,
@@ -13,6 +12,10 @@ from werewolf.models.twd_tom.public_events import (
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
     PUBLIC_ONLY_LABEL_PROMPT_VERSION,
+)
+from werewolf.observer_knowledge import (
+    derive_observer_hard_knowledge,
+    legal_observer_state,
 )
 from werewolf.offline_annotation import (
     ANNOTATION_MAX_TOKENS,
@@ -526,14 +529,14 @@ def test_serialized_and_legacy_logs_derive_identical_hard_knowledge():
         Log(**entry)
         for entry in serialized["game_log"]
     ]
-    assert BeliefReporter.legal_state(1, serialized) == BeliefReporter.legal_state(
+    assert legal_observer_state(1, serialized) == legal_observer_state(
         1,
         legacy,
     )
-    assert BeliefReporter.derive_hard_knowledge(
+    assert derive_observer_hard_knowledge(
         1,
         serialized,
-    ) == BeliefReporter.derive_hard_knowledge(1, legacy)
+    ) == derive_observer_hard_knowledge(1, legacy)
 
 
 @pytest.mark.parametrize(

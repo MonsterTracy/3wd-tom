@@ -1,4 +1,4 @@
-"""Post-speech collection of raw subjective belief reports."""
+"""Archived post-speech collection of raw subjective belief reports."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.schema import (
     SpeechAction,
     normalize_episode_context,
     normalize_player,

@@ -1,4 +1,4 @@
-"""Run exactly two privacy-safe, request-bounded ToM dry-run games.
+"""Archived privacy-safe, request-bounded ToM dry-run games.
 
 This thin harness reuses the production runtime and playing-agent sample
 collector.  It adds only request-boundary auditing and never enables the

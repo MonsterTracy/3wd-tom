@@ -8,8 +8,8 @@ import run_random
 from run_random import build_arg_parser, build_tom_collector, eval
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.helper.log_utils import Log
-from werewolf.models.tom.collection import Collector
-from werewolf.models.tom.reporter import (
+from archive.legacy_tom.werewolf.models.tom.collection import Collector
+from archive.legacy_tom.werewolf.models.tom.reporter import (
     BeliefReporter,
     FORMAL_REPORTER_JSON_INSTRUCTION,
 )

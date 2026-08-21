@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from torch.utils.data import DataLoader
 
-from script.twd_tom.build_dev100_training_data import (
+from archive.legacy_tom.script.twd_tom.build_dev100_training_data import (
     DATASET_ID,
     build_dev100_training_data,
 )

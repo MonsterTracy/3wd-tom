@@ -1,3 +1,5 @@
+"""Archived splitter for projected online-collection records."""
+
 from __future__ import annotations
 
 import argparse
@@ -11,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from script.twd_tom.project_suspicion_to_pairs import (
+from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
     PROJECTED_SAMPLE_FIELDS,
     project_suspicion_sample,
 )

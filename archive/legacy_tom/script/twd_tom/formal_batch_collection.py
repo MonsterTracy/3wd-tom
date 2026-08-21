@@ -1,4 +1,4 @@
-"""Run one monitored formal belief-label collection batch."""
+"""Archived monitored formal belief-label collection batch."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from script.twd_tom.monitored_collection import (
+from archive.legacy_tom.script.twd_tom.monitored_collection import (
     MonitoredCollectionConfig,
     run_monitored_collection,
 )

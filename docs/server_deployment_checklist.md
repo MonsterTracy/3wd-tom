@@ -16,13 +16,13 @@
 14. Verify one bounded `/v1/chat/completions` request.
 15. Run `python -m pytest -q tests/runtime/test_local_mlx_config.py`.
 16. Run the full suite with `python -m pytest -q`.
-17. Run `python -m script.twd_tom.pipeline --config CONFIG --run-id RUN_ID --stage validate` before any data-producing stage.
-18. Choose a new, unique `run_id`.
-19. Ensure `data/tom/`, `logs/tom/`, and `outputs/tom/` are writable.
+17. Choose a new, unique canonical trajectory `run_id` and an absent A/C0 output directory.
+18. Run `python -m script.twd_tom.collect_canonical_trajectories` with explicit config, seed range, game count, and output root.
+19. Ensure the external trajectory, annotation, dataset, and output roots are writable.
 20. Put runtime data, logs, and checkpoints on persistent server storage.
 21. Do not commit runtime artifacts to Git.
-22. Run `collect` successfully before `project`.
-23. Run `project` successfully before `split`.
+22. Produce C1 only from validated paired A/C0 artifacts, then materialize D.
+23. Run `script.twd_tom.split_offline_d_training_data` before training.
 24. Ensure `train` never reads the test split.
 25. Read the test split only during `eval`.
 26. Back up `raw.jsonl`, `projected.jsonl`, the split and run manifests, call

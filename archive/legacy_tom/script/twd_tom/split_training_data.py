@@ -1,4 +1,4 @@
-"""Split first- and second-order ToM data by one shared game assignment."""
+"""Archived splitter for pre-D first- and second-order ToM data."""
 
 from __future__ import annotations
 

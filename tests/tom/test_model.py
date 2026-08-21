@@ -3,9 +3,11 @@ from copy import deepcopy
 import pytest
 import torch
 
-from werewolf.models.tom.dataset import collate_batch, encode_sample
-from werewolf.models.tom.losses import masked_soft_target_cross_entropy
-from werewolf.models.tom.model import (
+from archive.legacy_tom.werewolf.models.tom.dataset import collate_batch, encode_sample
+from archive.legacy_tom.werewolf.models.tom.losses import (
+    masked_soft_target_cross_entropy,
+)
+from archive.legacy_tom.werewolf.models.tom.model import (
     BeliefModel,
     DROPOUT,
     HIDDEN_SIZE,
@@ -13,7 +15,7 @@ from werewolf.models.tom.model import (
     NUM_HEADS,
     NUM_LAYERS,
 )
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.schema import (
     ACTION_TO_ID,
     CONFIG_TO_ID,
     EVENT_TO_ID,

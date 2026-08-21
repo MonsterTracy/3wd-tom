@@ -1,4 +1,4 @@
-"""Minimal schemas for the formal ToM input representation."""
+"""Archived schemas for the formal ToM input representation."""
 
 from __future__ import annotations
 

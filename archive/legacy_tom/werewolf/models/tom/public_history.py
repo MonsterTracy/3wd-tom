@@ -1,4 +1,4 @@
-"""Project the environment public ledger into the formal ToM input."""
+"""Archived projection of the public ledger into formal ToM input."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.schema import (
     SpeechAction,
     normalize_episode_context,
     normalize_player,

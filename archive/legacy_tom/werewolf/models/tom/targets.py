@@ -1,11 +1,14 @@
-"""Deterministic targets from raw subjective belief reports."""
+"""Archived targets from raw subjective belief reports."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from werewolf.models.tom.schema import PLAYER_NAMES, normalize_player
+from archive.legacy_tom.werewolf.models.tom.schema import (
+    PLAYER_NAMES,
+    normalize_player,
+)
 
 
 def _canonical_player(value: Any, *, field: str) -> str:

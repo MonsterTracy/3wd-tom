@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 
-from werewolf.models.tom.public_history import build_model_input
+from archive.legacy_tom.werewolf.models.tom.public_history import build_model_input
 
 
 def ledger():

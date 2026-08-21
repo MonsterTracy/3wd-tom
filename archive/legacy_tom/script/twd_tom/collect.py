@@ -1,4 +1,4 @@
-"""Collect one classic-seven pre-speech subjective ToM game.
+"""Archived collection of one pre-speech subjective ToM game.
 
 This is the only dedicated real-data collection entry point.
 

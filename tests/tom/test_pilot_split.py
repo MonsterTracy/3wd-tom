@@ -4,8 +4,8 @@ from copy import deepcopy
 
 import pytest
 
-from script.tom.split_pilot import prepare_pilot_split
-from werewolf.models.tom.dataset import encode_sample
+from archive.legacy_tom.script.tom.split_pilot import prepare_pilot_split
+from archive.legacy_tom.werewolf.models.tom.dataset import encode_sample
 
 
 def _prepare(

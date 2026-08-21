@@ -8,7 +8,7 @@ import httpx
 import openai
 import pytest
 
-import script.twd_tom.real_backend_dry_run as dry_run
+import archive.legacy_tom.script.twd_tom.real_backend_dry_run as dry_run
 from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import (
     GameplaySpeechQualityError,

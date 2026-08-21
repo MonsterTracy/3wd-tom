@@ -1,4 +1,4 @@
-"""Prepare deterministic whole-game splits for a formal ToM pilot."""
+"""Archived deterministic whole-game splits for the formal ToM pilot."""
 
 from __future__ import annotations
 
@@ -13,12 +13,15 @@ from typing import Any
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from werewolf.models.tom.dataset import encode_sample
-from werewolf.models.tom.schema import normalize_episode_context, normalize_player
+from archive.legacy_tom.werewolf.models.tom.dataset import encode_sample
+from archive.legacy_tom.werewolf.models.tom.schema import (
+    normalize_episode_context,
+    normalize_player,
+)
 
 
 SPLIT_NAMES = ("train", "val", "test")

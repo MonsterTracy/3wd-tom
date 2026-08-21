@@ -10,7 +10,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from werewolf.models.tom.reporter import BeliefReporter
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
@@ -19,6 +18,10 @@ from werewolf.models.twd_tom.public_events import (
     structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import PLAYER_NAMES
+from werewolf.observer_knowledge import (
+    derive_observer_hard_knowledge,
+    legal_observer_state,
+)
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
 )
@@ -795,7 +798,7 @@ def annotate_pre_speech_suspicion(
                         "private observation current actor does not match "
                         "PRE speaker"
                     )
-                hard = BeliefReporter.derive_hard_knowledge(
+                hard = derive_observer_hard_knowledge(
                     observer_id,
                     observation,
                 )
@@ -809,7 +812,7 @@ def annotate_pre_speech_suspicion(
                         ],
                     },
                 }
-                legal_state = BeliefReporter.legal_state(
+                legal_state = legal_observer_state(
                     observer_id,
                     observation,
                 )

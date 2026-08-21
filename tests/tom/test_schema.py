@@ -1,6 +1,6 @@
 import pytest
 
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
     NONE_ACTION_ID,

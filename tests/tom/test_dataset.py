@@ -4,9 +4,13 @@ from copy import deepcopy
 import pytest
 import torch
 
-import werewolf.models.tom.dataset as dataset_module
-from werewolf.models.tom.dataset import TomDataset, collate_batch, encode_sample
-from werewolf.models.tom.schema import (
+import archive.legacy_tom.werewolf.models.tom.dataset as dataset_module
+from archive.legacy_tom.werewolf.models.tom.dataset import (
+    TomDataset,
+    collate_batch,
+    encode_sample,
+)
+from archive.legacy_tom.werewolf.models.tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
     CONFIG_TO_ID,
@@ -18,7 +22,7 @@ from werewolf.models.tom.schema import (
     PLAYER_NAMES,
     PLAYER_TO_ID,
 )
-from werewolf.models.tom.targets import materialize_target
+from archive.legacy_tom.werewolf.models.tom.targets import materialize_target
 
 
 CURRENT_ACTIONS = [

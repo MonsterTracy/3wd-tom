@@ -9,7 +9,8 @@
 | `werewolf/envs/` | Seven-player game state, observations, valid actions, phases, and public events |
 | `werewolf/speech/` | Online/offline speech parsing and playing-agent belief reports |
 | `werewolf/models/twd_tom/` | ToM schemas, collection helpers, Dataset, backbones, targets, losses, metrics, and shadow inference |
-| `script/twd_tom/` | Collection, projection, split, audit, training, and evaluation entry points |
+| `script/twd_tom/` | Canonical A/C0 collection, D split, audit, training, and evaluation entry points |
+| `archive/legacy_tom/` | Importable historical formal-ToM and online V2.7 collection/processing code |
 | `tests/` | Self-contained deterministic tests organized by subsystem |
 | `configs/` | Reusable runtime profiles; see `configs/README.md` |
 | `docs/` | Research contracts, architecture, provenance, and deployment guidance |
@@ -20,20 +21,18 @@ remain part of the gameplay interface. The repository does not contain a
 
 ## Collection entry points
 
-`python -m script.twd_tom.pipeline --stage collect` is the canonical user
-interface for formal collection. It validates one named run and calls the
-audited per-game collection core.
+`python -m script.twd_tom.collect_canonical_trajectories` is the canonical
+gameplay collection interface. It calls `run_random.eval()` with only the
+canonical trajectory recorder and emits paired A/C0 artifacts.
 
-The other maintained modules are deliberately narrower:
-
-- `script.twd_tom.collect`: one game and one explicit raw sample path;
-- `script.twd_tom.formal_batch_collection`: monitored ten-game batch utility;
-- `script.twd_tom.real_backend_dry_run`: bounded two-game audit CLI and shared
-  audited per-game core;
-- `script.twd_tom.monitored_collection`: internal monitored batch runner;
-- `script.twd_tom.reparse_speeches`: offline speech reparse audit.
-
-They are not automatically chained and are not fallback implementations.
+The downstream entry point is
+`script.twd_tom.materialize_canonical_dataset`, which calls
+`werewolf.offline_annotation` (C1) and
+`werewolf.offline_materialization` (D), followed by
+`script.twd_tom.split_offline_d_training_data`, `TWDToMDataset`, and the
+current `script.twd_tom.train` / `eval` entry points. Online belief collection
+and pre-D processing commands moved to `archive/legacy_tom` and are not normal
+mainline entry points.
 
 ## External runtime storage
 

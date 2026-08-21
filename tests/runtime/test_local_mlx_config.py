@@ -5,9 +5,9 @@ import httpx
 import pytest
 import yaml
 
-import script.twd_tom.real_backend_dry_run as dry_run
+import archive.legacy_tom.script.twd_tom.real_backend_dry_run as dry_run
 import werewolf.backends.openai_compatible as openai_compatible
-from script.twd_tom import pipeline
+from archive.legacy_tom.script.twd_tom import pipeline
 from werewolf.agents import agent_registry
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.backends import BackendError, load_named_backends

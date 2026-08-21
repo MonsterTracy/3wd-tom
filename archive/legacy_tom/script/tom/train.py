@@ -1,4 +1,4 @@
-"""Train and evaluate the formal ToM model with PILOT defaults."""
+"""Archived training entry point for the formal ToM pilot."""
 
 from __future__ import annotations
 
@@ -16,13 +16,15 @@ import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from werewolf.models.tom.dataset import TomDataset, collate_batch
-from werewolf.models.tom.losses import masked_soft_target_cross_entropy
-from werewolf.models.tom.model import (
+from archive.legacy_tom.werewolf.models.tom.dataset import TomDataset, collate_batch
+from archive.legacy_tom.werewolf.models.tom.losses import (
+    masked_soft_target_cross_entropy,
+)
+from archive.legacy_tom.werewolf.models.tom.model import (
     DROPOUT,
     HIDDEN_SIZE,
     INTERMEDIATE_SIZE,

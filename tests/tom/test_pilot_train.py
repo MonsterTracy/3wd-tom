@@ -4,12 +4,14 @@ import math
 import pytest
 import torch
 
-import script.tom.train as train_module
-from script.tom.split_pilot import build_parser as build_split_parser
-from script.tom.split_pilot import prepare_pilot_split
-from script.tom.train import build_parser as build_train_parser
-from script.tom.train import train_and_evaluate
-from werewolf.models.tom.model import BeliefModel
+import archive.legacy_tom.script.tom.train as train_module
+from archive.legacy_tom.script.tom.split_pilot import (
+    build_parser as build_split_parser,
+)
+from archive.legacy_tom.script.tom.split_pilot import prepare_pilot_split
+from archive.legacy_tom.script.tom.train import build_parser as build_train_parser
+from archive.legacy_tom.script.tom.train import train_and_evaluate
+from archive.legacy_tom.werewolf.models.tom.model import BeliefModel
 
 
 def _make_three_way_split(tmp_path, rows, write_jsonl):

@@ -27,8 +27,10 @@ from werewolf.backends import (
 )
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
-from werewolf.models.tom.collection import Collector as TomCollector
-from werewolf.models.tom.reporter import (
+from archive.legacy_tom.werewolf.models.tom.collection import (
+    Collector as TomCollector,
+)
+from archive.legacy_tom.werewolf.models.tom.reporter import (
     BeliefReporter,
     FORMAL_REPORTER_BASE_URL,
     FORMAL_REPORTER_MODEL,

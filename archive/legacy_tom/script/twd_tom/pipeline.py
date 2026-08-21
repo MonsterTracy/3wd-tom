@@ -1,4 +1,4 @@
-"""Run one explicit stage of the classic-seven TWD-ToM pipeline."""
+"""Archived explicit-stage online TWD-ToM pipeline."""
 
 from __future__ import annotations
 
@@ -14,9 +14,15 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-from script.twd_tom import real_backend_dry_run as collection_core
-from script.twd_tom.project_suspicion_to_pairs import project_jsonl
-from script.twd_tom.split_formal_dataset import split_projected_dataset
+from archive.legacy_tom.script.twd_tom import (
+    real_backend_dry_run as collection_core,
+)
+from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
+    project_jsonl,
+)
+from archive.legacy_tom.script.twd_tom.split_formal_dataset import (
+    split_projected_dataset,
+)
 from werewolf.backends import is_local_unauthenticated_backend
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.models.twd_tom.public_events import PUBLIC_EVENT_SCHEMA_VERSION
@@ -27,7 +33,7 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 STAGES = ("validate", "collect", "project", "split")
 COLLECTION_OVERRIDE_STAGES = ("validate", "collect")
 

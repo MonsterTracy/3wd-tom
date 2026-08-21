@@ -1,11 +1,11 @@
-"""Masked row-wise loss for the formal belief matrix."""
+"""Archived masked row-wise loss for the formal belief matrix."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-from werewolf.models.tom.schema import NUM_PLAYERS
+from archive.legacy_tom.werewolf.models.tom.schema import NUM_PLAYERS
 
 
 def masked_soft_target_cross_entropy(

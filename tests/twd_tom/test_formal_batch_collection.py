@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from script.twd_tom import formal_batch_collection as formal
-from script.twd_tom import real_backend_dry_run as harness
-from script.twd_tom import monitored_collection as monitored
+from archive.legacy_tom.script.twd_tom import formal_batch_collection as formal
+from archive.legacy_tom.script.twd_tom import real_backend_dry_run as harness
+from archive.legacy_tom.script.twd_tom import monitored_collection as monitored
 from run_random import PUBLIC_ONLY_COLLECTION_MODE
 from werewolf.models.twd_tom.samples import (
     PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,

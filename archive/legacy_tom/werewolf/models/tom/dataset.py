@@ -1,4 +1,4 @@
-"""Tensorize formal public prefixes and subjective belief targets."""
+"""Archived formal public-prefix and subjective-target tensorization."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
-from werewolf.models.tom.public_history import build_model_input
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.public_history import build_model_input
+from archive.legacy_tom.werewolf.models.tom.schema import (
     ACTION_TO_ID,
     CONFIG_TO_ID,
     EVENT_TO_ID,
@@ -24,7 +24,7 @@ from werewolf.models.tom.schema import (
     PLAYER_TO_ID,
     SpeechAction,
 )
-from werewolf.models.tom.targets import materialize_target
+from archive.legacy_tom.werewolf.models.tom.targets import materialize_target
 
 
 _SEQUENCE_FIELDS = (

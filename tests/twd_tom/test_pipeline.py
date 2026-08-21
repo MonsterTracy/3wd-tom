@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from script.twd_tom import pipeline
+from archive.legacy_tom.script.twd_tom import pipeline
 from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION,
 )
@@ -214,11 +214,7 @@ def _install_fake_collection(
 def test_debug_config_validates_without_api_key_or_artifacts(
     monkeypatch,
 ):
-    repo_root = (
-        Path(pipeline.__file__)
-        .resolve()
-        .parents[2]
-    )
+    repo_root = pipeline.REPO_ROOT
     config_path = (
         repo_root
         / "configs"
@@ -282,11 +278,7 @@ def test_debug_config_validates_without_api_key_or_artifacts(
 
 
 def test_runtime_contract_is_tom_only_and_keeps_module_names():
-    repo_root = (
-        Path(pipeline.__file__)
-        .resolve()
-        .parents[2]
-    )
+    repo_root = pipeline.REPO_ROOT
     checked_files = {
         *(
             repo_root / "script"

@@ -1,3 +1,5 @@
+"""Archived projection from online suspicion reports to pair targets."""
+
 from __future__ import annotations
 
 import argparse

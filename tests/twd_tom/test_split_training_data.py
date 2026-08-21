@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from script.twd_tom.materialize_training_data import materialize_training_records
-from script.twd_tom.split_training_data import (
+from archive.legacy_tom.script.twd_tom.materialize_training_data import (
+    materialize_training_records,
+)
+from archive.legacy_tom.script.twd_tom.split_training_data import (
     SPLIT_GAME_COUNTS,
     split_training_data,
     split_training_data_from_manifest,

@@ -54,10 +54,11 @@ client explicitly ignores environment proxy settings. Remote and cloud
 endpoints retain the SDK's default proxy behavior, so users do not need to set
 `NO_PROXY` manually. This does not change retry or fail-closed behavior.
 
-Validate the pipeline configuration without contacting a model service:
+The historical V2.7 validator remains available in the archive and does not
+contact a model service:
 
 ```bash
-python -m script.twd_tom.pipeline \
+python -m archive.legacy_tom.script.twd_tom.pipeline \
   --config configs/twd_tom_local_mlx.yaml \
   --run-id local_mlx_check \
   --stage validate

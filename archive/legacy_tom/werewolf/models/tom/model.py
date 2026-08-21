@@ -1,11 +1,11 @@
-"""Causal belief model over the formal public-history representation."""
+"""Archived causal model over the formal public-history representation."""
 
 from __future__ import annotations
 
 import torch
 from torch import nn
 
-from werewolf.models.tom.schema import (
+from archive.legacy_tom.werewolf.models.tom.schema import (
     ACTION_TO_ID,
     CONFIG_TO_ID,
     EVENT_TO_ID,

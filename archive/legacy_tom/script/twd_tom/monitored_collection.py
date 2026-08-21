@@ -1,4 +1,4 @@
-"""Run monitored, privacy-safe classic-seven ToM collection batches."""
+"""Archived monitored, privacy-safe ToM collection batches."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from werewolf.models.public_belief_matrix.collection import (
     PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
     validate_public_belief_matrix_sample,
 )
-from script.twd_tom import real_backend_dry_run as harness
+from archive.legacy_tom.script.twd_tom import real_backend_dry_run as harness
 from werewolf.models.twd_tom.samples import (
     PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION,
     SAMPLE_FIELDS,

@@ -1,4 +1,4 @@
-"""Materialize strict V2.7 ToM1/ToM2 samples from raw belief snapshots."""
+"""Archived V2.7 materialization from online belief snapshots."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import torch
 
-from script.twd_tom.project_suspicion_to_pairs import (
+from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
     PUBLIC_ONLY_LINEAGE,
     source_contract_lineage,
     validate_raw_suspicion_sample,

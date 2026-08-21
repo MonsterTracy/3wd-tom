@@ -1,4 +1,4 @@
-"""Build the fixed V2.7 DEV100 formal dataset package."""
+"""Archived builder for the fixed V2.7 DEV100 dataset package."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from script.twd_tom.materialize_training_data import (
+from archive.legacy_tom.script.twd_tom.materialize_training_data import (
     materialize_training_data,
     write_jsonl_atomic,
 )

@@ -2,9 +2,12 @@ import inspect
 
 import pytest
 
-import werewolf.models.tom.targets as targets_module
-from werewolf.models.tom.schema import PLAYER_NAMES
-from werewolf.models.tom.targets import materialize_target, suspicion_to_row
+import archive.legacy_tom.werewolf.models.tom.targets as targets_module
+from archive.legacy_tom.werewolf.models.tom.schema import PLAYER_NAMES
+from archive.legacy_tom.werewolf.models.tom.targets import (
+    materialize_target,
+    suspicion_to_row,
+)
 
 
 ZERO_ROW = (0.0,) * 7
