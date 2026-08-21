@@ -4,10 +4,13 @@ import json, os
 import numpy as np
 import gymnasium as gym
 from collections import Counter
+from collections.abc import Mapping
 import json
 
 from werewolf.helper.log_utils import Log
-from werewolf.models import SpeechPerceiver
+from werewolf.speech.speech_perceiver import (
+    SpeechPerceiver,
+)
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.models.twd_tom.public_events import normalize_public_event
 from werewolf.models.twd_tom.schema import normalize_player
@@ -158,12 +161,12 @@ class WerewolfTextEnvV0(gym.Env):
             "event_type": event_type,
             **payload,
         }
-        self.public_events.append(
-            normalize_public_event(
-                event,
-                expected_idx=len(self.public_events),
-            )
+        normalized = normalize_public_event(
+            event,
+            expected_idx=len(self.public_events),
         )
+        self.public_events.append(normalized)
+        return normalized
 
     def _append_public_phase(self):
         self._append_public_event(
@@ -214,9 +217,13 @@ class WerewolfTextEnvV0(gym.Env):
         info = {}
 
         if (
-            self.phase in {'vote', 'vote_pk'}
+            self.phase in {'skill_seer', 'skill_witch', 'vote', 'vote_pk'}
             and action not in self._get_valid_action_for_current_actor()
         ):
+            if self.phase == 'skill_seer':
+                raise ValueError("invalid Seer check action")
+            if self.phase == 'skill_witch':
+                raise ValueError("invalid Witch action")
             vote_phase = "normal" if self.phase == 'vote' else "PK"
             raise ValueError(f"invalid {vote_phase} vote action")
 
@@ -243,21 +250,10 @@ class WerewolfTextEnvV0(gym.Env):
                 self.current_act_idx = self.WOLF_IDX[tmp_idx + 1]
                 self.phase = 'skill_wolf'
             else:
-                kill_candidate = [target.get(self.get_phase(self.day, self.day_or_night, 'skill_wolf'), -1) for target
-                                  in self.single_werewolf_kill_target]
-                kill_condidate_counter = Counter(kill_candidate)
-                del kill_condidate_counter[-1]
-                wolf_kill_idx = -1
-
-                if len(kill_condidate_counter) > 0:
-                    most_count = kill_condidate_counter.most_common(1)[0]
-                    if list(kill_condidate_counter.values()).count(most_count[1]) > 1:
-                        for i in range(len(kill_candidate) - 1, -1, -1):
-                            if kill_candidate[i] != -1:
-                                wolf_kill_idx = kill_candidate[i]
-                                break
-                    else:
-                        wolf_kill_idx = most_count[0]
+                # The final living Werewolf acts after seeing earlier private
+                # Werewolf proposals. Its action is the authoritative team
+                # decision, including an intentional no-kill.
+                wolf_kill_idx = action_content
                 self.werewolf_kill_decision[self.get_phase(self.day, self.day_or_night, self.phase)] = wolf_kill_idx
                 witch_viewers = (
                     [self.WITCH_IDX]
@@ -342,18 +338,34 @@ class WerewolfTextEnvV0(gym.Env):
             reward, done, info = self.end_night()
         elif self.phase == 'speech' or self.phase == 'speech_pk':
             assert action_type == 'speech' or action_type == 'speech_pk'
-            try:
+            if isinstance(action_content, Mapping):
+                expected_fields = {"raw_text", "sp_actions"}
+                if set(action_content) != expected_fields:
+                    missing = sorted(expected_fields - set(action_content))
+                    extra = sorted(set(action_content) - expected_fields)
+                    raise ValueError(
+                        "structured speech field set mismatch; "
+                        f"missing={missing}, extra={extra}"
+                    )
+                raw_text = action_content["raw_text"]
+                sp_actions = action_content["sp_actions"]
+            elif isinstance(action_content, str):
+                raw_text = action_content
                 sp_actions = self.speech_perceiver.parse(
                     speaker=self.current_act_idx + 1,
-                    speech=action_content,
+                    speech=raw_text,
                     day=self.day,
                     phase=self.phase,
-            )
-            except Exception:
-                sp_actions = []
+                )
+            else:
+                raise TypeError("speech content must be text or a mapping")
 
-            if not isinstance(sp_actions, list):
-                sp_actions = []
+            speech_event = self._append_public_event(
+                "public_speech",
+                speaker=normalize_player(self.current_act_idx + 1),
+                raw_text=raw_text,
+                sp_actions=sp_actions,
+            )
 
             self.game_log.append(
                 Log(
@@ -361,19 +373,13 @@ class WerewolfTextEnvV0(gym.Env):
                     source=self.current_act_idx,
                     target=[i for i in range(self.n_player)],
                     content={
-                        'speech_content': action_content,
-                        'sp_actions': sp_actions,
+                        'speech_content': speech_event["raw_text"],
+                        'sp_actions': deepcopy(speech_event["sp_actions"]),
                     },
                     day=self.day,
                     time=self.get_time(),
                     event=self.phase,
                 )
-            )
-            self._append_public_event(
-                "public_speech",
-                speaker=normalize_player(self.current_act_idx + 1),
-                raw_text=action_content,
-                sp_actions=sp_actions,
             )
             if len(self.speech_queue) > 0:
                 self.current_act_idx = self.speech_queue.pop(0)
@@ -496,7 +502,7 @@ class WerewolfTextEnvV0(gym.Env):
                               self.vote_target]
 
             vote_candidate_counter = Counter(vote_candidate)
-            del vote_candidate_counter[-1]
+            vote_candidate_counter.pop(-1, None)
             if len(vote_candidate_counter) == 0:
                 expelled_target = -1
                 self.game_log.append(Log(viewer=[idx for idx in range(self.n_player)], source=-1, target=-1,
@@ -515,14 +521,11 @@ class WerewolfTextEnvV0(gym.Env):
                     speak_n = random.randint(0, len(tmp_speech_queue))
                     self.speech_queue = tmp_speech_queue[speak_n:] + tmp_speech_queue[:speak_n]
 
-                    self.vote_queue = []
-                    for player_idx in range(self.n_player):
-                        if self.alive[player_idx] == 1 and player_idx not in self.speech_queue:
-                            self.vote_queue.append(player_idx)
-
-                    if len(self.vote_queue) == 0:
-                        self.vote_queue = deepcopy(self.speech_queue)
-                        self.vote_queue.sort()
+                    self.vote_queue = [
+                        player_idx
+                        for player_idx in range(self.n_player)
+                        if self.alive[player_idx] == 1
+                    ]
                     self.vote_pk_players = deepcopy(self.speech_queue)
 
                     self.game_log.append(Log([idx for idx in range(self.n_player)], source=-1, target=-1,
@@ -550,7 +553,7 @@ class WerewolfTextEnvV0(gym.Env):
             vote_pk_candidate = [target.get(self.get_phase(self.day, self.day_or_night, 'vote_pk'), -1) for target
                                  in self.vote_target]
             vote_pk_candidate_counter = Counter(vote_pk_candidate)
-            del vote_pk_candidate_counter[-1]
+            vote_pk_candidate_counter.pop(-1, None)
             if len(vote_pk_candidate_counter) == 0:
                 expelled_target = -1
                 self.game_log.append(Log(viewer=[idx for idx in range(self.n_player)], source=-1, target=-1,
@@ -670,14 +673,17 @@ class WerewolfTextEnvV0(gym.Env):
             ]
 
         elif self.phase == 'skill_seer':
-            valid_action = [('check', -1)] + [
+            valid_action = [
                 ('check', idx)
                 for idx, is_live in enumerate(self.alive)
                 if (
                     is_live == 1
+                    and idx != self.SEER_IDX
                     and idx not in self.seer_check_target.values()
                 )
             ]
+            if len(valid_action) == 0:
+                valid_action = [('check', -1)]
 
         elif self.phase == 'skill_guard':
             valid_action = [('guard', -1)] + [
@@ -720,12 +726,13 @@ class WerewolfTextEnvV0(gym.Env):
                 valid_action += [
                     ('witch_poison', idx)
                     for idx, is_live in enumerate(self.alive)
-                    if is_live == 1
+                    if is_live == 1 and idx != self.WITCH_IDX
                 ]
 
             if (
                 len(self.witch_heal_target) == 0
                 and wolf_kill_decision != -1
+                and wolf_kill_decision != self.WITCH_IDX
             ):
                 valid_action.append(
                     (

@@ -16,7 +16,7 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v2"
+PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v3"
 PUBLIC_EVENT_TYPES = frozenset(
     {
         "phase_change",
@@ -174,19 +174,25 @@ def normalize_public_event(
             event.get("speaker"), field_name="speaker"
         )
     elif event_type == "public_speech":
-        normalized["speaker"] = _canonical_player(
+        speaker = _canonical_player(
             event.get("speaker"), field_name="speaker"
         )
+        normalized["speaker"] = speaker
         raw_text = event.get("raw_text")
         if not isinstance(raw_text, str):
             raise TypeError("public_speech.raw_text must be text")
         normalized["raw_text"] = raw_text
-        normalized["sp_actions"] = [
-            parse_speech_action(action).to_list()
-            for action in _sequence(
-                event.get("sp_actions"), field_name="public_speech.sp_actions"
-            )
-        ]
+        sp_actions = []
+        for action in _sequence(
+            event.get("sp_actions"), field_name="public_speech.sp_actions"
+        ):
+            parsed_action = parse_speech_action(action)
+            if parsed_action.subject != speaker:
+                raise ValueError(
+                    "public_speech action subject must equal event speaker"
+                )
+            sp_actions.append(parsed_action.to_list())
+        normalized["sp_actions"] = sp_actions
     elif event_type == "vote_result":
         votes = []
         previous_voter_id = 0
@@ -227,7 +233,7 @@ def normalize_public_events(events: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def public_speech_actions(events: Any) -> list[list[str]]:
+def public_speech_actions(events: Any) -> list[list[str | None]]:
     """Flatten exact speech actions for prompt/audit metadata only."""
 
     return [

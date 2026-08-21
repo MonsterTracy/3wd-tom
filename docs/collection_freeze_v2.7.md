@@ -1,10 +1,14 @@
 # Collection Freeze V2.7
 
+> Historical contract: its executable modules now live under
+> `archive.legacy_tom`. It is retained for reproduction and is not the current
+> A/C0 -> C1 -> D collection mainline.
+
 ## Frozen source
 
 - Freeze commit: `844784d7232af7e40633b62c450f72e4c35edb8e`
 - Canonical config: `configs/twd_tom_server_qwen35_9b.yaml`
-- Canonical entry: `python -m script.twd_tom.pipeline --stage collect`
+- Historical entry: `python -m archive.legacy_tom.script.twd_tom.pipeline --stage collect`
 
 The source commit identifies the collection generator. Presentation-only
 documentation or repository-layout changes after this commit do not define a
@@ -27,14 +31,14 @@ exact run IDs and invocation details.
 Validate each five-seed run before collection:
 
 ```bash
-python -m script.twd_tom.pipeline \
+python -m archive.legacy_tom.script.twd_tom.pipeline \
   --config configs/twd_tom_server_qwen35_9b.yaml \
   --run-id <UNIQUE_RUN_ID> \
   --stage validate \
   --game-count 5 \
   --seeds <FIVE_SEEDS>
 
-python -m script.twd_tom.pipeline \
+python -m archive.legacy_tom.script.twd_tom.pipeline \
   --config configs/twd_tom_server_qwen35_9b.yaml \
   --run-id <UNIQUE_RUN_ID> \
   --stage collect \

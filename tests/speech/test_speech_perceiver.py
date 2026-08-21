@@ -6,6 +6,7 @@ from werewolf.speech.speech_perceiver import (
     SPEECH_PARSER_MAX_TOKENS,
     SpeechActionValidationError,
 )
+from werewolf.models.twd_tom.schema import SpeechAction, normalize_player
 
 
 class FakeBackend:
@@ -106,6 +107,14 @@ class SpeechPerceiverTest(unittest.TestCase):
             call["response_format"],
         )
         self.assertEqual(
+            call["extra_body"],
+            {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
+        )
+        self.assertEqual(
             call["messages"][0]["role"],
             "user",
         )
@@ -123,14 +132,8 @@ class SpeechPerceiverTest(unittest.TestCase):
             "每个动作单独一行",
             prompt,
         )
-        self.assertIn(
-            "每一个非空行都必须符合上述协议",
-            prompt,
-        )
-        self.assertIn(
-            "最多输出7个动作",
-            prompt,
-        )
+        self.assertIn("格式严格为", prompt)
+        self.assertIn("穷尽输出所有明确动作", prompt)
         self.assertIn(
             "没有可抽取动作时，只输出：NONE",
             prompt,
@@ -139,10 +142,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             "point_as_werewolf",
             prompt,
         )
-        self.assertIn(
-            "point_as_guard",
-            prompt,
-        )
+        self.assertNotIn("point_as_guard", prompt)
         self.assertIn(
             "support",
             prompt,
@@ -156,10 +156,12 @@ class SpeechPerceiverTest(unittest.TestCase):
             "check_as_werewolf",
             "save",
             "poison",
-            "guard",
             "vote_intent",
+            "abstain_intent",
+            "no_commitment",
         ):
-            self.assertIn(action_name, prompt)
+            self.assertIn(f"- {action_name}", prompt)
+        self.assertNotIn("- guard", prompt)
         for unsupported_alias in (
             "check_good",
             "checked_good",
@@ -168,12 +170,10 @@ class SpeechPerceiverTest(unittest.TestCase):
             "intend_vote",
         ):
             self.assertNotIn(unsupported_alias, prompt)
+        self.assertIn("多个不同命题按原文语义顺序输出", prompt)
+        self.assertIn("连续玩家范围", prompt)
         self.assertIn(
-            "独立命题共存",
-            prompt,
-        )
-        self.assertIn(
-            "action 不同的动作",
+            "player2 | oppose | player2",
             prompt,
         )
         self.assertIn(
@@ -189,7 +189,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             prompt,
         )
 
-    def test_prompt_freezes_a1_semantic_modules_and_non_redundancy(
+    def test_prompt_freezes_formal_core_thirteen_semantics(
         self,
     ):
         perceiver = SpeechPerceiver(
@@ -200,48 +200,58 @@ class SpeechPerceiverTest(unittest.TestCase):
         perceiver.parse(1, "公开发言", 1, "speech")
         prompt = perceiver.backend.calls[0]["messages"][0]["content"]
 
-        for module_name in (
-            "ROLE_ESTIMATE",
-            "SOCIAL_STANCE",
-            "CLAIMED_SKILL_REPORT",
-            "ACTION_INTENT",
+        for action_name in (
+            "point_as_werewolf",
+            "point_as_villager",
+            "point_as_seer",
+            "point_as_witch",
+            "support",
+            "oppose",
+            "check_as_good",
+            "check_as_werewolf",
+            "save",
+            "poison",
+            "vote_intent",
+            "abstain_intent",
+            "no_commitment",
         ):
-            self.assertIn(module_name, prompt)
-        self.assertIn(
-            "A1：最具体、非冗余、显式原子命题编码",
-            prompt,
+            self.assertIn(f"- {action_name}", prompt)
+        self.assertNotIn("point_as_guard", prompt)
+        self.assertNotIn("- guard", prompt)
+        self.assertIn("好人阵营", prompt)
+        self.assertIn("可信", prompt)
+        self.assertIn("都不能产生该动作", prompt)
+        self.assertIn("most-specific-source", prompt)
+        self.assertIn("不得读取真实角色或环境技能记录", prompt)
+        self.assertIn("vote_intent不等于环境实际vote", prompt)
+
+    def test_prompt_requires_explicit_target_in_the_supporting_proposition(
+        self,
+    ):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
         )
-        for principle in (
-            "显式性",
-            "最具体性",
-            "非冗余性",
-            "独立命题共存",
-        ):
-            self.assertIn(principle, prompt)
-        self.assertIn(
-            "明确认可、同意或支持 target 的发言、逻辑、主张或可信度",
-            prompt,
-        )
-        self.assertIn(
-            "明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度",
-            prompt,
-        )
-        for forbidden_expansion in (
-            "vote_intent → oppose",
-            "point_as_werewolf → oppose",
-            "point_as_villager → support",
-            "check_as_werewolf → point_as_werewolf 或 oppose",
-            "check_as_good → point_as_villager 或 support",
-            "poison → oppose",
-            "save → support",
-            "guard → support",
-        ):
-            self.assertIn(forbidden_expansion, prompt)
-        self.assertIn(
-            "投票偏好本身也不等于 support 或 oppose",
-            prompt,
-        )
-        self.assertNotIn("倾向投票/放逐", prompt)
+
+        perceiver.parse(1, "基于以上判断，我投这一票。", 1, "speech")
+        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+
+        self.assertIn("同一个明确命题或分句", prompt)
+        self.assertIn("以 playerN 或 N号被明确点名", prompt)
+        self.assertIn("第一人称明确自报具体身份", prompt)
+        self.assertIn("“我是预言家”", prompt)
+        self.assertIn("明确指向当前发言者", prompt)
+        self.assertIn("显式连续编号范围", prompt)
+        self.assertIn("“2号到4号”", prompt)
+        self.assertIn("不是discourse antecedent推断", prompt)
+        self.assertIn("不得从代词、省略宾语", prompt)
+        self.assertIn("前一句、前一个action、discourse context", prompt)
+        self.assertIn("基于以上判断，我投这一票。", prompt)
+        self.assertIn("我就投他。", prompt)
+        self.assertIn("那我投这个人。", prompt)
+        self.assertIn("player2和player3都在发言。那我投他。", prompt)
+        self.assertIn("这一轮我投4号。", prompt)
+        self.assertIn("player1 | vote_intent | player4", prompt)
 
     def test_preserves_distinct_actions_for_same_object(
         self,
@@ -285,40 +295,26 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_canonicalizes_only_a1_check_expansions(
+    def test_core_thirteen_actions_are_kept_online(
         self,
     ):
-        actions = SpeechPerceiver._canonicalize_a1_actions(
-            [
-                ["player2", "point_as_villager", "player3"],
-                ["player2", "check_as_good", "player3"],
-                ["player2", "point_as_werewolf", "player4"],
-                ["player2", "check_as_werewolf", "player4"],
-                ["player2", "oppose", "player4"],
-                ["player2", "vote_intent", "player4"],
-            ]
+        actions = SpeechPerceiver._normalize(
+            parsed=[["player2", "check_as_good", "player3"]],
+            speaker=2,
         )
-
         self.assertEqual(
             actions,
-            [
-                ["player2", "check_as_good", "player3"],
-                ["player2", "check_as_werewolf", "player4"],
-                ["player2", "oppose", "player4"],
-                ["player2", "vote_intent", "player4"],
-            ],
+            [["player2", "check_as_good", "player3"]],
         )
 
-    def test_parse_canonicalizes_redundant_a1_backend_output(
+    def test_parse_keeps_most_specific_check_provenance(
         self,
     ):
         backend = FakeBackend(
             "\n".join(
                 [
                     "player2 | check_as_good | player3",
-                    "player2 | point_as_villager | player3",
                     "player2 | check_as_werewolf | player4",
-                    "player2 | point_as_werewolf | player4",
                 ]
             )
         )
@@ -377,23 +373,15 @@ class SpeechPerceiverTest(unittest.TestCase):
             "messages"
         ][0]["content"]
 
-        self.assertIn(
-            "第一人称明确自报具体身份属于受保护动作",
-            prompt,
-        )
-        self.assertIn(
-            "也不能省略已经出现的自报身份动作",
-            prompt,
-        )
+        self.assertIn("第一人称明确自报具体身份必须抽取", prompt)
 
-    def test_existing_specific_self_claim_actions_remain_unchanged(
+    def test_active_specific_self_claim_actions_remain_unchanged(
         self,
     ):
         expected_actions = {
             "村民": "point_as_villager",
             "预言家": "point_as_seer",
             "女巫": "point_as_witch",
-            "守卫": "point_as_guard",
         }
 
         for role, action_name in expected_actions.items():
@@ -413,7 +401,7 @@ class SpeechPerceiverTest(unittest.TestCase):
                     [["player2", action_name, "player2"]],
                 )
 
-    def test_vote_intent_prompt_requires_current_unconditional_self_commitment(
+    def test_vote_intent_is_in_prompt_vocabulary_without_implied_oppose(
         self,
     ):
         perceiver = SpeechPerceiver(
@@ -429,36 +417,8 @@ class SpeechPerceiverTest(unittest.TestCase):
         )
         prompt = perceiver.backend.calls[0]["messages"][0]["content"]
 
-        self.assertIn(
-            "对当前待执行投票作出的无条件、明确、自身投票承诺",
-            prompt,
-        )
-        for accepted in (
-            "今天我投3号",
-            "我的票挂3号",
-            "这一轮我会投3号",
-        ):
-            self.assertIn(accepted, prompt)
-        for rejected_category in (
-            "条件承诺",
-            "可能性表达",
-            "未来其他轮次的计划",
-            "请求他人投票",
-            "转述他人投票意图",
-            "已完成的投票",
-            "实际投票系统事件",
-        ):
-            self.assertIn(rejected_category, prompt)
-        for rejected_example in (
-            "如果3号不解释，我就投他",
-            "我可能投3号",
-            "明天再考虑投3号",
-            "大家投3号",
-            "2号说他会投3号",
-            "我已经投了3号",
-        ):
-            self.assertIn(rejected_example, prompt)
-        self.assertNotIn("所有未来计划", prompt)
+        self.assertIn("- vote_intent", prompt)
+        self.assertIn("vote_intent不等于环境实际vote，也不自动产生oppose", prompt)
 
     def test_merges_protected_self_claim_with_other_llm_actions(
         self,
@@ -497,7 +457,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_protected_self_role_survives_a1_canonicalization(
+    def test_protected_self_role_merges_with_check_provenance(
         self,
     ):
         backend = FakeBackend(
@@ -715,7 +675,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_strict_accepts_extended_actions_in_pipe_and_complete_json(
+    def test_strict_accepts_targeted_actions_in_pipe_and_complete_json(
         self,
     ):
         expected = [
@@ -723,7 +683,6 @@ class SpeechPerceiverTest(unittest.TestCase):
             ["player1", "check_as_werewolf", "player3"],
             ["player1", "save", "player4"],
             ["player1", "poison", "player5"],
-            ["player1", "guard", "player6"],
             ["player1", "vote_intent", "player7"],
         ]
         responses = [
@@ -747,6 +706,21 @@ class SpeechPerceiverTest(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_strict_accepts_targetless_actions_with_null_object(self):
+        expected = [
+            ["player1", "abstain_intent", None],
+            ["player1", "no_commitment", None],
+        ]
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(json.dumps(expected)),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse_strict(1, "公开发言", 1, "speech"),
+            expected,
+        )
 
     def test_extracts_first_legacy_json_array_from_text(
         self,
@@ -849,6 +823,91 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
+    def test_v27_player_range_expands_to_atomic_actions(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "player1 | oppose | player2 至 player7"
+            ),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "player2 至 player7 都有问题", 1, "speech"),
+            [
+                ["player1", "oppose", f"player{player_id}"]
+                for player_id in range(2, 8)
+            ],
+        )
+
+    def test_range_expansion_reuses_atomic_dedup_and_keeps_other_actions(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "\n".join(
+                    [
+                        "player1 | oppose | player2 至 player4",
+                        "player1 | oppose | player3",
+                        "player1 | support | player3",
+                        "player1 | oppose | player5",
+                    ]
+                )
+            ),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse(1, "发言", 1, "speech"),
+            [
+                ["player1", "oppose", "player2"],
+                ["player1", "oppose", "player3"],
+                ["player1", "oppose", "player4"],
+                ["player1", "support", "player3"],
+                ["player1", "oppose", "player5"],
+            ],
+        )
+
+    def test_single_player_object_remains_compatible(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend("player1 | oppose | player3"),
+            model_name="test-model",
+        )
+        self.assertEqual(
+            perceiver.parse(1, "我反对3号", 1, "speech"),
+            [["player1", "oppose", "player3"]],
+        )
+
+    def test_invalid_or_malformed_ranges_fail_closed(self):
+        for object_value in (
+            "player0 至 player3",
+            "player3 至 player8",
+            "player4 至 player2",
+            "playerX 至 player4",
+        ):
+            with self.subTest(object_value=object_value):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(
+                        f"player1 | oppose | {object_value}"
+                    ),
+                    model_name="test-model",
+                )
+                self.assertEqual(
+                    perceiver.parse(1, "发言", 1, "speech"),
+                    [],
+                )
+                with self.assertRaises(
+                    (SpeechActionValidationError, ValueError)
+                ):
+                    perceiver.parse_strict(1, "发言", 1, "speech")
+
+    def test_atomic_player_validators_still_reject_range_strings(self):
+        with self.assertRaises(ValueError):
+            normalize_player("player2 至 player4")
+        with self.assertRaises(ValueError):
+            SpeechAction.from_values(
+                "player1",
+                "oppose",
+                "player2 至 player4",
+            )
+
     def test_none_is_a_valid_empty_result(
         self,
     ):
@@ -930,7 +989,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         self,
     ):
         raw_response = (
-            "\nplayer1 | vote_intent | player3\n"
+            "\nplayer1 | support | player3\n"
         )
         backend = FakeBackend(raw_response)
         perceiver = SpeechPerceiver(
@@ -949,7 +1008,7 @@ class SpeechPerceiverTest(unittest.TestCase):
 
         self.assertEqual(
             actions,
-            [["player1", "vote_intent", "player3"]],
+            [["player1", "support", "player3"]],
         )
         self.assertEqual(returned_response, raw_response)
         self.assertEqual(len(backend.calls), 1)

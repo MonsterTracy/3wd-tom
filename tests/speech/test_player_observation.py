@@ -3,7 +3,7 @@ import unittest
 
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.agents.prompt_template_v0 import (
-    build_strict_classic7_speech_plan_prompt,
+    build_belief_prompt,
 )
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
@@ -95,6 +95,100 @@ class PlayerObservationTest(unittest.TestCase):
             0,
         )
 
+    def test_werewolf_night_candidates_exclude_wolves(self):
+        observation = self.env.get_observation_for(1)
+
+        self.assertEqual(
+            observation["valid_action"],
+            [
+                ("kill", 0),
+                ("kill", 3),
+                ("kill", 4),
+                ("kill", 5),
+                ("kill", 6),
+                ("kill", 7),
+            ],
+        )
+        self.assertNotIn(("kill", 1), observation["valid_action"])
+        self.assertNotIn(("kill", 2), observation["valid_action"])
+
+    def test_last_living_werewolf_action_is_the_final_team_decision(self):
+        self.env.step(("kill", 5))
+        second_wolf = self.env.get_observation_for(2)
+        self.assertTrue(
+            any(
+                log.event == "skill_wolf"
+                and log.source == 1
+                and log.target == 5
+                for log in second_wolf["game_log"]
+            )
+        )
+
+        self.env.step(("kill", 0))
+
+        self.assertEqual(
+            self.env.werewolf_kill_decision["0_night_skill_wolf"],
+            -1,
+        )
+
+    def test_final_werewolf_can_override_no_kill_with_a_target(self):
+        self.env.step(("kill", 0))
+        self.env.step(("kill", 5))
+
+        self.assertEqual(
+            self.env.werewolf_kill_decision["0_night_skill_wolf"],
+            4,
+        )
+
+    def test_witch_night_candidates_exclude_self_and_keep_legal_heal(self):
+        self.env.phase = "skill_witch"
+        self.env.current_act_idx = self.env.WITCH_IDX
+        self.env.werewolf_kill_decision["0_night_skill_wolf"] = 4
+
+        observation = self.env.get_observation_for(4)
+
+        self.assertEqual(observation["valid_action"][0], ("witch_pass", 0))
+        self.assertEqual(
+            observation["valid_action"][1:7],
+            [
+                ("witch_poison", player_id)
+                for player_id in (1, 2, 3, 5, 6, 7)
+            ],
+        )
+        self.assertNotIn(("witch_poison", 4), observation["valid_action"])
+        self.assertEqual(observation["valid_action"][7], ("witch_heal", 5))
+
+    def test_witch_cannot_self_heal_or_self_poison(self):
+        self.env.phase = "skill_witch"
+        self.env.current_act_idx = self.env.WITCH_IDX
+        self.env.werewolf_kill_decision["0_night_skill_wolf"] = self.env.WITCH_IDX
+        logs_before = serialize_logs(self.env.game_log)
+
+        observation = self.env.get_observation_for(4)
+        self.assertNotIn(("witch_heal", 4), observation["valid_action"])
+        self.assertNotIn(("witch_poison", 4), observation["valid_action"])
+
+        with self.assertRaisesRegex(ValueError, "invalid Witch action"):
+            self.env.step(("witch_heal", 4))
+        with self.assertRaisesRegex(ValueError, "invalid Witch action"):
+            self.env.step(("witch_poison", 4))
+
+        self.assertEqual(self.env.phase, "skill_witch")
+        self.assertEqual(self.env.witch_heal_target, {})
+        self.assertEqual(self.env.witch_poison_target, {})
+        self.assertEqual(serialize_logs(self.env.game_log), logs_before)
+
+    def test_witch_environment_rejects_actions_outside_current_candidates(self):
+        self.env.phase = "skill_witch"
+        self.env.current_act_idx = self.env.WITCH_IDX
+        self.env.werewolf_kill_decision["0_night_skill_wolf"] = 4
+        self.env.witch_poison_target["previous"] = 5
+
+        with self.assertRaisesRegex(ValueError, "invalid Witch action"):
+            self.env.step(("witch_poison", 6))
+        with self.assertRaisesRegex(ValueError, "invalid Witch action"):
+            self.env.step(("witch_heal", 6))
+
     def test_normal_vote_candidates_are_alive_and_non_self(self):
         self.env.phase = "vote"
         self.env.day = 1
@@ -115,7 +209,7 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 3, 4],
         )
 
-    def test_normal_vote_parser_and_environment_reject_self_vote(self):
+    def test_normal_vote_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -123,15 +217,17 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.alive = [1, 1, 1, 1, 0, 0, 0]
         observation = self.env.get_observation_for(2)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '2'}",
-                observation,
-                valid_actions,
-            )
+        self.assertEqual(
+            agent.freeze_legal_vote_candidates(
+                observation["valid_action"],
+                phase=observation["phase"],
+            ),
+            (
+                (0, ("vote", 0)),
+                (1, ("vote", 1)),
+                (3, ("vote", 3)),
+                (4, ("vote", 4)),
+            ),
         )
         with self.assertRaisesRegex(ValueError, "invalid normal vote action"):
             self.env.step(("vote", 2))
@@ -164,7 +260,7 @@ class PlayerObservationTest(unittest.TestCase):
                 )
                 self.assertEqual(self.env.vote_pk_players, [5, 6, 0, 2])
 
-    def test_vote_pk_parser_and_environment_reject_self_vote(self):
+    def test_vote_pk_candidates_and_environment_reject_self_vote(self):
         self.env.phase = "vote_pk"
         self.env.day = 1
         self.env.day_or_night = "day"
@@ -173,23 +269,17 @@ class PlayerObservationTest(unittest.TestCase):
         self.env.vote_pk_players = [5, 6, 0, 2]
         observation = self.env.get_observation_for(3)
         agent = LLMAgent()
-        agent.get_valid_actions_str(observation["valid_action"])
-        valid_actions = list(agent.nlp_action_to_env_action)
-
-        self.assertIsNone(
-            agent.parse_vote_action(
-                "{'投票': '3'}",
-                observation,
-                valid_actions,
-            )
-        )
         self.assertEqual(
-            agent.parse_vote_action(
-                "{'投票': '6'}",
-                observation,
-                valid_actions,
+            agent.freeze_legal_vote_candidates(
+                observation["valid_action"],
+                phase=observation["phase"],
             ),
-            "{'投票': '6'}",
+            (
+                (0, ("vote_pk", 0)),
+                (6, ("vote_pk", 6)),
+                (7, ("vote_pk", 7)),
+                (1, ("vote_pk", 1)),
+            ),
         )
         with self.assertRaisesRegex(ValueError, "invalid PK vote action"):
             self.env.step(("vote_pk", 3))
@@ -199,6 +289,95 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertEqual(self.env.game_log[-1].event, "vote_pk")
         self.assertEqual(self.env.game_log[-1].source, 2)
         self.assertEqual(self.env.game_log[-1].target, 5)
+
+    def test_normal_vote_tie_schedules_all_living_players_for_pk_vote(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        phase_key = self.env.get_phase(1, "day", "vote")
+        votes = [1, 0, 1, 0, -1, -1, -1]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(set(self.env.vote_pk_players), {0, 1})
+        self.assertEqual(self.env.vote_queue, list(range(7)))
+        self.assertEqual(self.env.phase, "speech_pk")
+
+    def test_normal_vote_without_abstentions_exiles_unique_maximum(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        phase_key = self.env.get_phase(1, "day", "vote")
+        votes = [4, 4, 4, 4, 5, 4, 4]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1, 1, 1, 1, 0, 1, 1])
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
+
+    def test_normal_vote_without_abstentions_enters_pk_on_tie(self):
+        self.env.phase = "vote"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        phase_key = self.env.get_phase(1, "day", "vote")
+        votes = [1, 0, 0, 0, 1, 1, 2]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1] * 7)
+        self.assertEqual(set(self.env.vote_pk_players), {0, 1})
+        self.assertEqual(len(self.env.vote_pk_players), 2)
+        self.assertEqual(self.env.vote_queue, list(range(7)))
+        self.assertEqual(self.env.phase, "speech_pk")
+
+    def test_pk_vote_without_abstentions_exiles_unique_maximum(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.vote_pk_players = [0, 1]
+        phase_key = self.env.get_phase(1, "day", "vote_pk")
+        votes = [1, 0, 0, 0, 1, 1, 1]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1, 0, 1, 1, 1, 1, 1])
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
+
+    def test_pk_vote_without_abstentions_has_no_exile_on_tie(self):
+        self.env.phase = "vote_pk"
+        self.env.day = 1
+        self.env.day_or_night = "day"
+        self.env.vote_pk_players = [0, 1, 2]
+        phase_key = self.env.get_phase(1, "day", "vote_pk")
+        votes = [1, 0, 0, 0, 1, 1, 2]
+        self.env.vote_target = [
+            {phase_key: target}
+            for target in votes
+        ]
+
+        self.env.end_vote()
+
+        self.assertEqual(self.env.alive, [1] * 7)
+        self.assertEqual(self.env.phase, "skill_wolf")
+        self.assertEqual(self.env.day_or_night, "night")
 
     def test_private_visibility_is_player_specific(self):
         wolf_observation = (
@@ -352,14 +531,9 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 5, 6, 7],
         )
 
-        prompt = LLMAgent(
-            gameplay_prompt_profile="strict_classic7"
-        ).format_observation(
-            observations[0],
-            suggestible_player_ids=(1, 5, 6, 7),
-        )
+        prompt = build_belief_prompt(observations[0])
         before_private, remainder = prompt.split(
-            "【你合法知道的私有信息】",
+            "Private facts legally visible to this player:",
             1,
         )
         authoritative = before_private.split(
@@ -383,12 +557,12 @@ class PlayerObservationTest(unittest.TestCase):
         self.assertNotIn("player0", prompt)
         self.assertNotIn("狼人", authoritative)
         self.assertNotIn("查验", authoritative)
-        self.assertIn("【其他玩家此前的公开主张】", remainder)
+        self.assertIn("PUBLIC CONVERSATION", remainder)
         self.assertIn(
             "player5：player1 已死亡，player3 仍存活，应该投 player4。",
             remainder,
         )
-        self.assertIn("可能是真话、谎言、误解或策略性表达", remainder)
+        self.assertIn("truthful, deceptive, mistaken or strategic", remainder)
 
     def test_invalid_player_id_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -403,12 +577,29 @@ class PlayerObservationTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.env.get_observation_for(True)
 
-    def test_seer_pass_creates_no_completed_investigation(self):
+    def test_seer_cannot_voluntarily_pass_when_a_legal_target_exists(self):
         self.env.step(("kill", 5))
         self.env.step(("kill", 5))
-        self.env.step(("check", 0))
 
+        with self.assertRaisesRegex(ValueError, "invalid Seer check action"):
+            self.env.step(("check", 0))
+
+        self.assertEqual(self.env.phase, "skill_seer")
         self.assertEqual(self.env.seer_check_target, {})
+
+    def test_seer_gets_only_forced_no_inspection_when_no_target_remains(self):
+        self.env.phase = "skill_seer"
+        self.env.current_act_idx = self.env.SEER_IDX
+        self.env.seer_check_target = {
+            f"checked_{player_idx}": player_idx
+            for player_idx in range(self.env.n_player)
+            if player_idx != self.env.SEER_IDX
+        }
+
+        observation = self.env.get_observation_for(3)
+        self.assertEqual(observation["valid_action"], [("check", 0)])
+
+        self.env.step(("check", 0))
         self.assertFalse(
             any(
                 log.event == "skill_seer"
@@ -416,39 +607,45 @@ class PlayerObservationTest(unittest.TestCase):
             )
         )
 
-        for player_id in range(1, 8):
-            observation = self.env.get_observation_for(player_id)
-            formatted = LLMAgent().format_log(
-                observation["game_log"]
-            )
-            self.assertNotIn("player0", formatted)
-            self.assertNotIn("0号", formatted)
+    def test_seer_candidates_exclude_self_and_keep_other_alive_players(self):
+        self.env.phase = "skill_seer"
+        self.env.current_act_idx = self.env.SEER_IDX
+        self.env.alive = [1, 1, 1, 1, 0, 1, 0]
 
-        seer_observation = self.env.get_observation_for(3)
-        self.assertNotIn(
-            "查验了",
-            LLMAgent().format_log(
-                seer_observation["game_log"]
-            ),
-        )
-        strict_rules = build_strict_classic7_speech_plan_prompt(
-            seer_observation,
-            suggestible_player_ids=tuple(
-                seer_observation["authoritative_public_state"][
-                    "suggestible_exile_targets"
-                ]
-            ),
-        )
-        self.assertIn("(尚无已完成查验)", strict_rules)
+        valid_actions = self.env.get_observation_for(3)["valid_action"]
 
-    def test_seer_player3_check_is_unchanged(self):
+        self.assertNotIn(("check", 3), valid_actions)
+        self.assertEqual(
+            valid_actions,
+            [
+                ("check", 1),
+                ("check", 2),
+                ("check", 4),
+                ("check", 6),
+            ],
+        )
+
+    def test_seer_direct_self_check_is_rejected_without_retargeting(self):
+        self.env.phase = "skill_seer"
+        self.env.current_act_idx = self.env.SEER_IDX
+        logs_before = serialize_logs(self.env.game_log)
+
+        with self.assertRaisesRegex(ValueError, "invalid Seer check action"):
+            self.env.step(("check", 3))
+
+        self.assertEqual(self.env.phase, "skill_seer")
+        self.assertEqual(self.env.current_act_idx, self.env.SEER_IDX)
+        self.assertEqual(self.env.seer_check_target, {})
+        self.assertEqual(serialize_logs(self.env.game_log), logs_before)
+
+    def test_seer_check_of_another_alive_player_is_unchanged(self):
         self.env.step(("kill", 5))
         self.env.step(("kill", 5))
-        self.env.step(("check", 3))
+        self.env.step(("check", 4))
 
         self.assertEqual(
             list(self.env.seer_check_target.values()),
-            [2],
+            [3],
         )
         seer_observation = self.env.get_observation_for(3)
         check_logs = [
@@ -457,7 +654,7 @@ class PlayerObservationTest(unittest.TestCase):
             if log.event == "skill_seer"
         ]
         self.assertEqual(len(check_logs), 1)
-        self.assertEqual(check_logs[0].target, 3)
+        self.assertEqual(check_logs[0].target, 4)
         self.assertEqual(
             check_logs[0].content["cheked_identity"],
             "good",
@@ -465,19 +662,12 @@ class PlayerObservationTest(unittest.TestCase):
         formatted = LLMAgent().format_log(
             seer_observation["game_log"]
         )
-        self.assertIn("查验了3号的身份是好人", formatted)
+        self.assertIn("查验了4号的身份是好人", formatted)
         self.assertNotIn("player0", formatted)
         self.assertNotIn("0号", formatted)
         self.assertIn(
-            "player3=好人",
-            build_strict_classic7_speech_plan_prompt(
-                seer_observation,
-                suggestible_player_ids=tuple(
-                    seer_observation["authoritative_public_state"][
-                        "suggestible_exile_targets"
-                    ]
-                ),
-            ),
+            "player4=不是狼人",
+            build_belief_prompt(seer_observation),
         )
 
 

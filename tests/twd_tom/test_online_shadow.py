@@ -163,7 +163,7 @@ def test_shadow_records_all_other_players_after_a_completed_speech(
     second_checkpoint,
 ):
     public_events = make_public_events(
-        [["player3", "support", "player4"]],
+        [["player2", "support", "player4"]],
         speaker_id=2,
     )
     with _new_shadow(tmp_path, second_checkpoint) as shadow:

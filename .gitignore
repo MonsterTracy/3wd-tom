@@ -57,8 +57,10 @@ artifacts/
 *.safetensors
 *.onnx
 
-# Archives
-/archive/
+# Generated archives; tracked source migrations live under legacy_tom.
+/archive/*
+!/archive/__init__.py
+!/archive/legacy_tom/
 *.tar.gz
 *.bundle
 twd_tom_legacy_projection_source.zip

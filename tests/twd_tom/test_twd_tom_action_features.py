@@ -4,7 +4,7 @@ import pytest
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
-from werewolf.models.twd_tom.schema import ACTION_TO_ID, PLAYER_TO_ID
+from werewolf.models.twd_tom.schema import ACTION_TO_ID, NONE_TOKEN, PLAYER_TO_ID
 
 
 def _events(raw_text="", actions=None):
@@ -104,7 +104,6 @@ def test_encodes_exact_subject_action_object_ids_and_dtypes():
         "check_as_werewolf",
         "save",
         "poison",
-        "guard",
         "vote_intent",
     ),
 )
@@ -116,6 +115,18 @@ def test_extended_actions_encode_to_their_canonical_ids(action_name):
         STRUCTURED_TOKEN_TO_ID["speech_action"]
     )
     assert features["action_ids"][index].item() == ACTION_TO_ID[action_name]
+
+
+@pytest.mark.parametrize("action_name", ("abstain_intent", "no_commitment"))
+def test_targetless_speech_action_uses_non_padding_none_object(action_name):
+    features = PublicEventFeatureBuilder().encode_events(
+        _events(actions=[["player1", action_name, None]])
+    )
+    index = features["event_type_ids"].tolist().index(
+        STRUCTURED_TOKEN_TO_ID["speech_action"]
+    )
+    assert features["object_ids"][index].item() == PLAYER_TO_ID[NONE_TOKEN]
+    assert features["object_ids"][index].item() != 0
 
 
 def test_preserves_duplicate_actions_inside_one_speech_boundary():

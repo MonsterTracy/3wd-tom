@@ -8,13 +8,17 @@ import httpx
 import openai
 import pytest
 
-import script.twd_tom.real_backend_dry_run as dry_run
+import archive.legacy_tom.script.twd_tom.real_backend_dry_run as dry_run
 from werewolf.agents.gpt_agent import GPTAgent
 from werewolf.agents.llm_agent import (
     GameplaySpeechQualityError,
     LLMAgent,
 )
 from werewolf.models import SpeechPerceiver
+from werewolf.models.public_belief_matrix.public_prefix import (
+    build_public_belief_matrix_visible_prefix,
+)
+from werewolf.models.public_belief_matrix.reporter import PublicBeliefMatrixReporter
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     PlayingAgentBeliefReporter,
@@ -274,12 +278,24 @@ def test_gameplay_limit_and_finish_reason_are_audited(
     )
 
 
-def test_strict_plan_and_renderer_are_two_distinguishable_gameplay_calls(
+def test_strict_day_cognition_is_one_audited_gameplay_call(
     tmp_path,
 ):
     session, writer = _new_session(tmp_path)
     fake = FakeBackend(
-        responses=['{"public_actions":[]}', "我继续听大家发言。"],
+        responses=[
+            json.dumps({
+                "belief": "当前信息有限。",
+                "concise": "继续观察。",
+                "roles": {
+                    f"player{player_id}": "unknown"
+                    for player_id in range(2, 8)
+                },
+                "public_content_selection": {"mode": "none"},
+                "public_vote_stance_index": 0,
+                "evidence_selection": {"mode": "none"},
+            }, ensure_ascii=False),
+        ],
         usage={"finish_reason": "stop"},
         supports_json_schema=True,
     )
@@ -309,19 +325,20 @@ def test_strict_plan_and_renderer_are_two_distinguishable_gameplay_calls(
         observation=observation,
         public_events=_public_events(),
     ):
-        assert agent.act(observation) == ("speech", "我继续听大家发言。")
+        assert agent.act(observation) == (
+            "speech",
+            {
+                "raw_text": "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                "sp_actions": [["player1", "no_commitment", None]],
+            },
+        )
     writer.close()
 
     records, _serialized = _records(tmp_path / "audit.jsonl")
-    assert [record["call_category"] for record in records] == [
-        "gameplay",
-        "gameplay",
-    ]
+    assert [record["call_category"] for record in records] == ["gameplay"]
     assert [record["response_format_type"] for record in records] == [
         "json_schema",
-        None,
     ]
-    assert records[1]["call_index"] == records[0]["call_index"] + 1
 
 
 def test_bad_request_error_message_is_capped_and_privacy_safe(
@@ -493,6 +510,58 @@ def test_report_nonce_and_response_are_absent_from_next_action(tmp_path):
     assert belief["state_hash_before"] == belief["state_hash_after"]
     assert "TWD_TOM_REPORT_AUDIT_" not in serialized
     assert '{"suspected_werewolves":[]}' not in serialized
+
+
+def test_audited_pbm_request_has_no_nonce_or_snapshot_metadata(tmp_path):
+    session, writer = _new_session(tmp_path)
+    fake = FakeBackend(
+        ['{"suspected_werewolves":[]}', '{"suspected_werewolves":[]}']
+    )
+    audited = _backend(fake, session)
+    prefix = build_public_belief_matrix_visible_prefix(
+        [
+            {"event_idx": 0, "event_type": "phase_change", "phase": "1_day_speech"},
+            {"event_idx": 1, "event_type": "turn_start", "speaker": "player1"},
+            {
+                "event_idx": 2,
+                "event_type": "public_speech",
+                "speaker": "player1",
+                "raw_text": "RAW-TEXT-CANARY",
+                "sp_actions": [],
+            },
+        ]
+    )
+    cutoff = SimpleNamespace(
+        game_id="GAME-ID-CANARY",
+        step_idx=987654,
+        phase="PHASE-CANARY",
+        speaker_id=7,
+        public_action_count=0,
+        public_history_digest="d" * 64,
+    )
+    reporter = PublicBeliefMatrixReporter(audit_hook=session)
+    for observer in ("player1", "player2"):
+        assert reporter.report(
+            visible_prefix=prefix,
+            observer_id=observer,
+            cutoff=cutoff,
+            backend=audited,
+            backend_id="fake-backend",
+            model_name="fake-model",
+        )["status"] == "ok"
+    session.finish_game()
+    writer.close()
+
+    prompts = [call["messages"][0]["content"] for call in fake.calls]
+    for prompt in prompts:
+        assert "GAME-ID-CANARY" not in prompt
+        assert "987654" not in prompt
+        assert "PHASE-CANARY" not in prompt
+        assert "TWD_TOM_REPORT_AUDIT_" not in prompt
+        assert "RAW-TEXT-CANARY" not in prompt
+    assert prompts[0].replace("observer=player1", "observer=ROW") == (
+        prompts[1].replace("observer=player2", "observer=ROW")
+    )
 
 
 def test_audit_records_strict_belief_and_pipe_parser_contracts(
@@ -931,6 +1000,30 @@ def test_output_dir_and_config_require_explicit_safe_two_game_values(tmp_path):
         dry_run.RealBackendDryRunConfig(**{**base, "game_count": 1})
     with pytest.raises(ValueError, match="distinct"):
         dry_run.RealBackendDryRunConfig(**{**base, "seeds": (42, 42)})
+
+
+def test_explicit_logs_root_is_bounded_and_checks_only_relative_components(
+    tmp_path,
+):
+    logs_root = tmp_path / "data" / "project" / "logs"
+    safe = logs_root / "formal_batch_test"
+    assert dry_run.validate_output_dir(
+        str(safe),
+        logs_root=str(logs_root),
+        required_name_token="formal_batch",
+    ) == safe.resolve()
+
+    for unsafe in (
+        logs_root.parent / "formal_batch_test",
+        logs_root / ".." / "formal_batch_test",
+        logs_root / "data" / "formal_batch_test",
+    ):
+        with pytest.raises(ValueError):
+            dry_run.validate_output_dir(
+                str(unsafe),
+                logs_root=str(logs_root),
+                required_name_token="formal_batch",
+            )
 
     required_cli = [
         "--config",

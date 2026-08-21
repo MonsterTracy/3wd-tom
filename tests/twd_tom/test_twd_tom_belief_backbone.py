@@ -8,6 +8,7 @@ from transformers import Qwen2Model
 
 from werewolf.models.twd_tom.belief_backbone import (
     HIDDEN_SIZE,
+    NONE_PLAYER_ID,
     NONE_RELATIVE_PLAYER_INDEX,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
@@ -83,23 +84,25 @@ def test_qwen2_forward_accepts_all_extended_speech_actions(model):
         "check_as_werewolf",
         "save",
         "poison",
-        "guard",
-        "vote_intent",
+        "abstain_intent",
+        "no_commitment",
     )
     features = {
-        "subject_ids": torch.ones((1, 6), dtype=torch.long),
+        "subject_ids": torch.ones((1, len(action_names)), dtype=torch.long),
         "action_ids": torch.tensor(
             [[ACTION_TO_ID[name] for name in action_names]]
         ),
-        "object_ids": torch.tensor([[2, 3, 4, 5, 6, 7]]),
+        "object_ids": torch.tensor(
+            [[2, 3, 4, 5, NONE_PLAYER_ID, NONE_PLAYER_ID]]
+        ),
         "event_type_ids": torch.full(
-            (1, 6),
+            (1, len(action_names)),
             STRUCTURED_TOKEN_TO_ID["speech_action"],
             dtype=torch.long,
         ),
-        "phase_ids": torch.zeros((1, 6), dtype=torch.long),
-        "day_values": torch.ones((1, 6), dtype=torch.float32),
-        "attention_mask": torch.ones((1, 6), dtype=torch.long),
+        "phase_ids": torch.zeros((1, len(action_names)), dtype=torch.long),
+        "day_values": torch.ones((1, len(action_names)), dtype=torch.float32),
+        "attention_mask": torch.ones((1, len(action_names)), dtype=torch.long),
     }
 
     with torch.no_grad():
@@ -128,11 +131,18 @@ def test_output_contract_and_last_non_padding_pooling(model):
 
 def test_relative_player_indices_use_self_cyclic_and_distinct_none_indices():
     relative = relative_player_indices(
-        torch.tensor([[PLAYER_TO_ID["player1"], PLAYER_TO_ID["player7"], 0]])
+        torch.tensor(
+            [[
+                PLAYER_TO_ID["player1"],
+                PLAYER_TO_ID["player7"],
+                0,
+                NONE_PLAYER_ID,
+            ]]
+        )
     )
-    assert relative.shape == (1, 7, 3)
-    assert relative[0, 0].tolist() == [0, 6, NONE_RELATIVE_PLAYER_INDEX]
-    assert relative[0, 6].tolist() == [1, 0, NONE_RELATIVE_PLAYER_INDEX]
+    assert relative.shape == (1, 7, 4)
+    assert relative[0, 0].tolist() == [0, 6, 7, 7]
+    assert relative[0, 6].tolist() == [1, 0, 7, 7]
     assert NONE_RELATIVE_PLAYER_INDEX not in range(7)
 
 

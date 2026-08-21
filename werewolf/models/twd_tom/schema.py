@@ -91,6 +91,7 @@ TARGET_DISTRIBUTION_IS_REPORTER_PROBABILITY = False
 TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING = True
 
 PAD_TOKEN = "<pad>"
+NONE_TOKEN = "<none>"
 
 
 # Player names follow ONUW's player1, player2, ... convention.
@@ -136,15 +137,19 @@ ACTION_NAMES: tuple[str, ...] = (
     "point_as_villager",
     "point_as_seer",
     "point_as_witch",
-    "point_as_guard",
     "support",
     "oppose",
     "check_as_good",
     "check_as_werewolf",
     "save",
     "poison",
-    "guard",
     "vote_intent",
+    "abstain_intent",
+    "no_commitment",
+)
+
+TARGETLESS_ACTION_NAMES = frozenset(
+    {"abstain_intent", "no_commitment"}
 )
 
 
@@ -162,13 +167,15 @@ GUESS_ROLE_NAMES: tuple[str, ...] = (
 )
 
 
-# ID 0 is always padding. Real players and actions start from 1.
+# ID 0 is always padding. Real players keep IDs 1...7, while targetless
+# speech-action objects use one distinct non-padding sentinel.
 PLAYER_TO_ID: dict[str, int] = {
     PAD_TOKEN: 0,
     **{
         player_name: index
         for index, player_name in enumerate(PLAYER_NAMES, start=1)
     },
+    NONE_TOKEN: NUM_PLAYERS + 1,
 }
 
 
@@ -330,7 +337,7 @@ class SpeechAction:
 
     subject: str
     action: str
-    object: str
+    object: str | None
 
     def __post_init__(self) -> None:
         if self.subject not in PLAYER_NAMES:
@@ -338,14 +345,19 @@ class SpeechAction:
                 f"subject must be canonical player name, got {self.subject!r}"
             )
 
-        if self.object not in PLAYER_NAMES:
-            raise ValueError(
-                f"object must be canonical player name, got {self.object!r}"
-            )
-
         if self.action not in ACTION_NAMES:
             raise ValueError(
                 f"unsupported action: {self.action!r}"
+            )
+
+        if self.action in TARGETLESS_ACTION_NAMES:
+            if self.object is not None:
+                raise ValueError(
+                    f"{self.action} must use object=None"
+                )
+        elif self.object not in PLAYER_NAMES:
+            raise ValueError(
+                f"{self.action} requires a canonical player object"
             )
 
     @classmethod
@@ -358,10 +370,14 @@ class SpeechAction:
         return cls(
             subject=normalize_player(subject),
             action=normalize_action(action),
-            object=normalize_player(object_),
+            object=(
+                None
+                if object_ is None
+                else normalize_player(object_)
+            ),
         )
 
-    def to_list(self) -> list[str]:
+    def to_list(self) -> list[str | None]:
         """Return the raw ONUW-compatible triplet."""
 
         return [self.subject, self.action, self.object]
@@ -436,6 +452,7 @@ __all__ = [
     "TARGET_DISTRIBUTION_IS_REPORTER_PROBABILITY",
     "TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING",
     "PAD_TOKEN",
+    "NONE_TOKEN",
     "PLAYER_NAMES",
     "CANONICAL_PLAYER_ORDERING",
     "SECOND_ORDER_TARGET_ENCODING",
@@ -443,6 +460,7 @@ __all__ = [
     "SECOND_ORDER_OBSERVER_EVENT_CONDITIONING",
     "SECOND_ORDER_SUBJECT_SUPERVISION",
     "ACTION_NAMES",
+    "TARGETLESS_ACTION_NAMES",
     "GUESS_ROLE_NAMES",
     "PLAYER_TO_ID",
     "ACTION_TO_ID",

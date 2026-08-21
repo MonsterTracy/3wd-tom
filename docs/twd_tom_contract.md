@@ -1,5 +1,9 @@
 # Classic7 pre-speech ToM contract
 
+> Historical pre-D contract: the referenced materialization, projection,
+> split, and online collection modules now live under `archive.legacy_tom`.
+> Current training data follows the canonical A/C0 -> C1 -> D mainline.
+
 ## Research target
 
 The ToM subsystem collects observer-specific suspicion in fixed-role,
@@ -19,7 +23,7 @@ Each public speech follows:
 `H_t -> B_t -> A_t -> H_{t+1}`
 
 `H_t` is the already committed prefix of the sole append-only
-`public_events` history (`classic7_public_event_sequence_v2`). It contains
+`public_events` history (`classic7_public_event_sequence_v3`). It contains
 public phase changes, turn starts, complete public speeches, revealed
 voter-target results, exile results, and death announcements in publication
 order. Before the current speaker generates `A_t`, every alive observer
@@ -204,12 +208,12 @@ materialize both formal orders from the unchanged raw source, then apply the
 existing projected `split_manifest.json` assignment to both orders:
 
 ```bash
-python -m script.twd_tom.materialize_training_data \
+python -m archive.legacy_tom.script.twd_tom.materialize_training_data \
   --raw datasets/<dataset-id>/raw.jsonl \
   --tom1-output datasets/<dataset-id>/raw_tom.jsonl \
   --tom2-output datasets/<dataset-id>/raw_tom2.jsonl
 
-python -m script.twd_tom.split_training_data \
+python -m archive.legacy_tom.script.twd_tom.split_training_data \
   --tom1 datasets/<dataset-id>/raw_tom.jsonl \
   --tom2 datasets/<dataset-id>/raw_tom2.jsonl \
   --split-manifest datasets/<dataset-id>/projected_split/split_manifest.json \
@@ -232,7 +236,7 @@ Formal first- and second-order data reuse one in-memory, seed-42 game split.
 Generate the six order-specific files without overwriting existing outputs:
 
 ```bash
-python -m script.twd_tom.split_training_data \
+python -m archive.legacy_tom.script.twd_tom.split_training_data \
   --tom1 data/qwen25/raw_tom.jsonl \
   --tom2 data/qwen25/raw_tom2.jsonl \
   --output-dir data/qwen25 \
@@ -325,7 +329,7 @@ Do not commit `data/`, `datasets/`, `outputs/`, or model checkpoints.
 The standard user entry point is:
 
 ```bash
-python -m script.twd_tom.pipeline \
+python -m archive.legacy_tom.script.twd_tom.pipeline \
   --config configs/twd_tom_pipeline_debug.yaml \
   --run-id debug4101 \
   --stage collect \

@@ -36,7 +36,7 @@ def _events(speaker="player2", actions=None):
 
 
 def test_frozen_snapshot_has_exact_time_alignment_and_digest():
-    actions = [["player2", "point_as_werewolf", "player7"]]
+    actions = [["player1", "point_as_werewolf", "player7"]]
     events = _events(actions=actions)
     snapshot = freeze_public_snapshot(
         game_id="game_001", step_idx=8, phase="1_day_speech",
@@ -54,6 +54,23 @@ def test_frozen_snapshot_has_exact_time_alignment_and_digest():
     assert snapshot.public_events[1]["raw_text"] == "earlier speech"
     with pytest.raises(TypeError):
         snapshot.public_events[1]["raw_text"] = "cannot mutate"
+
+
+def test_frozen_snapshot_preserves_targetless_action_null():
+    snapshot = freeze_public_snapshot(
+        game_id="game_001",
+        step_idx=1,
+        phase="1_day_speech",
+        speaker_id=2,
+        report_trigger="pre_public_speech",
+        observer_ids=[1, 2],
+        public_events=_events(
+            actions=[["player1", "abstain_intent", None]]
+        ),
+    )
+    assert snapshot.sp_actions == (
+        ("player1", "abstain_intent", None),
+    )
 
 
 def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():

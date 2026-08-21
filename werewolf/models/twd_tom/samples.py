@@ -80,7 +80,7 @@ class PublicSnapshot:
     public_events: tuple[Mapping[str, Any], ...]
     public_event_digest: str
     structured_input_digest: str
-    sp_actions: tuple[tuple[str, str, str], ...]
+    sp_actions: tuple[tuple[str, str, str | None], ...]
     label_cutoff_step_idx: int
     public_action_count: int
     label_prompt_version: str

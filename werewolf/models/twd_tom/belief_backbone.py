@@ -43,6 +43,7 @@ from werewolf.models.twd_tom.schema import (
     ACTION_TO_ID,
     NUM_WOLF_PAIR_CLASSES,
     NUM_PLAYERS,
+    NONE_TOKEN,
     PLAYER_TO_ID,
 )
 from werewolf.models.twd_tom.public_events import (
@@ -69,6 +70,7 @@ RMS_NORM_EPS = 1e-6
 GPT2_LAYER_NORM_EPS = 1e-5
 GPT2_DROPOUT = 0.1
 NONE_RELATIVE_PLAYER_INDEX = NUM_PLAYERS
+NONE_PLAYER_ID = PLAYER_TO_ID[NONE_TOKEN]
 
 
 class GPT2BlockStack(nn.Module):
@@ -188,15 +190,16 @@ def relative_player_indices(player_ids: torch.Tensor) -> torch.Tensor:
         raise ValueError("player_ids must have shape [B, L]")
     if player_ids.dtype == torch.bool or torch.is_floating_point(player_ids):
         raise TypeError("player_ids must use an integer dtype")
-    if torch.any(player_ids < 0) or torch.any(player_ids > NUM_PLAYERS):
-        raise ValueError("player_ids must contain IDs in [0, 7]")
+    if torch.any(player_ids < 0) or torch.any(player_ids > NONE_PLAYER_ID):
+        raise ValueError("player_ids must contain canonical player/none IDs")
     observer_indices = torch.arange(
         NUM_PLAYERS,
         device=player_ids.device,
     ).view(1, NUM_PLAYERS, 1)
     relative = (player_ids.unsqueeze(1) - 1 - observer_indices) % NUM_PLAYERS
     return torch.where(
-        player_ids.unsqueeze(1) == 0,
+        (player_ids.unsqueeze(1) == 0)
+        | (player_ids.unsqueeze(1) == NONE_PLAYER_ID),
         torch.full_like(relative, NONE_RELATIVE_PLAYER_INDEX),
         relative,
     )
@@ -925,6 +928,7 @@ __all__ = [
     "GPT2BlockStack",
     "HIDDEN_SIZE",
     "NONE_RELATIVE_PLAYER_INDEX",
+    "NONE_PLAYER_ID",
     "QWEN2_BACKBONE_NAME",
     "SUPPORTED_BACKBONE_NAMES",
     "ToMBeliefBackboneConfig",

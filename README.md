@@ -66,11 +66,8 @@ cutoff or injects future information into model inputs.
 ```mermaid
 flowchart LR
     E["Werewolf environment"] --> O["Private observation"]
-    O --> P["Private Planner"]
-    P --> PP["PublicSpeechPlan"]
-    PP --> R["Renderer"]
-    R --> V["Final speech validator"]
-    V --> S["Public speech"]
+    O --> B["Transient belief"]
+    B --> S["Direct public speech"]
     S --> SP["SpeechPerceiver"]
     S --> FH["Frozen full public-event history<br/>raw_text + sp_actions"]
     SP --> FH
@@ -159,65 +156,52 @@ base project is available from the
 
 ## Collection
 
-The canonical collection interface is the explicit-stage pipeline. Validate
-the configuration before using a new run ID:
+The canonical collector records immutable A/C0 artifacts and does not call
+belief reporters during gameplay:
 
 ```bash
-python -m script.twd_tom.pipeline \
+python -m script.twd_tom.collect_canonical_trajectories \
   --config configs/twd_tom_server_qwen35_9b.yaml \
   --run-id <UNIQUE_RUN_ID> \
-  --stage validate \
+  --seed-start <FIRST_SEED> \
   --game-count 5 \
-  --seeds <SEED_1> <SEED_2> <SEED_3> <SEED_4> <SEED_5>
-
-python -m script.twd_tom.pipeline \
-  --config configs/twd_tom_server_qwen35_9b.yaml \
-  --run-id <UNIQUE_RUN_ID> \
-  --stage collect \
-  --game-count 5 \
-  --seeds <SEED_1> <SEED_2> <SEED_3> <SEED_4> <SEED_5>
+  --output-root <NEW_A_C0_OUTPUT_DIRECTORY>
 ```
 
-Each stage is explicit; collection does not automatically run projection,
-split, training, or evaluation. This canonical pipeline retains the ordinary
-private-conditioned collection contract. Public-only collection is a separate,
-explicit lineage selected by `formal_batch_collection --collection-mode
-public_only`; it is not an automatic mode of every pipeline stage.
-
-Other maintained entry points have narrower roles:
-
-- `python -m script.twd_tom.collect` collects one subjective-ToM game to an
-  explicitly selected JSONL path.
-- `python -m script.twd_tom.formal_batch_collection` runs a monitored,
-  request-bounded ten-game batch utility.
-- `python -m script.twd_tom.real_backend_dry_run` is a two-game,
-  privacy-safe audit harness; the pipeline also reuses its audited per-game
-  collection core.
-- `python -m script.twd_tom.reparse_speeches` reparses existing public
-  speeches for offline comparison and does not rerun gameplay.
-
-These utilities are not fallback paths and are not invoked automatically by
-the canonical pipeline.
-
-## Projection and split
-
-Projection and split are separate explicit stages:
+Materialize C1 and strict D ToM1/ToM2 records from the frozen game directory:
 
 ```bash
-python -m script.twd_tom.pipeline \
+python -m script.twd_tom.materialize_canonical_dataset \
+  --canonical-root <A_C0_OUTPUT_ROOT> \
+  --output-dir <NEW_DATASET_DIRECTORY> \
+  --annotation-run-id <ANNOTATION_RUN_ID> \
   --config configs/twd_tom_server_qwen35_9b.yaml \
-  --run-id <RUN_ID> \
-  --stage project
-
-python -m script.twd_tom.pipeline \
-  --config configs/twd_tom_server_qwen35_9b.yaml \
-  --run-id <RUN_ID> \
-  --stage split
+  --backend-id <ANNOTATION_BACKEND_ID> \
+  --model-name <ANNOTATION_MODEL_ID>
 ```
 
-The order-specific formal training splitter is
-`python -m script.twd_tom.split_training_data`; its exact contract is
-documented in [docs/twd_tom_contract.md](docs/twd_tom_contract.md).
+This calls the existing offline C1 and D contracts and publishes two
+task-specific annotation JSONLs, `tom1.jsonl`, `tom2.jsonl`, and a digested
+manifest. It is not invoked automatically by collection. Superseded online
+collectors are retained under
+[`archive/legacy_tom`](archive/legacy_tom/README.md) for reproducibility.
+
+## Materialization and split
+
+Split the two validated D sources with one deterministic game assignment:
+
+```bash
+python -m script.twd_tom.split_offline_d_training_data \
+  --tom1 <D_TOM1_JSONL> \
+  --tom2 <D_TOM2_JSONL> \
+  --output-dir <NEW_SPLIT_DIRECTORY> \
+  --split-seed 42 \
+  --train-game-count <N_TRAIN> \
+  --validation-game-count <N_VALIDATION> \
+  --test-game-count <N_TEST>
+```
+
+The splitter validates every D row and preserves each `record_digest`.
 
 ## Training
 

@@ -29,6 +29,8 @@ from werewolf.models.twd_tom.belief_backbone import (
 )
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
+    D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+    PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE,
     TOM_INPUT_SCOPES,
     TWDToMDataset,
     collate_twd_tom_samples,
@@ -45,6 +47,25 @@ from werewolf.models.twd_tom.public_events import (
     STRUCTURED_TOKEN_TO_ID,
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.offline_annotation import OFFLINE_ANNOTATION_SCHEMA_VERSION
+from werewolf.offline_materialization import (
+    D_MATERIALIZATION_POLICY_VERSION,
+    D_SCHEMA_VERSION,
+    OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+    OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+    TOM1_MODEL_INPUT_SCOPE,
+    TOM1_OBSERVER_PROVENANCE,
+    TOM1_PRIVATE_FIELDS_USAGE,
+    TOM2_MODEL_INPUT_SCOPE,
+    TOM2_OBSERVER_PROVENANCE,
+    TOM2_PRIVATE_FIELDS_USAGE,
+)
+from werewolf.trajectory import canonical_digest
+from script.twd_tom.split_offline_d_training_data import (
+    SPLIT_MANIFEST_SCHEMA_VERSION,
+    SPLIT_NAMES,
+    SPLIT_POLICY_VERSION,
+)
 from werewolf.models.twd_tom.schema import (
     ACTION_NAMES,
     ACTION_TO_ID,
@@ -61,6 +82,62 @@ from werewolf.models.twd_tom.schema import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+TRAINING_MANIFEST_SCHEMA_VERSION = "classic7_twd_tom_training_manifest_v1"
+CANONICAL_D_TRAINING_INTEGRATION_VERSION = (
+    "classic7_canonical_d_training_integration_v1"
+)
+TOM2_TARGET_SEMANTICS = "public_only_observer_suspicion_compatibility_v1"
+TOM2_TEMPORAL_SUPERVISION_POLICY = (
+    "post_completed_public_speech_pre_next_action_v1"
+)
+
+_SPLIT_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "split_policy_version", "split_code_commit",
+        "split_seed", "d_schema_version", "d_materialization_policy_version",
+        "train_game_count", "validation_game_count", "test_game_count",
+        "total_game_count", "tom1_source", "tom2_source", "game_ids",
+        "splits", "game_id_sets_equal",
+        "tom1_step_set_equals_tom2_step_set_required", "game_overlap",
+        "manifest_digest",
+    }
+)
+_SPLIT_SOURCE_FIELDS = frozenset(
+    {
+        "sha256", "row_count", "game_count", "materialization_task",
+        "materializer_code_commits",
+    }
+)
+_SPLIT_SUMMARY_FIELDS = frozenset(
+    {
+        "game_count", "tom1_row_count", "tom2_row_count",
+        "tom1_file_sha256", "tom2_file_sha256",
+    }
+)
+_TRAINING_MANIFEST_FIELDS = frozenset(
+    {
+        "schema_version", "integration_version", "training_code_commit",
+        "git_worktree_clean", "tom_order", "split_manifest_schema_version",
+        "split_policy_version", "split_seed", "split_manifest_sha256",
+        "split_manifest_digest", "d_schema_version",
+        "d_materialization_policy_version", "materialization_task",
+        "materializer_code_commits", "belief_information_scope",
+        "model_input_scope", "private_fields_usage",
+        "annotation_schema_version", "label_provenance",
+        "source_label_provenance", "train_dataset_relative_path",
+        "validation_dataset_relative_path", "train_dataset_sha256",
+        "validation_dataset_sha256", "train_game_ids", "validation_game_ids",
+        "train_source_row_count", "validation_source_row_count",
+        "train_effective_supervised_snapshot_count",
+        "validation_effective_supervised_snapshot_count",
+        "tom2_target_semantics", "tom2_temporal_supervision_policy",
+        "train_cyclic_rotation_enabled", "validation_cyclic_rotation_enabled",
+        "cyclic_rotation_version", "augmentation_seed", "training_config",
+        "python_version", "torch_version", "transformers_version", "platform",
+        "requested_device", "resolved_device", "manifest_digest",
+    }
+)
 
 
 def _positive_integer(value: Any, *, field_name: str) -> int:
@@ -96,6 +173,7 @@ class TrainingConfig:
     gradient_clip_norm: float = 1.0
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
+    split_manifest_path: str | None = None
 
     def __post_init__(self) -> None:
         _tom_order(self.tom_order)
@@ -109,6 +187,13 @@ class TrainingConfig:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be non-empty text")
+        if self.split_manifest_path is not None and (
+            not isinstance(self.split_manifest_path, str)
+            or not self.split_manifest_path.strip()
+        ):
+            raise ValueError(
+                "split_manifest_path must be non-empty text or None"
+            )
         _positive_integer(self.epochs, field_name="epochs")
         _positive_integer(self.batch_size, field_name="batch_size")
         _positive_integer(self.max_seq_len, field_name="max_seq_len")
@@ -173,6 +258,12 @@ class TrainingConfig:
         return Path(self.validation_dataset_path)
 
     @property
+    def resolved_split_manifest_path(self) -> Path | None:
+        if self.split_manifest_path is None:
+            return None
+        return Path(self.split_manifest_path)
+
+    @property
     def run_output_dir(self) -> Path:
         return Path(self.output_dir) / f"tom_order_{self.tom_order}"
 
@@ -220,6 +311,592 @@ def _repository_relative_path(
         raise ValueError(
             f"path must be inside the Git worktree: {candidate}"
         ) from exc
+
+
+def _lower_hex(value: Any, *, length: int, field_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            f"{field_name} must be a lowercase hexadecimal value of length {length}"
+        )
+    return value
+
+
+def _manifest_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _positive_manifest_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def canonical_d_expected_task(tom_order: int) -> str:
+    return {
+        1: OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+        2: OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+    }[_tom_order(tom_order)]
+
+
+def canonical_d_order_name(tom_order: int) -> str:
+    return f"tom{_tom_order(tom_order)}"
+
+
+def load_canonical_d_split_manifest(path: str | Path) -> dict[str, Any]:
+    """Read and strictly validate one frozen Canonical D Split V1 manifest."""
+
+    manifest_path = Path(path).resolve()
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"split manifest not found: {manifest_path}")
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid split manifest JSON: {manifest_path}") from exc
+    if not isinstance(value, dict) or set(value) != _SPLIT_MANIFEST_FIELDS:
+        raise ValueError("split manifest fields do not match Canonical D Split V1")
+    if value["schema_version"] != SPLIT_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("unsupported split manifest schema_version")
+    if value["split_policy_version"] != SPLIT_POLICY_VERSION:
+        raise ValueError("unsupported split policy version")
+    _lower_hex(value["split_code_commit"], length=40, field_name="split_code_commit")
+    _manifest_integer(value["split_seed"], field_name="split_seed")
+    if value["d_schema_version"] != D_SCHEMA_VERSION:
+        raise ValueError("split manifest d_schema_version mismatch")
+    if value["d_materialization_policy_version"] != D_MATERIALIZATION_POLICY_VERSION:
+        raise ValueError("split manifest materialization policy mismatch")
+    if value["game_id_sets_equal"] is not True:
+        raise ValueError("split manifest game_id_sets_equal must be true")
+    if value["tom1_step_set_equals_tom2_step_set_required"] is not False:
+        raise ValueError(
+            "split manifest must not require ToM1/ToM2 step-set equality"
+        )
+    if value["game_overlap"] is not False:
+        raise ValueError("split manifest game_overlap must be false")
+
+    counts = {
+        "train": _positive_manifest_integer(
+            value["train_game_count"], field_name="train_game_count"
+        ),
+        "validation": _positive_manifest_integer(
+            value["validation_game_count"], field_name="validation_game_count"
+        ),
+        "test": _positive_manifest_integer(
+            value["test_game_count"], field_name="test_game_count"
+        ),
+    }
+    total = _positive_manifest_integer(
+        value["total_game_count"], field_name="total_game_count"
+    )
+    if sum(counts.values()) != total:
+        raise ValueError("split manifest game counts do not sum to total_game_count")
+
+    game_ids = value["game_ids"]
+    if not isinstance(game_ids, dict) or set(game_ids) != set(SPLIT_NAMES):
+        raise ValueError("split manifest game_ids must contain train/validation/test")
+    seen: set[str] = set()
+    for split_name in SPLIT_NAMES:
+        ids = game_ids[split_name]
+        if not isinstance(ids, list) or any(
+            not isinstance(game_id, str) or not game_id.strip() for game_id in ids
+        ):
+            raise ValueError(f"split manifest {split_name} game_ids are invalid")
+        if len(ids) != len(set(ids)) or len(ids) != counts[split_name]:
+            raise ValueError(f"split manifest {split_name} game_ids count mismatch")
+        if seen & set(ids):
+            raise ValueError("split manifest game IDs overlap")
+        seen.update(ids)
+    if len(seen) != total:
+        raise ValueError("split manifest game IDs do not cover total_game_count")
+
+    splits = value["splits"]
+    if not isinstance(splits, dict) or set(splits) != set(SPLIT_NAMES):
+        raise ValueError("split manifest splits must contain train/validation/test")
+    for split_name in SPLIT_NAMES:
+        summary = splits[split_name]
+        if not isinstance(summary, dict) or set(summary) != _SPLIT_SUMMARY_FIELDS:
+            raise ValueError(f"split manifest {split_name} summary fields mismatch")
+        summary_game_count = _positive_manifest_integer(
+            summary["game_count"],
+            field_name=f"{split_name}.game_count",
+        )
+        if summary_game_count != counts[split_name]:
+            raise ValueError(f"split manifest {split_name} game_count mismatch")
+        for field_name in ("tom1_row_count", "tom2_row_count"):
+            _positive_manifest_integer(
+                summary[field_name], field_name=f"{split_name}.{field_name}"
+            )
+        for field_name in ("tom1_file_sha256", "tom2_file_sha256"):
+            _lower_hex(
+                summary[field_name], length=64,
+                field_name=f"{split_name}.{field_name}",
+            )
+
+    expected_tasks = {
+        "tom1_source": OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+        "tom2_source": OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+    }
+    for source_name, expected_task in expected_tasks.items():
+        source = value[source_name]
+        if not isinstance(source, dict) or set(source) != _SPLIT_SOURCE_FIELDS:
+            raise ValueError(f"split manifest {source_name} fields mismatch")
+        _lower_hex(
+            source["sha256"],
+            length=64,
+            field_name=f"{source_name}.sha256",
+        )
+        source_row_count = _positive_manifest_integer(
+            source["row_count"], field_name=f"{source_name}.row_count"
+        )
+        order_name = source_name.removesuffix("_source")
+        split_row_count = sum(
+            value["splits"][split_name][f"{order_name}_row_count"]
+            for split_name in SPLIT_NAMES
+        )
+        if source_row_count != split_row_count:
+            raise ValueError(
+                f"split manifest {source_name}.row_count does not match splits"
+            )
+        source_game_count = _positive_manifest_integer(
+            source["game_count"],
+            field_name=f"{source_name}.game_count",
+        )
+        if source_game_count != total:
+            raise ValueError(f"split manifest {source_name}.game_count mismatch")
+        if source["materialization_task"] != expected_task:
+            raise ValueError(
+                f"split manifest {source_name} materialization_task mismatch"
+            )
+        commits = source["materializer_code_commits"]
+        if not isinstance(commits, list) or not commits or commits != sorted(set(commits)):
+            raise ValueError(
+                f"split manifest {source_name}.materializer_code_commits invalid"
+            )
+        for commit in commits:
+            _lower_hex(
+                commit, length=40,
+                field_name=f"{source_name}.materializer_code_commits",
+            )
+
+    manifest_digest = _lower_hex(
+        value["manifest_digest"], length=64, field_name="manifest_digest"
+    )
+    payload = dict(value)
+    payload.pop("manifest_digest")
+    if canonical_digest(payload) != manifest_digest:
+        raise ValueError("split manifest manifest_digest mismatch")
+    return value
+
+
+def canonical_d_split_binding(
+    config: TrainingConfig,
+    manifest: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind configured D train/validation paths to one exact split artifact."""
+
+    manifest_path = config.resolved_split_manifest_path
+    if manifest_path is None:
+        raise ValueError("canonical D training requires --split-manifest")
+    manifest_path = manifest_path.resolve()
+    manifest_root = manifest_path.parent
+    order_name = canonical_d_order_name(config.tom_order)
+    expected_train = (manifest_root / order_name / "train.jsonl").resolve()
+    expected_validation = (manifest_root / order_name / "validation.jsonl").resolve()
+    configured_train = config.resolved_dataset_path.resolve()
+    configured_validation = config.resolved_validation_dataset_path.resolve()
+    if configured_train != expected_train:
+        raise ValueError(
+            "canonical D training dataset must be the manifest train JSONL"
+        )
+    if configured_validation != expected_validation:
+        raise ValueError(
+            "canonical D validation dataset must be the manifest validation JSONL"
+        )
+    for path, split_name in (
+        (expected_train, "train"),
+        (expected_validation, "validation"),
+    ):
+        expected_sha = manifest["splits"][split_name][f"{order_name}_file_sha256"]
+        actual_sha = sha256_file(path)
+        if actual_sha != expected_sha:
+            raise ValueError(
+                f"canonical D {split_name} dataset SHA-256 mismatch: "
+                f"expected {expected_sha}, got {actual_sha}"
+            )
+    return {
+        "manifest_path": manifest_path,
+        "manifest_root": manifest_root,
+        "train_path": expected_train,
+        "validation_path": expected_validation,
+        "order_name": order_name,
+    }
+
+
+def canonical_d_dataset_metadata(dataset: TWDToMDataset) -> dict[str, Any]:
+    """Return strict uniform D-source metadata from one already-valid Dataset."""
+
+    if dataset.source_schema_version != D_SCHEMA_VERSION or not dataset.samples:
+        raise ValueError("dataset is not canonical D V1")
+    metadata_rows = []
+    for sample in dataset.samples:
+        if sample.get("_dataset_input_kind") != "d_v1":
+            raise ValueError("canonical D Dataset contains a non-D row")
+        metadata = sample.get("_dataset_source_metadata")
+        if not isinstance(metadata, Mapping):
+            raise ValueError("canonical D Dataset row has no source metadata")
+        metadata_rows.append(metadata)
+    fields = (
+        "schema_version", "materialization_task",
+        "materialization_policy_version", "source_annotation_task",
+        "model_input_scope",
+    )
+    result: dict[str, Any] = {}
+    for field_name in fields:
+        values = {metadata[field_name] for metadata in metadata_rows}
+        if len(values) != 1:
+            raise ValueError(f"canonical D Dataset {field_name} is not uniform")
+        result[field_name] = next(iter(values))
+    result["materializer_code_commits"] = sorted(
+        {metadata["materializer_code_commit"] for metadata in metadata_rows}
+    )
+    return result
+
+
+def validate_canonical_d_training_contract(
+    config: TrainingConfig,
+    train_dataset: TWDToMDataset,
+    validation_dataset: TWDToMDataset,
+) -> dict[str, Any]:
+    """Validate one D train/validation pair against its frozen split manifest."""
+
+    manifest_path = config.resolved_split_manifest_path
+    if manifest_path is None:
+        raise ValueError("canonical D training requires --split-manifest")
+    manifest = load_canonical_d_split_manifest(manifest_path)
+    binding = canonical_d_split_binding(config, manifest)
+    expected_task = canonical_d_expected_task(config.tom_order)
+    train_metadata = canonical_d_dataset_metadata(train_dataset)
+    validation_metadata = canonical_d_dataset_metadata(validation_dataset)
+    for metadata in (train_metadata, validation_metadata):
+        if metadata["schema_version"] != D_SCHEMA_VERSION:
+            raise ValueError("canonical D Dataset schema mismatch")
+        if metadata["materialization_task"] != expected_task:
+            raise ValueError("canonical D materialization_task mismatch")
+        if metadata["materialization_policy_version"] != D_MATERIALIZATION_POLICY_VERSION:
+            raise ValueError("canonical D materialization policy mismatch")
+    if train_metadata["source_annotation_task"] != validation_metadata["source_annotation_task"]:
+        raise ValueError("train and validation source annotation tasks differ")
+    dataset_contract = _training_dataset_contract(train_dataset, validation_dataset)
+    expected_dataset_contract = (
+        {
+            "belief_information_scope": PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE,
+            "model_input_scope": TOM1_MODEL_INPUT_SCOPE,
+            "private_fields_usage": TOM1_PRIVATE_FIELDS_USAGE,
+            "source_schema_version": D_SCHEMA_VERSION,
+            "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+            "label_provenance": TOM1_OBSERVER_PROVENANCE,
+            "source_label_provenance": TOM1_OBSERVER_PROVENANCE,
+        }
+        if config.tom_order == 1
+        else {
+            "belief_information_scope": D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+            "model_input_scope": TOM2_MODEL_INPUT_SCOPE,
+            "private_fields_usage": TOM2_PRIVATE_FIELDS_USAGE,
+            "source_schema_version": D_SCHEMA_VERSION,
+            "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+            "label_provenance": TOM2_OBSERVER_PROVENANCE,
+            "source_label_provenance": TOM2_OBSERVER_PROVENANCE,
+        }
+    )
+    for field_name, expected_value in expected_dataset_contract.items():
+        if dataset_contract[field_name] != expected_value:
+            raise ValueError(
+                f"canonical D Dataset {field_name} mismatch: "
+                f"expected {expected_value!r}, got {dataset_contract[field_name]!r}"
+            )
+
+    source_name = f"{binding['order_name']}_source"
+    source_summary = manifest[source_name]
+    if source_summary["materialization_task"] != expected_task:
+        raise ValueError("split manifest materialization_task mismatch")
+    allowed_commits = set(source_summary["materializer_code_commits"])
+    observed_commits = set(train_metadata["materializer_code_commits"]) | set(
+        validation_metadata["materializer_code_commits"]
+    )
+    if not observed_commits <= allowed_commits:
+        raise ValueError("Dataset materializer commit is absent from split provenance")
+
+    train_dataset_game_ids = {
+        sample["game_id"] for sample in train_dataset.samples
+    }
+    validation_dataset_game_ids = {
+        sample["game_id"] for sample in validation_dataset.samples
+    }
+    if train_dataset_game_ids != set(manifest["game_ids"]["train"]):
+        raise ValueError("training Dataset game IDs differ from split manifest")
+    if validation_dataset_game_ids != set(manifest["game_ids"]["validation"]):
+        raise ValueError("validation Dataset game IDs differ from split manifest")
+    train_game_ids = list(manifest["game_ids"]["train"])
+    validation_game_ids = list(manifest["game_ids"]["validation"])
+    order_name = binding["order_name"]
+    if len(train_dataset) != manifest["splits"]["train"][f"{order_name}_row_count"]:
+        raise ValueError("training Dataset row count differs from split manifest")
+    if len(validation_dataset) != manifest["splits"]["validation"][f"{order_name}_row_count"]:
+        raise ValueError("validation Dataset row count differs from split manifest")
+
+    expected_train_rotation = config.tom_order == 2
+    if train_dataset.enable_cyclic_rotation is not expected_train_rotation:
+        raise ValueError("canonical D training rotation configuration mismatch")
+    if validation_dataset.enable_cyclic_rotation is not False:
+        raise ValueError("canonical D validation rotation must be disabled")
+    if expected_train_rotation and train_dataset.augmentation_seed != config.seed:
+        raise ValueError("canonical D augmentation seed mismatch")
+
+    train_effective = len(train_dataset) if config.tom_order == 1 else len(
+        train_dataset.second_order_supervised_indices()
+    )
+    validation_effective = len(validation_dataset) if config.tom_order == 1 else len(
+        validation_dataset.second_order_supervised_indices()
+    )
+    if train_effective <= 0 or validation_effective <= 0:
+        raise ValueError("canonical D training requires non-empty effective supervision")
+    return {
+        "manifest": manifest,
+        **binding,
+        "materialization_task": expected_task,
+        "materializer_code_commits": list(source_summary["materializer_code_commits"]),
+        "train_game_ids": train_game_ids,
+        "validation_game_ids": validation_game_ids,
+        "train_source_row_count": len(train_dataset),
+        "validation_source_row_count": len(validation_dataset),
+        "train_effective_supervised_snapshot_count": train_effective,
+        "validation_effective_supervised_snapshot_count": validation_effective,
+    }
+
+
+def validate_training_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Fail closed unless one value is the exact training manifest V1."""
+
+    if not isinstance(value, Mapping) or set(value) != _TRAINING_MANIFEST_FIELDS:
+        raise ValueError("training manifest fields do not match V1")
+    manifest = dict(value)
+    if manifest["schema_version"] != TRAINING_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("unsupported training manifest schema_version")
+    if manifest["integration_version"] != CANONICAL_D_TRAINING_INTEGRATION_VERSION:
+        raise ValueError("unsupported canonical D training integration version")
+    _lower_hex(
+        manifest["training_code_commit"],
+        length=40,
+        field_name="training_code_commit",
+    )
+    if manifest["git_worktree_clean"] is not True:
+        raise ValueError("training manifest requires a clean Git worktree")
+    tom_order = _tom_order(manifest["tom_order"])
+    if manifest["split_manifest_schema_version"] != SPLIT_MANIFEST_SCHEMA_VERSION:
+        raise ValueError("training manifest split schema mismatch")
+    if manifest["split_policy_version"] != SPLIT_POLICY_VERSION:
+        raise ValueError("training manifest split policy mismatch")
+    _manifest_integer(manifest["split_seed"], field_name="split_seed")
+    for field_name in (
+        "split_manifest_sha256",
+        "split_manifest_digest",
+        "train_dataset_sha256",
+        "validation_dataset_sha256",
+        "manifest_digest",
+    ):
+        _lower_hex(manifest[field_name], length=64, field_name=field_name)
+    if manifest["d_schema_version"] != D_SCHEMA_VERSION:
+        raise ValueError("training manifest D schema mismatch")
+    if manifest["d_materialization_policy_version"] != D_MATERIALIZATION_POLICY_VERSION:
+        raise ValueError("training manifest D materialization policy mismatch")
+    if manifest["materialization_task"] != canonical_d_expected_task(tom_order):
+        raise ValueError("training manifest materialization_task mismatch")
+    expected_lineage = (
+        {
+            "belief_information_scope": PRIVATE_CONDITIONED_BELIEF_INFORMATION_SCOPE,
+            "model_input_scope": TOM1_MODEL_INPUT_SCOPE,
+            "private_fields_usage": TOM1_PRIVATE_FIELDS_USAGE,
+            "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+            "label_provenance": TOM1_OBSERVER_PROVENANCE,
+            "source_label_provenance": TOM1_OBSERVER_PROVENANCE,
+        }
+        if tom_order == 1
+        else {
+            "belief_information_scope": D_PUBLIC_ONLY_TOM2_BELIEF_INFORMATION_SCOPE,
+            "model_input_scope": TOM2_MODEL_INPUT_SCOPE,
+            "private_fields_usage": TOM2_PRIVATE_FIELDS_USAGE,
+            "annotation_schema_version": OFFLINE_ANNOTATION_SCHEMA_VERSION,
+            "label_provenance": TOM2_OBSERVER_PROVENANCE,
+            "source_label_provenance": TOM2_OBSERVER_PROVENANCE,
+        }
+    )
+    for field_name, expected_value in expected_lineage.items():
+        if manifest[field_name] != expected_value:
+            raise ValueError(
+                f"training manifest {field_name} mismatch: "
+                f"expected {expected_value!r}, got {manifest[field_name]!r}"
+            )
+    commits = manifest["materializer_code_commits"]
+    if not isinstance(commits, list) or not commits or commits != sorted(set(commits)):
+        raise ValueError("training manifest materializer_code_commits invalid")
+    for commit in commits:
+        _lower_hex(commit, length=40, field_name="materializer_code_commits")
+    for field_name in (
+        "train_dataset_relative_path",
+        "validation_dataset_relative_path",
+    ):
+        path = manifest[field_name]
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+        ):
+            raise ValueError(f"training manifest {field_name} must be safe relative")
+    train_games = manifest["train_game_ids"]
+    validation_games = manifest["validation_game_ids"]
+    for field_name, game_ids in (
+        ("train_game_ids", train_games),
+        ("validation_game_ids", validation_games),
+    ):
+        if (
+            not isinstance(game_ids, list)
+            or not game_ids
+            or len(game_ids) != len(set(game_ids))
+            or any(not isinstance(game_id, str) or not game_id.strip() for game_id in game_ids)
+        ):
+            raise ValueError(f"training manifest {field_name} invalid")
+    if set(train_games) & set(validation_games):
+        raise ValueError("training manifest train/validation game IDs overlap")
+    source_counts = {}
+    effective_counts = {}
+    for split_name in ("train", "validation"):
+        source_counts[split_name] = _positive_manifest_integer(
+            manifest[f"{split_name}_source_row_count"],
+            field_name=f"{split_name}_source_row_count",
+        )
+        effective_counts[split_name] = _positive_manifest_integer(
+            manifest[f"{split_name}_effective_supervised_snapshot_count"],
+            field_name=f"{split_name}_effective_supervised_snapshot_count",
+        )
+        if effective_counts[split_name] > source_counts[split_name]:
+            raise ValueError("effective supervision count exceeds source rows")
+    if not isinstance(manifest["training_config"], Mapping):
+        raise TypeError("training manifest training_config must be a mapping")
+    if tom_order == 1:
+        if any(
+            manifest[field_name] is not None
+            for field_name in (
+                "tom2_target_semantics",
+                "tom2_temporal_supervision_policy",
+                "cyclic_rotation_version",
+                "augmentation_seed",
+            )
+        ):
+            raise ValueError("ToM1 training manifest has non-null ToM2 fields")
+        if manifest["train_cyclic_rotation_enabled"] is not False:
+            raise ValueError("ToM1 train rotation must be false")
+        if source_counts != effective_counts:
+            raise ValueError("ToM1 effective counts must equal source counts")
+    else:
+        if manifest["tom2_target_semantics"] != TOM2_TARGET_SEMANTICS:
+            raise ValueError("training manifest ToM2 target semantics mismatch")
+        if manifest["tom2_temporal_supervision_policy"] != (
+            TOM2_TEMPORAL_SUPERVISION_POLICY
+        ):
+            raise ValueError("training manifest ToM2 temporal policy mismatch")
+        if manifest["train_cyclic_rotation_enabled"] is not True:
+            raise ValueError("ToM2 train rotation must be true")
+        if manifest["cyclic_rotation_version"] != CYCLIC_ROTATION_VERSION:
+            raise ValueError("training manifest cyclic rotation version mismatch")
+        if (
+            isinstance(manifest["augmentation_seed"], bool)
+            or not isinstance(manifest["augmentation_seed"], int)
+            or manifest["augmentation_seed"] < 0
+        ):
+            raise ValueError("training manifest augmentation_seed invalid")
+    if manifest["validation_cyclic_rotation_enabled"] is not False:
+        raise ValueError("validation cyclic rotation must be false")
+    payload = dict(manifest)
+    expected_digest = payload.pop("manifest_digest")
+    if canonical_digest(payload) != expected_digest:
+        raise ValueError("training manifest manifest_digest mismatch")
+    return manifest
+
+
+def build_training_manifest(
+    config: TrainingConfig,
+    *,
+    resolved_device: torch.device,
+    run_provenance: Mapping[str, Any],
+    dataset_contract: Mapping[str, Any],
+    canonical_context: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the exact immutable Canonical D training manifest V1."""
+
+    split_manifest = canonical_context["manifest"]
+    is_tom2 = config.tom_order == 2
+    training_config = asdict(config)
+    training_config["output_dir"] = str(Path(config.output_dir).resolve())
+    training_config["dataset_path"] = run_provenance["train_dataset_path"]
+    training_config["validation_dataset_path"] = run_provenance["validation_dataset_path"]
+    training_config["split_manifest_path"] = "manifest.json"
+    result = {
+        "schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+        "integration_version": CANONICAL_D_TRAINING_INTEGRATION_VERSION,
+        "training_code_commit": run_provenance["git_commit_sha"],
+        "git_worktree_clean": run_provenance["git_worktree_clean"],
+        "tom_order": config.tom_order,
+        "split_manifest_schema_version": split_manifest["schema_version"],
+        "split_policy_version": split_manifest["split_policy_version"],
+        "split_seed": split_manifest["split_seed"],
+        "split_manifest_sha256": sha256_file(canonical_context["manifest_path"]),
+        "split_manifest_digest": split_manifest["manifest_digest"],
+        "d_schema_version": D_SCHEMA_VERSION,
+        "d_materialization_policy_version": D_MATERIALIZATION_POLICY_VERSION,
+        "materialization_task": canonical_context["materialization_task"],
+        "materializer_code_commits": canonical_context["materializer_code_commits"],
+        "belief_information_scope": dataset_contract["belief_information_scope"],
+        "model_input_scope": dataset_contract["model_input_scope"],
+        "private_fields_usage": dataset_contract["private_fields_usage"],
+        "annotation_schema_version": dataset_contract["annotation_schema_version"],
+        "label_provenance": dataset_contract["label_provenance"],
+        "source_label_provenance": dataset_contract["source_label_provenance"],
+        "train_dataset_relative_path": run_provenance["train_dataset_path"],
+        "validation_dataset_relative_path": run_provenance["validation_dataset_path"],
+        "train_dataset_sha256": run_provenance["train_dataset_sha256"],
+        "validation_dataset_sha256": run_provenance["validation_dataset_sha256"],
+        "train_game_ids": canonical_context["train_game_ids"],
+        "validation_game_ids": canonical_context["validation_game_ids"],
+        "train_source_row_count": canonical_context["train_source_row_count"],
+        "validation_source_row_count": canonical_context["validation_source_row_count"],
+        "train_effective_supervised_snapshot_count": canonical_context[
+            "train_effective_supervised_snapshot_count"
+        ],
+        "validation_effective_supervised_snapshot_count": canonical_context[
+            "validation_effective_supervised_snapshot_count"
+        ],
+        "tom2_target_semantics": TOM2_TARGET_SEMANTICS if is_tom2 else None,
+        "tom2_temporal_supervision_policy": TOM2_TEMPORAL_SUPERVISION_POLICY if is_tom2 else None,
+        "train_cyclic_rotation_enabled": is_tom2,
+        "validation_cyclic_rotation_enabled": False,
+        "cyclic_rotation_version": CYCLIC_ROTATION_VERSION if is_tom2 else None,
+        "augmentation_seed": config.seed if is_tom2 else None,
+        "training_config": training_config,
+        "python_version": run_provenance["python_version"],
+        "torch_version": run_provenance["torch_version"],
+        "transformers_version": run_provenance["transformers_version"],
+        "platform": run_provenance["platform"],
+        "requested_device": config.device,
+        "resolved_device": str(resolved_device),
+    }
+    result["manifest_digest"] = canonical_digest(result)
+    return validate_training_manifest(result)
 
 
 def build_run_provenance(
@@ -276,20 +953,9 @@ def build_run_provenance(
 
     train_path = config.resolved_dataset_path
     validation_path = config.resolved_validation_dataset_path
-    return {
+    base = {
         "git_commit_sha": commit,
         "git_worktree_clean": True,
-        "train_dataset_path": _repository_relative_path(
-            train_path, repo_root=root
-        ),
-        "train_dataset_sha256": sha256_file(train_path),
-        "validation_dataset_path": _repository_relative_path(
-            validation_path, repo_root=root
-        ),
-        "validation_dataset_sha256": sha256_file(validation_path),
-        "output_dir": _repository_relative_path(
-            config.output_dir, repo_root=root
-        ),
         "python_version": platform.python_version(),
         "torch_version": str(torch.__version__),
         "transformers_version": transformers.__version__,
@@ -300,6 +966,35 @@ def build_run_provenance(
             torch.are_deterministic_algorithms_enabled()
         ),
         "seed": config.seed,
+    }
+    if config.resolved_split_manifest_path is None:
+        return {
+            **base,
+            "train_dataset_path": _repository_relative_path(train_path, repo_root=root),
+            "train_dataset_sha256": sha256_file(train_path),
+            "validation_dataset_path": _repository_relative_path(
+                validation_path, repo_root=root
+            ),
+            "validation_dataset_sha256": sha256_file(validation_path),
+            "output_dir": _repository_relative_path(config.output_dir, repo_root=root),
+        }
+
+    manifest = load_canonical_d_split_manifest(config.resolved_split_manifest_path)
+    binding = canonical_d_split_binding(config, manifest)
+    manifest_root = binding["manifest_root"]
+    return {
+        **base,
+        "train_dataset_path": binding["train_path"].relative_to(manifest_root).as_posix(),
+        "train_dataset_sha256": sha256_file(binding["train_path"]),
+        "validation_dataset_path": binding["validation_path"].relative_to(manifest_root).as_posix(),
+        "validation_dataset_sha256": sha256_file(binding["validation_path"]),
+        "output_dir": str(Path(config.output_dir).resolve()),
+        "split_manifest_path": "manifest.json",
+        "split_manifest_sha256": sha256_file(binding["manifest_path"]),
+        "split_manifest_digest": manifest["manifest_digest"],
+        "split_manifest_schema_version": manifest["schema_version"],
+        "split_policy_version": manifest["split_policy_version"],
+        "split_seed": manifest["split_seed"],
     }
 
 
@@ -437,7 +1132,16 @@ def build_training_data_loaders(
             f"count={len(overlapping_game_ids)}, "
             f"examples={overlapping_game_ids[:10]}"
         )
-    _training_dataset_contract(train_dataset, validation_dataset)
+    dataset_contract = _training_dataset_contract(train_dataset, validation_dataset)
+    is_canonical_d = dataset_contract["source_schema_version"] == D_SCHEMA_VERSION
+    if is_canonical_d:
+        if config.resolved_split_manifest_path is None:
+            raise ValueError("canonical D training requires --split-manifest")
+        validate_canonical_d_training_contract(
+            config, train_dataset, validation_dataset
+        )
+    elif config.resolved_split_manifest_path is not None:
+        raise ValueError("--split-manifest is restricted to canonical D V1 training")
     return train_loader, train_dataset, validation_loader, validation_dataset
 
 
@@ -471,23 +1175,26 @@ def _training_dataset_contract(
 def _public_only_lineage_metadata(
     dataset_contract: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if dataset_contract["source_schema_version"] == D_SCHEMA_VERSION:
+        return {
+            "schema_version": D_SCHEMA_VERSION,
+            "belief_information_scope": dataset_contract["belief_information_scope"],
+            "private_fields_usage": dataset_contract["private_fields_usage"],
+            "annotation_schema_version": dataset_contract["annotation_schema_version"],
+            "label_provenance": dataset_contract["label_provenance"],
+            "source_label_provenance": dataset_contract["source_label_provenance"],
+        }
     if dataset_contract["belief_information_scope"] != (
         PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE
     ):
         return {}
     return {
         "schema_version": dataset_contract["source_schema_version"],
-        "belief_information_scope": dataset_contract[
-            "belief_information_scope"
-        ],
+        "belief_information_scope": dataset_contract["belief_information_scope"],
         "private_fields_usage": dataset_contract["private_fields_usage"],
-        "annotation_schema_version": dataset_contract[
-            "annotation_schema_version"
-        ],
+        "annotation_schema_version": dataset_contract["annotation_schema_version"],
         "label_provenance": dataset_contract["label_provenance"],
-        "source_label_provenance": dataset_contract[
-            "source_label_provenance"
-        ],
+        "source_label_provenance": dataset_contract["source_label_provenance"],
     }
 
 
@@ -907,6 +1614,8 @@ def checkpoint_payload(
     run_provenance: Mapping[str, Any],
     dataset_contract: Mapping[str, Any] | None = None,
     learning_rate_schedule: Mapping[str, Any] | None = None,
+    training_manifest: Mapping[str, Any] | None = None,
+    training_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     if dataset_contract is None:
         dataset_contract = {
@@ -914,12 +1623,56 @@ def checkpoint_payload(
             "source_schema_version": SAMPLE_SCHEMA_VERSION,
             "model_input_scope": TOM_INPUT_SCOPES[config.tom_order],
         }
+    serialized_training_config = asdict(config)
+    if config.split_manifest_path is None:
+        serialized_training_config.pop("split_manifest_path", None)
+    else:
+        serialized_training_config["split_manifest_path"] = "manifest.json"
     selection_metric_value = float(validation_metrics["mean_loss"])
+    canonical_d_metadata: dict[str, Any] = {}
+    if dataset_contract["source_schema_version"] == D_SCHEMA_VERSION:
+        if training_manifest is None or training_manifest_sha256 is None:
+            raise ValueError(
+                "canonical D checkpoint requires the written training manifest identity"
+            )
+        training_manifest = validate_training_manifest(training_manifest)
+        _lower_hex(
+            training_manifest_sha256, length=64,
+            field_name="training_manifest_sha256",
+        )
+        if training_manifest.get("schema_version") != TRAINING_MANIFEST_SCHEMA_VERSION:
+            raise ValueError("canonical D checkpoint training manifest schema mismatch")
+        canonical_d_metadata = {
+            "materialization_task": training_manifest["materialization_task"],
+            "d_materialization_policy_version": training_manifest[
+                "d_materialization_policy_version"
+            ],
+            "belief_information_scope": dataset_contract["belief_information_scope"],
+            "private_fields_usage": dataset_contract["private_fields_usage"],
+            "annotation_schema_version": dataset_contract["annotation_schema_version"],
+            "label_provenance": dataset_contract["label_provenance"],
+            "source_label_provenance": dataset_contract["source_label_provenance"],
+            "training_manifest_schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+            "training_manifest_sha256": training_manifest_sha256,
+            "training_manifest_digest": training_manifest["manifest_digest"],
+            "split_manifest_schema_version": training_manifest["split_manifest_schema_version"],
+            "split_manifest_sha256": training_manifest["split_manifest_sha256"],
+            "split_policy_version": training_manifest["split_policy_version"],
+            "split_seed": training_manifest["split_seed"],
+        }
+        if config.tom_order == 2:
+            canonical_d_metadata.update(
+                {
+                    "tom2_target_semantics": TOM2_TARGET_SEMANTICS,
+                    "tom2_temporal_supervision_policy": TOM2_TEMPORAL_SUPERVISION_POLICY,
+                }
+            )
     return {
         "schema_version": dataset_contract["source_schema_version"],
         "tom_order": config.tom_order,
         "model_input_scope": dataset_contract["model_input_scope"],
         **_public_only_lineage_metadata(dataset_contract),
+        **canonical_d_metadata,
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -933,7 +1686,7 @@ def checkpoint_payload(
             "validation_dataset_path"
         ],
         "training_config": {
-            **asdict(config),
+            **serialized_training_config,
             "output_dir": run_provenance["output_dir"],
             "dataset_path": run_provenance["train_dataset_path"],
             "validation_dataset_path": run_provenance[
@@ -974,6 +1727,27 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         train_dataset,
         validation_dataset,
     )
+    is_canonical_d = dataset_contract["source_schema_version"] == D_SCHEMA_VERSION
+    if is_canonical_d and config.resolved_split_manifest_path is None:
+        raise ValueError("canonical D training requires --split-manifest")
+    if not is_canonical_d and config.resolved_split_manifest_path is not None:
+        raise ValueError("--split-manifest is restricted to canonical D V1 training")
+
+    canonical_context = None
+    training_manifest = None
+    training_manifest_sha256 = None
+    if is_canonical_d:
+        canonical_context = validate_canonical_d_training_contract(
+            config, train_dataset, validation_dataset
+        )
+        training_manifest = build_training_manifest(
+            config,
+            resolved_device=device,
+            run_provenance=run_provenance,
+            dataset_contract=dataset_contract,
+            canonical_context=canonical_context,
+        )
+
     public_only_metadata = _public_only_lineage_metadata(dataset_contract)
     if public_only_metadata:
         run_provenance = {
@@ -995,6 +1769,35 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             steps_per_epoch=len(train_loader),
         )
     )
+    if training_manifest is not None:
+        training_manifest_path = output_dir / "training_manifest.json"
+        _atomic_json_write(training_manifest, training_manifest_path)
+        written_training_manifest = validate_training_manifest(
+            json.loads(training_manifest_path.read_text(encoding="utf-8"))
+        )
+        if written_training_manifest != training_manifest:
+            raise RuntimeError(
+                "written training manifest differs from source manifest"
+            )
+        training_manifest_sha256 = sha256_file(training_manifest_path)
+        run_provenance = {
+            **run_provenance,
+            "training_manifest_schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+            "training_manifest_sha256": training_manifest_sha256,
+            "training_manifest_digest": training_manifest["manifest_digest"],
+            "materialization_task": training_manifest["materialization_task"],
+            "d_materialization_policy_version": D_MATERIALIZATION_POLICY_VERSION,
+            "train_source_row_count": training_manifest["train_source_row_count"],
+            "validation_source_row_count": training_manifest[
+                "validation_source_row_count"
+            ],
+            "train_effective_supervised_snapshot_count": training_manifest[
+                "train_effective_supervised_snapshot_count"
+            ],
+            "validation_effective_supervised_snapshot_count": training_manifest[
+                "validation_effective_supervised_snapshot_count"
+            ],
+        }
     best_checkpoint_path = output_dir / "best.pt"
     last_checkpoint_path = output_dir / "last.pt"
     history = []
@@ -1051,6 +1854,8 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                     run_provenance=run_provenance,
                     dataset_contract=dataset_contract,
                     learning_rate_schedule=learning_rate_schedule,
+                    training_manifest=training_manifest,
+                    training_manifest_sha256=training_manifest_sha256,
                 ),
                 best_checkpoint_path,
             )
@@ -1069,6 +1874,8 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             run_provenance=run_provenance,
             dataset_contract=dataset_contract,
             learning_rate_schedule=learning_rate_schedule,
+            training_manifest=training_manifest,
+            training_manifest_sha256=training_manifest_sha256,
         ),
         last_checkpoint_path,
     )
@@ -1098,6 +1905,34 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         ),
         "run_provenance": dict(run_provenance),
     }
+    if training_manifest is not None:
+        summary.update(
+            {
+                "training_manifest_schema_version": TRAINING_MANIFEST_SCHEMA_VERSION,
+                "training_manifest_sha256": training_manifest_sha256,
+                "training_manifest_digest": training_manifest["manifest_digest"],
+                "split_manifest_sha256": training_manifest["split_manifest_sha256"],
+                "split_manifest_schema_version": training_manifest["split_manifest_schema_version"],
+                "split_policy_version": training_manifest["split_policy_version"],
+                "split_seed": training_manifest["split_seed"],
+                "materialization_task": training_manifest["materialization_task"],
+                "d_materialization_policy_version": D_MATERIALIZATION_POLICY_VERSION,
+                "train_source_row_count": training_manifest["train_source_row_count"],
+                "validation_source_row_count": training_manifest["validation_source_row_count"],
+                "train_effective_supervised_snapshot_count": training_manifest[
+                    "train_effective_supervised_snapshot_count"
+                ],
+                "validation_effective_supervised_snapshot_count": training_manifest[
+                    "validation_effective_supervised_snapshot_count"
+                ],
+                "tom2_target_semantics": training_manifest[
+                    "tom2_target_semantics"
+                ],
+                "tom2_temporal_supervision_policy": training_manifest[
+                    "tom2_temporal_supervision_policy"
+                ],
+            }
+        )
     run_dir = (
         Path(run_provenance["output_dir"])
         / f"tom_order_{config.tom_order}"
@@ -1119,15 +1954,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir", required=True,
-        help="Repository-local root for a new, empty training run directory.",
+        help=(
+            "Root for a new, empty training run directory; Canonical D mode "
+            "may place it outside the Git worktree."
+        ),
     )
     parser.add_argument(
         "--dataset", required=True,
-        help="Repository-local training JSONL file.",
+        help=(
+            "Training JSONL file; legacy mode requires a repository-local path, "
+            "Canonical D mode binds it to --split-manifest."
+        ),
     )
     parser.add_argument(
         "--validation-dataset", required=True,
-        help="Repository-local validation JSONL file with disjoint game IDs.",
+        help="Validation JSONL file with disjoint game IDs.",
+    )
+    parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help=(
+            "Required Canonical D Split V1 manifest for canonical D training; "
+            "legacy training leaves this unset."
+        ),
     )
     parser.add_argument(
         "--backbone",
@@ -1179,6 +2028,7 @@ def main() -> int:
             output_dir=args.output_dir,
             dataset_path=args.dataset,
             validation_dataset_path=args.validation_dataset,
+            split_manifest_path=args.split_manifest,
             backbone=args.backbone,
             epochs=args.epochs,
             batch_size=args.batch_size,

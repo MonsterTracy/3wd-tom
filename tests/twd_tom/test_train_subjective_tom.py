@@ -18,6 +18,10 @@ from script.twd_tom.eval import (
     evaluate_checkpoint,
 )
 from script.twd_tom.train import (
+    CANONICAL_D_TRAINING_INTEGRATION_VERSION,
+    TOM2_TARGET_SEMANTICS,
+    TOM2_TEMPORAL_SUPERVISION_POLICY,
+    TRAINING_MANIFEST_SCHEMA_VERSION,
     TrainingConfig,
     _atomic_json_write,
     _atomic_torch_save,
@@ -30,6 +34,7 @@ from script.twd_tom.train import (
     build_data_loader,
     build_model,
     build_run_provenance,
+    load_canonical_d_split_manifest,
     build_training_data_loaders,
     evaluate_model,
     run_training,
@@ -61,6 +66,19 @@ from werewolf.models.twd_tom.schema import (
     SECOND_ORDER_TARGET_ENCODING,
 )
 from werewolf.models.twd_tom.samples import PUBLIC_ONLY_SAMPLE_SCHEMA_VERSION
+from script.twd_tom.split_offline_d_training_data import (
+    SPLIT_MANIFEST_SCHEMA_VERSION,
+    SPLIT_POLICY_VERSION,
+    split_offline_d_training_data,
+)
+from werewolf.offline_materialization import (
+    D_MATERIALIZATION_POLICY_VERSION,
+    D_SCHEMA_VERSION,
+    OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK,
+    OFFLINE_PUBLIC_ONLY_TOM2_TASK,
+)
+from werewolf.trajectory import canonical_digest, canonical_json
+from tests.twd_tom.test_twd_tom_dataset import d_sample
 from tests.twd_tom.public_event_fixtures import (
     make_public_only_training_sample,
     make_training_sample,
@@ -98,6 +116,43 @@ def _source_sample_without_latest_action(split: str) -> dict:
 @pytest.fixture(autouse=True)
 def synthetic_run_provenance(monkeypatch):
     def build(config, *, resolved_device):
+        if config.resolved_split_manifest_path is not None:
+            manifest_path = config.resolved_split_manifest_path.resolve()
+            manifest = load_canonical_d_split_manifest(manifest_path)
+            manifest_root = manifest_path.parent
+            train_dataset_path = config.resolved_dataset_path.resolve().relative_to(
+                manifest_root
+            ).as_posix()
+            validation_dataset_path = (
+                config.resolved_validation_dataset_path.resolve().relative_to(
+                    manifest_root
+                ).as_posix()
+            )
+            return {
+                "git_commit_sha": "1" * 40,
+                "git_worktree_clean": True,
+                "train_dataset_path": train_dataset_path,
+                "train_dataset_sha256": sha256_file(config.resolved_dataset_path),
+                "validation_dataset_path": validation_dataset_path,
+                "validation_dataset_sha256": sha256_file(
+                    config.resolved_validation_dataset_path
+                ),
+                "output_dir": str(Path(config.output_dir).resolve()),
+                "python_version": "test",
+                "torch_version": str(torch.__version__),
+                "transformers_version": "test",
+                "platform": "test",
+                "requested_device": config.device,
+                "resolved_device": str(resolved_device),
+                "deterministic_algorithms_enabled": True,
+                "seed": config.seed,
+                "split_manifest_path": "manifest.json",
+                "split_manifest_sha256": sha256_file(manifest_path),
+                "split_manifest_digest": manifest["manifest_digest"],
+                "split_manifest_schema_version": manifest["schema_version"],
+                "split_policy_version": manifest["split_policy_version"],
+                "split_seed": manifest["split_seed"],
+            }
         return {
             "git_commit_sha": "1" * 40,
             "git_worktree_clean": True,
@@ -140,6 +195,7 @@ def _training_config(
     validation_sample: dict | None = None,
     epochs: int = 1,
     backbone: str = QWEN2_BACKBONE_NAME,
+    split_manifest_path: str | None = None,
 ) -> TrainingConfig:
     train_path = tmp_path / f"tom{tom_order}_train.jsonl"
     validation_path = tmp_path / f"tom{tom_order}_validation.jsonl"
@@ -153,12 +209,70 @@ def _training_config(
         output_dir=str(tmp_path / "outputs"),
         dataset_path=str(train_path),
         validation_dataset_path=str(validation_path),
+        split_manifest_path=split_manifest_path,
         backbone=backbone,
         epochs=epochs,
         batch_size=1,
         device="cpu",
         max_seq_len=32,
     )
+
+
+def _redigest_d_record(record: dict, *, game_id: str, step_idx: int) -> dict:
+    value = deepcopy(record)
+    value["game_id"] = game_id
+    value["step_idx"] = step_idx
+    value["label_cutoff_step_idx"] = step_idx
+    value["boundary_id"] = f"{game_id}:step_{step_idx:06d}:PRE_PUBLIC_SPEECH"
+    value.pop("record_digest", None)
+    value["record_digest"] = canonical_digest(value)
+    return value
+
+
+def _canonical_d_split_fixture(tmp_path: Path):
+    game_ids = ["d_game_001", "d_game_002", "d_game_003"]
+    tom1_rows = [
+        _redigest_d_record(d_sample(1), game_id=game_id, step_idx=10 + index)
+        for index, game_id in enumerate(game_ids)
+    ]
+    tom2_rows = []
+    for index, game_id in enumerate(game_ids):
+        base_step = 20 + index * 2
+        tom2_rows.append(
+            _redigest_d_record(
+                d_sample(2, with_latest_action=False),
+                game_id=game_id,
+                step_idx=base_step,
+            )
+        )
+        tom2_rows.append(
+            _redigest_d_record(
+                d_sample(2, with_latest_action=True),
+                game_id=game_id,
+                step_idx=base_step + 1,
+            )
+        )
+    tom1_source = tmp_path / "source_tom1.jsonl"
+    tom2_source = tmp_path / "source_tom2.jsonl"
+    tom1_source.write_text(
+        "".join(canonical_json(row) + "\n" for row in tom1_rows),
+        encoding="utf-8",
+    )
+    tom2_source.write_text(
+        "".join(canonical_json(row) + "\n" for row in tom2_rows),
+        encoding="utf-8",
+    )
+    split_root = tmp_path / "canonical_split"
+    manifest = split_offline_d_training_data(
+        tom1_path=tom1_source,
+        tom2_path=tom2_source,
+        output_dir=split_root,
+        split_seed=17,
+        train_game_count=1,
+        validation_game_count=1,
+        test_game_count=1,
+    )
+    return split_root, manifest
 
 
 def test_cli_requires_explicit_train_and_validation_datasets():
@@ -840,6 +954,172 @@ def test_second_order_loss_aggregates_all_valid_other_player_rows():
     torch.testing.assert_close(actual, expected)
 
 
+def test_canonical_d_loader_requires_split_manifest(tmp_path):
+    split_root, _manifest = _canonical_d_split_fixture(tmp_path)
+    config = TrainingConfig(
+        tom_order=1,
+        output_dir=str(tmp_path / "outputs"),
+        dataset_path=str(split_root / "tom1" / "train.jsonl"),
+        validation_dataset_path=str(split_root / "tom1" / "validation.jsonl"),
+        batch_size=1,
+        device="cpu",
+        max_seq_len=32,
+    )
+    with pytest.raises(ValueError, match="requires --split-manifest"):
+        build_training_data_loaders(config)
+
+
+def test_canonical_d_split_manifest_tamper_is_rejected(tmp_path):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    manifest_path = split_root / "manifest.json"
+    tampered = deepcopy(manifest)
+    tampered["split_seed"] += 1
+    manifest_path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest_digest"):
+        load_canonical_d_split_manifest(manifest_path)
+
+
+def test_canonical_d_training_manifest_and_checkpoint_lineage(tmp_path, monkeypatch):
+    split_root, manifest = _canonical_d_split_fixture(tmp_path)
+    config = TrainingConfig(
+        tom_order=2,
+        output_dir=str(tmp_path / "outside_repo_outputs"),
+        dataset_path=str(split_root / "tom2" / "train.jsonl"),
+        validation_dataset_path=str(split_root / "tom2" / "validation.jsonl"),
+        split_manifest_path=str(split_root / "manifest.json"),
+        epochs=1,
+        batch_size=1,
+        device="cpu",
+        max_seq_len=32,
+    )
+
+    monkeypatch.setattr(
+        train_module,
+        "train_one_epoch",
+        lambda *_args, **_kwargs: {"mean_loss": 1.0, "valid_subject_count": 1},
+    )
+    monkeypatch.setattr(
+        train_module,
+        "evaluate_model",
+        lambda *_args, **_kwargs: {"mean_loss": 0.5, "valid_subject_count": 1},
+    )
+    summary = run_training(config)
+    training_manifest_path = config.run_output_dir / "training_manifest.json"
+    training_manifest = json.loads(training_manifest_path.read_text(encoding="utf-8"))
+    expected_fields = {
+        "schema_version", "integration_version", "training_code_commit",
+        "git_worktree_clean", "tom_order", "split_manifest_schema_version",
+        "split_policy_version", "split_seed", "split_manifest_sha256",
+        "split_manifest_digest", "d_schema_version",
+        "d_materialization_policy_version", "materialization_task",
+        "materializer_code_commits", "belief_information_scope",
+        "model_input_scope", "private_fields_usage",
+        "annotation_schema_version", "label_provenance",
+        "source_label_provenance", "train_dataset_relative_path",
+        "validation_dataset_relative_path", "train_dataset_sha256",
+        "validation_dataset_sha256", "train_game_ids", "validation_game_ids",
+        "train_source_row_count", "validation_source_row_count",
+        "train_effective_supervised_snapshot_count",
+        "validation_effective_supervised_snapshot_count",
+        "tom2_target_semantics", "tom2_temporal_supervision_policy",
+        "train_cyclic_rotation_enabled", "validation_cyclic_rotation_enabled",
+        "cyclic_rotation_version", "augmentation_seed", "training_config",
+        "python_version", "torch_version", "transformers_version", "platform",
+        "requested_device", "resolved_device", "manifest_digest",
+    }
+    assert set(training_manifest) == expected_fields
+    assert training_manifest["schema_version"] == TRAINING_MANIFEST_SCHEMA_VERSION
+    assert training_manifest["integration_version"] == (
+        CANONICAL_D_TRAINING_INTEGRATION_VERSION
+    )
+    assert training_manifest["d_schema_version"] == D_SCHEMA_VERSION
+    assert training_manifest["d_materialization_policy_version"] == (
+        D_MATERIALIZATION_POLICY_VERSION
+    )
+    assert training_manifest["materialization_task"] == OFFLINE_PUBLIC_ONLY_TOM2_TASK
+    assert training_manifest["split_manifest_schema_version"] == (
+        SPLIT_MANIFEST_SCHEMA_VERSION
+    )
+    assert training_manifest["split_policy_version"] == SPLIT_POLICY_VERSION
+    assert training_manifest["split_seed"] == manifest["split_seed"]
+    assert training_manifest["tom2_target_semantics"] == TOM2_TARGET_SEMANTICS
+    assert training_manifest["tom2_temporal_supervision_policy"] == (
+        TOM2_TEMPORAL_SUPERVISION_POLICY
+    )
+    payload = deepcopy(training_manifest)
+    digest = payload.pop("manifest_digest")
+    assert canonical_digest(payload) == digest
+    assert training_manifest["train_source_row_count"] == 2
+    assert training_manifest["validation_source_row_count"] == 2
+    assert 0 < training_manifest["train_effective_supervised_snapshot_count"] < 2
+    assert 0 < training_manifest[
+        "validation_effective_supervised_snapshot_count"
+    ] < 2
+
+    checkpoint = torch.load(
+        config.run_output_dir / "best.pt", map_location="cpu", weights_only=True
+    )
+    assert checkpoint["schema_version"] == D_SCHEMA_VERSION
+    assert checkpoint["materialization_task"] == OFFLINE_PUBLIC_ONLY_TOM2_TASK
+    assert checkpoint["training_manifest_schema_version"] == (
+        TRAINING_MANIFEST_SCHEMA_VERSION
+    )
+    assert checkpoint["training_manifest_sha256"] == summary[
+        "training_manifest_sha256"
+    ]
+    assert checkpoint["split_manifest_sha256"] == training_manifest[
+        "split_manifest_sha256"
+    ]
+    assert checkpoint["tom2_target_semantics"] == TOM2_TARGET_SEMANTICS
+    assert build_model_from_checkpoint(
+        checkpoint, device=torch.device("cpu")
+    ).tom_order == 2
+
+
+def test_canonical_d_tom1_manifest_uses_null_tom2_and_rotation_fields(
+    tmp_path, monkeypatch
+):
+    split_root, _manifest = _canonical_d_split_fixture(tmp_path)
+    config = TrainingConfig(
+        tom_order=1,
+        output_dir=str(tmp_path / "d_tom1_outputs"),
+        dataset_path=str(split_root / "tom1" / "train.jsonl"),
+        validation_dataset_path=str(split_root / "tom1" / "validation.jsonl"),
+        split_manifest_path=str(split_root / "manifest.json"),
+        epochs=1,
+        batch_size=1,
+        device="cpu",
+        max_seq_len=32,
+    )
+    monkeypatch.setattr(
+        train_module,
+        "train_one_epoch",
+        lambda *_args, **_kwargs: {"mean_loss": 1.0, "valid_subject_count": 1},
+    )
+    monkeypatch.setattr(
+        train_module,
+        "evaluate_model",
+        lambda *_args, **_kwargs: {"mean_loss": 0.5, "valid_subject_count": 1},
+    )
+    run_training(config)
+    manifest = json.loads(
+        (config.run_output_dir / "training_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["materialization_task"] == OFFLINE_PRIVATE_CONDITIONED_TOM1_TASK
+    assert manifest["train_source_row_count"] == manifest[
+        "train_effective_supervised_snapshot_count"
+    ]
+    assert manifest["validation_source_row_count"] == manifest[
+        "validation_effective_supervised_snapshot_count"
+    ]
+    assert manifest["tom2_target_semantics"] is None
+    assert manifest["tom2_temporal_supervision_policy"] is None
+    assert manifest["train_cyclic_rotation_enabled"] is False
+    assert manifest["validation_cyclic_rotation_enabled"] is False
+    assert manifest["cyclic_rotation_version"] is None
+    assert manifest["augmentation_seed"] is None
+
+
 @pytest.mark.parametrize("value", [0, 3, True, None, "1"])
 def test_invalid_tom_order_is_rejected(tmp_path, value):
     with pytest.raises(ValueError, match="tom_order"):
@@ -912,6 +1192,51 @@ def test_run_provenance_records_clean_git_data_environment_and_device(tmp_path):
     ):
         assert provenance[field]
     assert str(tmp_path) not in json.dumps(provenance)
+
+
+def test_canonical_d_run_provenance_allows_external_data_and_output_roots(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "-c", "user.name=ToM Test",
+            "-c", "user.email=tom-test@example.invalid", "commit", "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    data_root = tmp_path / "external_data"
+    data_root.mkdir()
+    split_root, manifest = _canonical_d_split_fixture(data_root)
+    config = TrainingConfig(
+        tom_order=1,
+        output_dir=str(data_root / "outputs"),
+        dataset_path=str(split_root / "tom1" / "train.jsonl"),
+        validation_dataset_path=str(split_root / "tom1" / "validation.jsonl"),
+        split_manifest_path=str(split_root / "manifest.json"),
+        device="cpu",
+    )
+    provenance = build_run_provenance(
+        config, resolved_device=torch.device("cpu"), repo_root=repo
+    )
+    assert provenance["train_dataset_path"] == "tom1/train.jsonl"
+    assert provenance["validation_dataset_path"] == "tom1/validation.jsonl"
+    assert provenance["split_manifest_path"] == "manifest.json"
+    assert provenance["split_manifest_sha256"] == sha256_file(
+        split_root / "manifest.json"
+    )
+    assert provenance["split_manifest_digest"] == manifest["manifest_digest"]
+    assert provenance["output_dir"] == str((data_root / "outputs").resolve())
+    assert str(split_root.resolve()) not in json.dumps(
+        {
+            "train_dataset_path": provenance["train_dataset_path"],
+            "validation_dataset_path": provenance["validation_dataset_path"],
+            "split_manifest_path": provenance["split_manifest_path"],
+        }
+    )
 
 
 def test_run_provenance_rejects_dirty_worktree_and_lists_file(tmp_path):

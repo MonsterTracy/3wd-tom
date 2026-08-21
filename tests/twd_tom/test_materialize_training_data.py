@@ -6,12 +6,12 @@ from copy import deepcopy
 import pytest
 import torch
 
-import script.twd_tom.materialize_training_data as materializer_module
-from script.twd_tom.materialize_training_data import (
+import archive.legacy_tom.script.twd_tom.materialize_training_data as materializer_module
+from archive.legacy_tom.script.twd_tom.materialize_training_data import (
     materialize_training_data,
     materialize_training_records,
 )
-from script.twd_tom.project_suspicion_to_pairs import (
+from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
     project_suspicion_sample,
 )
 from werewolf.models.twd_tom.dataset import (

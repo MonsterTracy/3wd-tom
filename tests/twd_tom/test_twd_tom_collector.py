@@ -23,7 +23,7 @@ class Env:
                 "speaker": "player1",
                 "raw_text": "earlier",
                 "sp_actions": [
-                    ["player3", "point_as_werewolf", "player7"]
+                    ["player1", "point_as_werewolf", "player7"]
                 ],
             },
             {
@@ -93,7 +93,7 @@ def test_collector_uses_exact_pre_speech_history(tmp_path):
             "event_type": "public_speech",
             "speaker": "player3",
             "raw_text": "current speech",
-            "sp_actions": [["player4", "oppose", "player3"]],
+            "sp_actions": [["player3", "oppose", "player4"]],
         }
         env.public_events.append(
             {

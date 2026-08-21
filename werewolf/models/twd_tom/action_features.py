@@ -12,7 +12,11 @@ from werewolf.models.twd_tom.public_events import (
     STRUCTURED_TOKEN_TO_ID,
     structured_event_tokens,
 )
-from werewolf.models.twd_tom.schema import ACTION_TO_ID, PLAYER_TO_ID
+from werewolf.models.twd_tom.schema import (
+    ACTION_TO_ID,
+    NONE_TOKEN,
+    PLAYER_TO_ID,
+)
 
 
 class PublicEventFeatureBuilder:
@@ -140,11 +144,19 @@ class PublicEventFeatureBuilder:
             for token in group
         ]
         for token in tokens:
+            object_id = (
+                PLAYER_TO_ID[NONE_TOKEN]
+                if (
+                    token["token_type"] == "speech_action"
+                    and token["object"] is None
+                )
+                else PLAYER_TO_ID.get(token["object"], 0)
+            )
             encoded.append(
                 (
                     PLAYER_TO_ID.get(token["subject"], 0),
                     ACTION_TO_ID.get(token["action"], 0),
-                    PLAYER_TO_ID.get(token["object"], 0),
+                    object_id,
                     STRUCTURED_TOKEN_TO_ID[token["token_type"]],
                     PHASE_TO_ID.get(token["phase"], 0),
                     float(token["day"]),

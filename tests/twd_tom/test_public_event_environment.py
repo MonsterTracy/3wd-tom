@@ -1,3 +1,5 @@
+import pytest
+
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.public_events import normalize_public_events
 
@@ -14,10 +16,15 @@ ROLES = [
 
 
 class Parser:
-    def parse(self, **_kwargs):
+    def __init__(self):
+        self.calls = []
+
+    def parse(self, **kwargs):
+        self.calls.append(kwargs)
+        speaker = f"player{kwargs['speaker']}"
         return [
-            ["player1", "support", "player2"],
-            ["player1", "oppose", "player3"],
+            [speaker, "support", "player2"],
+            [speaker, "oppose", "player3"],
         ]
 
 
@@ -33,7 +40,7 @@ def _env(parser=None):
 def _finish_first_night(env, target):
     env.step(("kill", target))
     env.step(("kill", target))
-    env.step(("check", 0))
+    env.step(("check", 1))
     env.step(("witch_pass", 0))
 
 
@@ -60,8 +67,8 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
         "speaker": speaker,
         "raw_text": "final public text",
         "sp_actions": [
-            ["player1", "support", "player2"],
-            ["player1", "oppose", "player3"],
+            [speaker, "support", "player2"],
+            [speaker, "oppose", "player3"],
         ],
     }
     assert len(
@@ -71,6 +78,76 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
             if event["event_type"] == "public_speech"
         ]
     ) == 1
+
+
+def test_structured_speech_bypasses_parser_and_commits_exact_semantics():
+    class ForbiddenParser:
+        def parse(self, **_kwargs):
+            raise AssertionError("structured speech must bypass SpeechPerceiver")
+
+    env = _env(ForbiddenParser())
+    _finish_first_night(env, 5)
+    speaker = f"player{env.current_act_idx + 1}"
+    payload = {
+        "raw_text": "deterministic speech",
+        "sp_actions": [
+            [speaker, "oppose", "player1"],
+            [speaker, "vote_intent", "player3"],
+        ],
+    }
+
+    env.step(("speech", payload))
+
+    public_speech = next(
+        event for event in env.public_events
+        if event["event_type"] == "public_speech"
+    )
+    speech_log = next(
+        log for log in env.game_log if log.event == "speech"
+    )
+    assert public_speech["raw_text"] == payload["raw_text"]
+    assert public_speech["sp_actions"] == payload["sp_actions"]
+    assert speech_log.content == {
+        "speech_content": payload["raw_text"],
+        "sp_actions": public_speech["sp_actions"],
+    }
+
+
+@pytest.mark.parametrize("action_name", ("abstain_intent", "no_commitment"))
+def test_structured_targetless_speech_commits_null(action_name):
+    env = _env()
+    _finish_first_night(env, 5)
+    speaker = f"player{env.current_act_idx + 1}"
+    env.step(("speech", {
+        "raw_text": "targetless",
+        "sp_actions": [[speaker, action_name, None]],
+    }))
+    assert env.public_events[-2]["sp_actions"] == [
+        [speaker, action_name, None]
+    ]
+
+
+def test_structured_speech_rejects_wrong_subject_and_extra_fields():
+    env = _env()
+    _finish_first_night(env, 5)
+    before = list(env.public_events)
+    speaker = f"player{env.current_act_idx + 1}"
+    wrong_speaker = "player1" if speaker != "player1" else "player2"
+
+    with pytest.raises(ValueError, match="subject must equal event speaker"):
+        env.step(("speech", {
+            "raw_text": "x",
+            "sp_actions": [[wrong_speaker, "oppose", "player2"]],
+        }))
+    assert env.public_events == before
+
+    with pytest.raises(ValueError, match="field set mismatch"):
+        env.step(("speech", {
+            "raw_text": "x",
+            "sp_actions": [],
+            "extra": True,
+        }))
+    assert env.public_events == before
 
 
 def test_empty_death_and_empty_speech_remain_explicit_events():

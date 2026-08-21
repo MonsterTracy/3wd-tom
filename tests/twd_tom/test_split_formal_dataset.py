@@ -8,7 +8,7 @@ import pytest
 from tests.twd_tom.public_event_fixtures import public_history_fields
 from werewolf.models.twd_tom.public_events import public_speech_actions
 
-from script.twd_tom.split_formal_dataset import (
+from archive.legacy_tom.script.twd_tom.split_formal_dataset import (
     split_projected_dataset,
 )
 from werewolf.models.twd_tom.samples import (
@@ -610,7 +610,7 @@ def test_write_failure_removes_temporary_directory(
     projected_sample_factory,
     monkeypatch,
 ):
-    from script.twd_tom import (
+    from archive.legacy_tom.script.twd_tom import (
         split_formal_dataset as splitter,
     )
 

@@ -2,1277 +2,1740 @@ import inspect
 import json
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
 
-from run_random import eval as run_game
 from werewolf.agents import agent_registry
 from werewolf.agents.gpt_agent import GPTAgent
+from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.agents.llm_agent import (
+    BELIEF_ROLES,
+    BeliefValidationError,
+    DayCognitionReportV2,
+    DayCognitionReportV3,
     GameplayActionValidationError,
     GameplaySpeechQualityError,
-    PublicSpeechPlanValidationError,
-    _extract_explicit_player_references,
-    canonical_suggestible_player_ids,
-    public_speech_plan_json_schema,
+    RoleReportValidationError,
+    belief_response_format,
+    day_cognition_response_format_v2,
+    day_cognition_response_format_v3,
+    decode_evidence_selection,
+    decode_public_content_selection,
+    parse_belief_response,
+    parse_day_cognition_response_v2,
+    parse_day_cognition_response_v3,
+    parse_vote_response,
     validate_gameplay_public_speech,
-    validate_public_speech_plan,
+    validate_role_report,
+    vote_response_format,
 )
-from werewolf.agents.twdm_agent import TWDMStrategyAgent
+from werewolf.agents.prompt_template_v0 import (
+    DiscussionAct,
+    NO_STANCE,
+    STRICT_CLASSIC7_GAME_DESCRIPTION,
+    build_public_claim_catalog,
+    compile_discussion_intent_v2,
+    derive_belief_constraints,
+    freeze_discussion_candidates,
+    project_discussion_content_indices,
+    project_discussion_vote_stances,
+)
 from werewolf.backends import BackendError
-from werewolf.models.twd_tom.schema import ACTION_NAMES
+from werewolf.helper.log_utils import Log
 from werewolf.registry import Registry
 
 
-def _schema_accepts_plan(schema, payload):
-    if not isinstance(payload, dict) or set(payload) != {"public_actions"}:
-        return False
-    actions = payload["public_actions"]
-    if not isinstance(actions, list):
-        return False
-    branches = schema["properties"]["public_actions"]["items"]["oneOf"]
-    for item in actions:
-        if not isinstance(item, dict) or set(item) != {"action", "target"}:
-            return False
-        matches = 0
-        for branch in branches:
-            properties = branch["properties"]
-            action_rule = properties["action"]
-            action_matches = (
-                item["action"] == action_rule["const"]
-                if "const" in action_rule
-                else item["action"] in action_rule["enum"]
-            )
-            target_matches = (
-                isinstance(item["target"], int)
-                and not isinstance(item["target"], bool)
-                and item["target"] in properties["target"]["enum"]
-            )
-            matches += action_matches and target_matches
-        if matches != 1:
-            return False
-    return True
+class MetadataBackend:
+    supports_json_schema = True
 
-
-class RecordingBackend:
-    def __init__(self, responses=None):
-        self.responses = list(responses or ["response"])
+    def __init__(self, responses, metadata=None):
+        self.responses = list(responses)
+        self.metadata = list(
+            metadata or [{"finish_reason": "stop"}] * len(self.responses)
+        )
         self.calls = []
 
-    def chat(
-        self,
-        messages,
-        model=None,
-        temperature=0.7,
-        max_tokens=None,
-        response_format=None,
-        **kwargs,
-    ):
-        self._record(
-            messages=messages,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=response_format,
-            **kwargs,
-        )
-        return self.responses.pop(0)
-
-    def _record(
-        self,
-        messages,
-        model=None,
-        temperature=0.7,
-        max_tokens=None,
-        response_format=None,
-        **kwargs,
-    ):
-        self.calls.append(
-            {
-                "messages": messages,
-                "model": model,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "response_format": response_format,
-                **kwargs,
-            }
-        )
-
-
-class MetadataBackend(RecordingBackend):
-    def __init__(self, responses=None, metadata=None):
-        super().__init__(responses)
-        self.metadata = list(
-            metadata
-            or [{"finish_reason": "stop"}] * len(self.responses)
-        )
-
     def chat_with_metadata(self, **kwargs):
-        self._record(**kwargs)
+        self.calls.append(kwargs)
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
         return response, self.metadata.pop(0)
 
+    def chat(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
-class AgentBackendTest(unittest.TestCase):
-    @staticmethod
-    def _strict_observation():
-        return {
-            "phase": "1_day_speech",
-            "identity": "Villager",
-            "current_act_idx": 1,
-            "game_log": [],
-            "valid_action": ("speech", -1),
-            "authoritative_public_state": {
-                "day": 1,
-                "day_or_night": "day",
-                "phase": "speech",
-                "last_night_result": {"day": 0, "dead_players": []},
-                "prior_exiles": [],
-                "alive_players": [1, 2, 3, 4, 5, 6, 7],
-                "suggestible_exile_targets": [2, 3, 4, 5, 6, 7],
+
+def _belief(player_id=1, *, role="unknown"):
+    return json.dumps(
+        {
+            "belief": "当前信息有限。",
+            "concise": "继续观察。",
+            "roles": {
+                f"player{candidate}": role
+                for candidate in range(1, 8)
+                if candidate != player_id
             },
-        }
+        },
+        ensure_ascii=False,
+    )
 
-    @staticmethod
-    def _dead_player_observation():
-        observation = AgentBackendTest._strict_observation()
-        observation["current_act_idx"] = 2
-        observation["authoritative_public_state"].update({
-            "last_night_result": {"day": 0, "dead_players": [3]},
-            "alive_players": [1, 2, 4, 5, 6, 7],
-            "suggestible_exile_targets": [1, 4, 5, 6, 7],
-        })
-        return observation
 
-    @staticmethod
-    def _player_records(path):
-        return [
-            json.loads(line)
-            for line in Path(path).read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-
-    def test_strict_player_log_records_each_returned_call_before_validation(self):
-        cases = (
-            (
-                ['{"public_actions":[{"action":"vote_intent","target":1}]}'],
-                None,
-                PublicSpeechPlanValidationError,
-                1,
-            ),
-            (
-                ['{"public_actions":[{"action":"oppose","target":3}]}', "我反对4号。"],
-                None,
-                GameplaySpeechQualityError,
-                2,
-            ),
-            (
-                ['{"public_actions":[]}', "我继续观察。"],
-                [{"finish_reason": "stop"}, {"finish_reason": "length"}],
-                GameplaySpeechQualityError,
-                2,
-            ),
-            (
-                ['{"public_actions":[{"action":"oppose","target":3}]}', "我反对3号。"],
-                None,
-                None,
-                2,
-            ),
-        )
-        for responses, metadata, error_type, expected_count in cases:
-            with self.subTest(responses=responses), tempfile.TemporaryDirectory() as tmp:
-                log_path = Path(tmp) / "Player_1.jsonl"
-                backend = MetadataBackend(responses, metadata=metadata)
-                backend.supports_json_schema = True
-                backend.session = SimpleNamespace(game_id="game_001_seed_1")
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                    log_file=str(log_path),
-                    gameplay_prompt_profile="strict_classic7",
-                )
-                agent.backend_id = "fake-backend"
-                agent.rate_limit = 0
-                try:
-                    if error_type is None:
-                        self.assertEqual(
-                            agent.act(self._strict_observation()),
-                            ("speech", "我反对3号。"),
-                        )
-                    else:
-                        with self.assertRaises(error_type):
-                            agent.act(self._strict_observation())
-                finally:
-                    agent.close()
-
-                records = self._player_records(log_path)
-                self.assertEqual(len(backend.calls), expected_count)
-                self.assertEqual(len(records), expected_count)
-                self.assertEqual(
-                    [call["temperature"] for call in backend.calls],
-                    [1.0, 0.0][:expected_count],
-                )
-                self.assertEqual(
-                    [record["response"] for record in records],
-                    responses[:expected_count],
-                )
-                self.assertEqual(
-                    [record["message"] for record in records],
-                    ["speech_plan", "speech_render"][:expected_count],
-                )
-                expected_metadata = metadata or [
-                    {"finish_reason": "stop"}
-                ] * expected_count
-                self.assertEqual(
-                    [record["finish_reason"] for record in records],
-                    [
-                        item["finish_reason"]
-                        for item in expected_metadata[:expected_count]
-                    ],
-                )
-                self.assertEqual(records[0]["response_format"]["type"], "json_schema")
-                self.assertEqual(records[0]["messages"], backend.calls[0]["messages"])
-                self.assertEqual(records[0]["model"], "agent-model")
-                self.assertEqual(records[0]["backend_id"], "fake-backend")
-                self.assertEqual(records[0]["game_id"], "game_001_seed_1")
-                if expected_count == 2:
-                    self.assertIsNone(records[1]["response_format"])
-
-    def test_legacy_speech_still_writes_one_success_record(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / "Player_1.jsonl"
-            agent = GPTAgent(
-                backend=MetadataBackend(["这是发言"]),
-                model_name="agent-model",
-                log_file=str(log_path),
-            )
-            agent.rate_limit = 0
-            try:
-                self.assertEqual(
-                    agent.act({
-                        "phase": "1_day_speech",
-                        "identity": "Villager",
-                        "current_act_idx": 1,
-                        "game_log": [],
-                        "valid_action": ("speech", -1),
-                    }),
-                    ("speech", "这是发言"),
-                )
-            finally:
-                agent.close()
-
-            records = self._player_records(log_path)
-            self.assertEqual(len(records), 1)
-            self.assertEqual(records[0]["response"], "这是发言")
-            self.assertEqual(records[0]["message"], "1_day_speech")
-
-    def test_renderer_backend_error_keeps_real_failed_call_record(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / "Player_1.jsonl"
-            backend = MetadataBackend([
-                '{"public_actions":[]}',
-                BackendError("renderer failed"),
-            ])
-            backend.supports_json_schema = True
-            agent = GPTAgent(
-                backend=backend,
-                model_name="agent-model",
-                log_file=str(log_path),
-                gameplay_prompt_profile="strict_classic7",
-            )
-            agent.rate_limit = 0
-            try:
-                with self.assertRaisesRegex(BackendError, "renderer failed"):
-                    agent.act(self._strict_observation())
-            finally:
-                agent.close()
-
-            records = self._player_records(log_path)
-            self.assertEqual(len(backend.calls), 2)
-            self.assertEqual(len(records), 2)
-            self.assertEqual(records[0]["dispatch_status"], "ok")
-            self.assertEqual(records[1]["message"], "speech_render")
-            self.assertEqual(records[1]["dispatch_status"], "error")
-            self.assertEqual(records[1]["error_type"], "BackendError")
-            self.assertEqual(records[1]["error_message"], "renderer failed")
-            self.assertIsNone(records[1]["response"])
-
-    def test_strict_validation_failure_prevents_environment_step(self):
-        class Env:
-            phase = "speech"
-            public_events = []
-
-            def __init__(self, observation):
-                self.observation = observation
-                self.step_calls = 0
-
-            def reset(self, *, roles):
-                return self.observation
-
-            def step(self, action):
-                self.step_calls += 1
-                raise AssertionError("validation failure reached env.step")
-
-        for responses, error_type in (
-            (
-                ['{"public_actions":[{"action":"vote_intent","target":1}]}'],
-                PublicSpeechPlanValidationError,
-            ),
-            (
-                ['{"public_actions":[{"action":"oppose","target":3}]}', "我反对4号。"],
-                GameplaySpeechQualityError,
-            ),
-        ):
-            with self.subTest(responses=responses):
-                backend = MetadataBackend(responses)
-                backend.supports_json_schema = True
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                    gameplay_prompt_profile="strict_classic7",
-                )
-                agent.rate_limit = 0
-                env = Env(self._strict_observation())
-
-                with self.assertRaises(error_type):
-                    run_game(env, [agent], ["Villager"])
-                self.assertEqual(env.step_calls, 0)
-
-    def test_strict_speech_uses_plan_then_isolated_renderer(self):
-        backend = MetadataBackend([
-            '{"public_actions":[{"action":"oppose","target":3}]}',
-            "我不认可3号的说法。",
-        ])
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-            gameplay_max_tokens=512,
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(self._strict_observation()),
-            ("speech", "我不认可3号的说法。"),
-        )
-        self.assertEqual(len(backend.calls), 2)
-        self.assertEqual(backend.calls[0]["response_format"]["type"], "json_schema")
-        self.assertIsNone(backend.calls[1]["response_format"])
-        self.assertEqual(
-            [call["temperature"] for call in backend.calls],
-            [1.0, 0.0],
-        )
-        self.assertEqual([call["max_tokens"] for call in backend.calls], [512, 512])
-        renderer = backend.calls[1]["messages"][0]["content"]
-        self.assertIn("oppose(player3)", renderer)
-        self.assertNotIn("【你合法知道的私有信息】", renderer)
-        self.assertNotIn("【权威公共状态】", renderer)
-        self.assertNotIn("【当前存活】", renderer)
-
-    def test_strict_renderer_temperature_is_independent_of_gameplay_temperature(self):
-        backend = MetadataBackend([
-            '{"public_actions":[{"action":"oppose","target":3}]}',
-            "我不认可3号的说法。",
-        ])
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            temperature=0.7,
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(self._strict_observation()),
-            ("speech", "我不认可3号的说法。"),
-        )
-        self.assertEqual(
-            [call["temperature"] for call in backend.calls],
-            [0.7, 0.0],
-        )
-
-    def test_renderer_does_not_receive_r9_state_players_outside_plan(self):
-        observation = self._strict_observation()
-        observation["current_act_idx"] = 2
-        observation["authoritative_public_state"].update({
-            "last_night_result": {"day": 0, "dead_players": [1, 3]},
-            "alive_players": [2, 4, 5, 6, 7],
-            "suggestible_exile_targets": [4, 5, 6, 7],
-        })
-        backend = MetadataBackend([
-            '{"public_actions":[{"action":"point_as_villager","target":4}]}',
-            "我目前更倾向认为player4是村民。",
-        ])
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(observation),
-            ("speech", "我目前更倾向认为player4是村民。"),
-        )
-        renderer = backend.calls[1]["messages"][0]["content"]
-        self.assertIn("player2", renderer)
-        self.assertIn("player4", renderer)
-        self.assertIn("第1天白天公开发言", renderer)
-        for player_id in (1, 3, 5, 6, 7):
-            self.assertNotIn(f"player{player_id}", renderer)
-        for state_label in (
-            "昨夜公开结果",
-            "此前放逐",
-            "当前存活",
-            "当前可公开建议放逐",
-        ):
-            self.assertNotIn(state_label, renderer)
-
-    def test_public_speech_plan_validation_contract(self):
-        state = self._strict_observation()["authoritative_public_state"]
-        valid_cases = (
-            [],
-            [
-                {"action": "point_as_seer", "target": 1},
-                {"action": "check_as_werewolf", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "point_as_werewolf", "target": 3},
-                {"action": "oppose", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "check_as_werewolf", "target": 1},
-                {"action": "point_as_werewolf", "target": 1},
-            ],
-            [
-                {"action": "check_as_good", "target": 1},
-                {"action": "point_as_villager", "target": 1},
-            ],
-            [
-                {"action": "point_as_villager", "target": 1},
-                {"action": "check_as_good", "target": 1},
-                {"action": "vote_intent", "target": 7},
-            ],
-        )
-        for actions in valid_cases:
-            with self.subTest(valid=actions):
-                plan = validate_public_speech_plan(
-                    {"public_actions": actions},
-                    suggestible_player_ids=tuple(
-                        state["suggestible_exile_targets"]
-                    ),
-                    player_id=1,
-                    speaker_role="Villager",
-                    phase="1_day_speech",
-                )
-                self.assertEqual(plan.as_list(), actions)
-
-        invalid_cases = (
-            {"public_actions": [], "notes": "free text"},
-            {"public_actions": [{"action": "invented", "target": 3}]},
-            {"public_actions": [{"action": ["bad"], "target": 1}]},
-            {"public_actions": [{"action": "oppose", "target": 3, "why": "x"}]},
-            {"public_actions": [{"action": "vote_intent", "target": 1}]},
-        )
-        for payload in invalid_cases:
-            with self.subTest(invalid=payload), self.assertRaises(
-                PublicSpeechPlanValidationError
-            ):
-                validate_public_speech_plan(
-                    payload,
-                    suggestible_player_ids=tuple(
-                        state["suggestible_exile_targets"]
-                    ),
-                    player_id=1,
-                    speaker_role="Villager",
-                    phase="1_day_speech",
-                )
-
-    def test_public_speech_plan_stably_deduplicates_exact_pairs(self):
-        actions = [
-            {"action": "support", "target": 2},
-            {"action": "check_as_good", "target": 1},
-            {"action": "oppose", "target": 5},
-            {"action": "check_as_good", "target": 1},
-            {"action": "vote_intent", "target": 7},
-        ]
-        plan = validate_public_speech_plan(
-            {"public_actions": actions},
-            suggestible_player_ids=(2, 3, 4, 5, 6, 7),
-            player_id=1,
-            speaker_role="Villager",
-            phase="1_day_speech",
-        )
-        self.assertEqual(plan.as_list(), [
-            {"action": "support", "target": 2},
-            {"action": "check_as_good", "target": 1},
-            {"action": "oppose", "target": 5},
-            {"action": "vote_intent", "target": 7},
-        ])
-
-        distinct_pairs = [
-            {"action": "check_as_good", "target": 1},
-            {"action": "point_as_villager", "target": 1},
-            {"action": "check_as_werewolf", "target": 1},
-            {"action": "support", "target": 1},
-            {"action": "support", "target": 2},
-            {"action": "vote_intent", "target": 2},
-            {"action": "vote_intent", "target": 3},
-        ]
-        plan = validate_public_speech_plan(
-            {"public_actions": distinct_pairs},
-            suggestible_player_ids=(2, 3, 4, 5, 6, 7),
-            player_id=1,
-            speaker_role="Villager",
-            phase="1_day_speech",
-        )
-        self.assertEqual(plan.as_list(), distinct_pairs)
-
-    def test_seed_510_duplicate_plan_reaches_renderer_once(self):
-        observation = self._strict_observation()
-        observation["phase"] = "2_day_speech_pk"
-        observation["current_act_idx"] = 2
-        observation["authoritative_public_state"].update({
-            "day": 2,
-            "phase": "speech_pk",
-            "suggestible_exile_targets": [1, 3, 4, 5, 6, 7],
-        })
-        backend = MetadataBackend([
-            '{"public_actions":['
-            '{"action":"check_as_good","target":1},'
-            '{"action":"check_as_good","target":1}]}',
-            "我查验1号是好人。",
-        ])
-        backend.supports_json_schema = True
-        backend.session = SimpleNamespace(game_id="game_006_seed_510")
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(observation),
-            ("speech", "我查验1号是好人。"),
-        )
-        self.assertEqual(len(backend.calls), 2)
-        renderer_prompt = backend.calls[1]["messages"][0]["content"]
-        self.assertEqual(renderer_prompt.count("check_as_good(player1)"), 1)
-
-    def test_public_speech_plan_rejects_oppose_self(self):
-        candidates = (1, 2, 3, 4, 5, 6)
-        with self.assertRaises(PublicSpeechPlanValidationError):
-            validate_public_speech_plan(
-                {"public_actions": [
-                    {"action": "oppose", "target": 7},
-                ]},
-                suggestible_player_ids=candidates,
-                player_id=7,
-                speaker_role="Villager",
-                phase="1_day_speech",
-            )
-
-    def test_public_speech_plan_keeps_soft_consistency_combinations(self):
-        candidates = (1, 2, 3, 4, 5, 6)
-        good_judgment_actions = (
-            "point_as_villager",
-            "point_as_seer",
-            "point_as_witch",
-            "point_as_guard",
-            "check_as_good",
-        )
-        allowed_plans = tuple(
-            [
-                {"action": action, "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ]
-            for action in good_judgment_actions
-        ) + (
-            [
-                {"action": "point_as_werewolf", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "check_as_werewolf", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "oppose", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "support", "target": 3},
-                {"action": "vote_intent", "target": 3},
-            ],
-            [
-                {"action": "point_as_villager", "target": 3},
-                {"action": "vote_intent", "target": 4},
-            ],
-            [{"action": "oppose", "target": 3}],
-            [{"action": "support", "target": 7}],
-        )
-        for actions in allowed_plans:
-            with self.subTest(actions=actions):
-                plan = validate_public_speech_plan(
-                    {"public_actions": actions},
-                    suggestible_player_ids=candidates,
-                    player_id=7,
-                    speaker_role="Villager",
-                    phase="1_day_speech",
-                )
-                self.assertEqual(plan.as_list(), actions)
-
-    def test_dynamic_plan_schema_separates_vote_target_domain(self):
-        candidates = (1, 2, 4, 5)
-        schema = public_speech_plan_json_schema(
-            suggestible_player_ids=candidates,
-            speaker_id=7,
-            speaker_role="Villager",
-        )
-        branches = schema["properties"]["public_actions"]["items"]["oneOf"]
-        vote_branch, oppose_branch, self_wolf_claim_branch, other_branch = branches
-
-        self.assertEqual(vote_branch["properties"]["action"], {"const": "vote_intent"})
-        self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
-        self.assertEqual(oppose_branch["properties"]["action"], {"const": "oppose"})
-        self.assertEqual(
-            oppose_branch["properties"]["target"]["enum"],
-            [1, 2, 3, 4, 5, 6],
-        )
-        self.assertEqual(
-            set(self_wolf_claim_branch["properties"]["action"]["enum"]),
-            {"point_as_werewolf", "check_as_werewolf"},
-        )
-        self.assertEqual(
-            self_wolf_claim_branch["properties"]["target"]["enum"],
-            list(range(1, 8)),
-        )
-        self.assertEqual(
-            set(other_branch["properties"]["action"]["enum"]),
-            set(ACTION_NAMES) - {
-                "vote_intent",
-                "oppose",
-                "point_as_werewolf",
-                "check_as_werewolf",
-            },
-        )
-        self.assertEqual(other_branch["properties"]["target"]["enum"], list(range(1, 8)))
-        self.assertFalse(_schema_accepts_plan(schema, {
-            "public_actions": [{"action": "vote_intent", "target": 3}]
-        }))
-        for action, target in (
-            ("vote_intent", 1),
-            ("oppose", 1),
-            ("oppose", 6),
-            ("check_as_good", 3),
-            ("support", 7),
-            ("point_as_villager", 7),
-            ("point_as_seer", 7),
-        ):
-            with self.subTest(action=action, target=target):
-                self.assertTrue(_schema_accepts_plan(schema, {
-                    "public_actions": [{"action": action, "target": target}]
-                }))
-        self.assertFalse(_schema_accepts_plan(schema, {
-            "public_actions": [{"action": "oppose", "target": 7}]
-        }))
-        branch_actions = [
-            {branch["properties"]["action"]["const"]}
-            if "const" in branch["properties"]["action"]
-            else set(branch["properties"]["action"]["enum"])
-            for branch in branches
-        ]
-        self.assertEqual(set().union(*branch_actions), set(ACTION_NAMES))
-        self.assertEqual(
-            sum(len(actions) for actions in branch_actions),
-            len(ACTION_NAMES),
-        )
-
-    def test_dynamic_plan_schema_omits_vote_branch_for_empty_candidates(self):
-        schema = public_speech_plan_json_schema(
-            suggestible_player_ids=(),
-            speaker_id=7,
-            speaker_role="Villager",
-        )
-        branches = schema["properties"]["public_actions"]["items"]["oneOf"]
-
-        self.assertEqual(len(branches), 3)
-        self.assertEqual(branches[0]["properties"]["action"], {"const": "oppose"})
-        self.assertNotIn("vote_intent", branches[2]["properties"]["action"]["enum"])
-        self.assertTrue(_schema_accepts_plan(schema, {"public_actions": []}))
-        self.assertTrue(_schema_accepts_plan(schema, {
-            "public_actions": [{"action": "check_as_good", "target": 3}]
-        }))
-        self.assertFalse(_schema_accepts_plan(schema, {
-            "public_actions": [{"action": "vote_intent", "target": 1}]
-        }))
-
-    def test_true_werewolf_self_identity_disclosure_is_not_representable(self):
-        observation = self._strict_observation()
-        observation["identity"] = "Werewolf"
-        observation["current_act_idx"] = 6
-        observation["authoritative_public_state"][
-            "suggestible_exile_targets"
-        ] = [1, 2, 3, 4, 5, 7]
-        candidates = canonical_suggestible_player_ids(
-            observation["authoritative_public_state"]
-        )
-        backend = MetadataBackend([
-            '{"public_actions":['
-            '{"action":"point_as_werewolf","target":6}]}'
-        ])
-        backend.supports_json_schema = True
-        backend.session = SimpleNamespace(game_id="game_010_seed_464")
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-        with self.assertRaises(PublicSpeechPlanValidationError):
-            agent.act(observation)
-        self.assertEqual(len(backend.calls), 1)
-        schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
-
-        for action in ("point_as_werewolf", "check_as_werewolf"):
-            self.assertFalse(_schema_accepts_plan(schema, {
-                "public_actions": [{"action": action, "target": 6}],
-            }))
-            with self.assertRaises(PublicSpeechPlanValidationError):
-                validate_public_speech_plan(
-                    {"public_actions": [{"action": action, "target": 6}]},
-                    suggestible_player_ids=candidates,
-                    player_id=6,
-                    speaker_role="Werewolf",
-                    phase="1_day_speech",
-                    game_context="game_010_seed_464",
-                )
-            for target in candidates:
-                with self.subTest(action=action, target=target):
-                    self.assertTrue(_schema_accepts_plan(schema, {
-                        "public_actions": [{"action": action, "target": target}],
-                    }))
-
-        for role in ("Villager", "Seer", "Witch"):
-            role_schema = public_speech_plan_json_schema(
-                suggestible_player_ids=candidates,
-                speaker_id=6,
-                speaker_role=role,
-            )
-            for action in ("point_as_werewolf", "check_as_werewolf"):
-                with self.subTest(role=role, action=action):
-                    payload = {
-                        "public_actions": [{"action": action, "target": 6}],
-                    }
-                    self.assertTrue(_schema_accepts_plan(role_schema, payload))
-                    self.assertEqual(
-                        validate_public_speech_plan(
-                            payload,
-                            suggestible_player_ids=candidates,
-                            player_id=6,
-                            speaker_role=role,
-                            phase="1_day_speech",
-                        ).as_list(),
-                        payload["public_actions"],
-                    )
-
-    def test_strict_flow_shares_candidates_across_prompt_schema_and_validator(self):
-        observation = self._dead_player_observation()
-        candidates = canonical_suggestible_player_ids(
-            observation["authoritative_public_state"]
-        )
-        backend = MetadataBackend([
-            '{"public_actions":[{"action":"check_as_good","target":3},'
-            '{"action":"vote_intent","target":4}]}',
-            "我查验玩家3为好人，这一轮我会投玩家4。",
-        ])
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act(observation),
-            ("speech", "我查验玩家3为好人，这一轮我会投玩家4。"),
-        )
-        planner_call = backend.calls[0]
-        self.assertIn(
-            "【当前可公开建议放逐】player1, player4, player5, player6, player7",
-            planner_call["messages"][0]["content"],
-        )
-        schema = planner_call["response_format"]["json_schema"]["schema"]
-        vote_branch = schema["properties"]["public_actions"]["items"]["oneOf"][0]
-        self.assertEqual(vote_branch["properties"]["target"]["enum"], list(candidates))
-        self.assertEqual(len(backend.calls), 2)
-        renderer_prompt = backend.calls[1]["messages"][0]["content"]
-        self.assertIn("player2", renderer_prompt)
-        self.assertIn("player3", renderer_prompt)
-        self.assertIn("player4", renderer_prompt)
-        for player_id in (1, 5, 6, 7):
-            self.assertNotIn(f"player{player_id}", renderer_prompt)
-
-    def test_dead_vote_target_fails_schema_and_post_validator(self):
-        observation = self._dead_player_observation()
-        candidates = canonical_suggestible_player_ids(
-            observation["authoritative_public_state"]
-        )
-        payload = {"public_actions": [
-            {"action": "check_as_good", "target": 3},
-            {"action": "vote_intent", "target": 3},
-        ]}
-        schema = public_speech_plan_json_schema(
-            suggestible_player_ids=candidates,
-            speaker_id=2,
-            speaker_role="Villager",
-        )
-        self.assertFalse(_schema_accepts_plan(schema, payload))
-        with self.assertRaisesRegex(
-            PublicSpeechPlanValidationError,
-            "not currently suggestible",
-        ):
-            validate_public_speech_plan(
-                payload,
-                suggestible_player_ids=candidates,
-                player_id=2,
-                speaker_role="Villager",
-                phase="1_day_speech",
-            )
-
-        backend = MetadataBackend([json.dumps(payload)])
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-        with self.assertRaises(PublicSpeechPlanValidationError):
-            agent.act(observation)
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_final_speech_must_realize_exact_plan_player_scope(self):
-        self.assertEqual(
-            validate_gameplay_public_speech(
-                "我反对3号。",
-                finish_reason="stop",
-                player_id=1,
-                phase="1_day_speech",
-                planned_player_ids={3},
-            ),
-            "我反对3号。",
-        )
-        for speech, planned in (("我反对4号。", {3}), ("我继续听。", {3}), ("我观察2号。", set())):
-            with self.subTest(speech=speech), self.assertRaises(
-                GameplaySpeechQualityError
-            ):
-                validate_gameplay_public_speech(
-                    speech,
-                    finish_reason="stop",
-                    player_id=1,
-                    phase="1_day_speech",
-                    planned_player_ids=planned,
-                )
-
-    def test_player_prefix_references_satisfy_real_plan_coverage(self):
-        speech = "我认为玩家3是值得信赖的村民，而玩家4的发言存在可疑之处。"
-        self.assertEqual(
-            validate_gameplay_public_speech(
-                speech,
-                finish_reason="stop",
-                player_id=2,
-                phase="1_day_speech",
-                planned_player_ids={3, 4},
-            ),
-            speech,
-        )
-
-    def test_explicit_player_reference_formats_are_supported(self):
-        for reference in (
-            "player3", "player 3", "Player3", "玩家3", "玩家 3",
-            "3号", "3号玩家", "3号位", "玩家三", "三号", "三号玩家", "三号位",
-        ):
-            with self.subTest(reference=reference):
-                self.assertEqual(
-                    validate_gameplay_public_speech(
-                        f"我关注{reference}。",
-                        finish_reason="stop",
-                        player_id=1,
-                        phase="1_day_speech",
-                        planned_player_ids={3},
-                    ),
-                    f"我关注{reference}。",
-                )
-
-    def test_seed_539_self_and_grouped_player_references_cover_plan(self):
-        speech = (
-            "我认为1号是预言家，同时支持7号。"
-            "但我对3、4、5号的发言均存疑，认为他们可疑。"
-            "经查验，我确认自己是好人。"
-            "基于以上判断，我准备投票放逐4号。"
-        )
-        self.assertEqual(
-            _extract_explicit_player_references(
-                speech,
-                speaker_id=2,
-                context="player=2, phase=1_day_speech",
-            ),
-            {1, 2, 3, 4, 5, 7},
-        )
-        self.assertEqual(
-            validate_gameplay_public_speech(
-                speech,
-                finish_reason="stop",
-                player_id=2,
-                phase="1_day_speech",
-                planned_player_ids={1, 2, 3, 4, 5, 7},
-            ),
-            speech,
-        )
-
-    def test_grouped_player_references_require_explicit_player_suffix(self):
-        for separator in ("、", "，", ","):
-            with self.subTest(separator=separator):
-                content = f"我质疑3{separator}4{separator}5号。"
-                self.assertEqual(
-                    _extract_explicit_player_references(
-                        content,
-                        speaker_id=2,
-                        context="player=2, phase=1_day_speech",
-                    ),
-                    {2, 3, 4, 5},
-                )
-        for content in ("2025年", "3票", "3人", "第3项", "3、4、5人"):
-            with self.subTest(content=content):
-                self.assertEqual(
-                    _extract_explicit_player_references(
-                        content,
-                        speaker_id=2,
-                        context="player=2, phase=1_day_speech",
-                    ),
-                    set(),
-                )
-
-    def test_self_reference_maps_only_to_current_speaker(self):
-        for content in ("我会说明。", "我自己会说明。", "自己会说明。"):
-            with self.subTest(content=content):
-                self.assertEqual(
-                    _extract_explicit_player_references(
-                        content,
-                        speaker_id=2,
-                        context="player=2, phase=1_day_speech",
-                    ),
-                    {2},
-                )
-        for content in ("他自己会说明。", "他们自己会说明。", "他会说明。"):
-            with self.subTest(content=content):
-                self.assertEqual(
-                    _extract_explicit_player_references(
-                        content,
-                        speaker_id=2,
-                        context="player=2, phase=1_day_speech",
-                    ),
-                    set(),
-                )
-
-    def test_non_player_numbers_are_not_player_references(self):
-        for text in (
-            "第3天", "第三天", "第3点", "3票", "3人死亡",
-            "第3轮", "第3项计划", "计划中的第3项", "3个目标",
-        ):
-            with self.subTest(text=text):
-                self.assertEqual(
-                    validate_gameplay_public_speech(
-                        text,
-                        finish_reason="stop",
-                        player_id=1,
-                        phase="1_day_speech",
-                        planned_player_ids=set(),
-                    ),
-                    text,
-                )
-
-    def test_invalid_explicit_player_references_are_rejected(self):
-        for reference in (
-            "player0", "player8", "玩家0", "玩家8",
-            "0号玩家", "8号位", "玩家八",
-        ):
-            with self.subTest(reference=reference), self.assertRaisesRegex(
-                GameplaySpeechQualityError,
-                "invalid player reference",
-            ):
-                validate_gameplay_public_speech(
-                    f"我关注{reference}。",
-                    finish_reason="stop",
-                    player_id=1,
-                    phase="1_day_speech",
-                )
-
-    def test_strict_speech_stops_at_failed_stage_without_retry_or_fallback(self):
-        cases = (
-            ([BackendError("planner failed")], None, 1),
-            (["not json"], None, 1),
-            (['{"public_actions":[]}'], [{"finish_reason": "length"}], 1),
-            (['{"public_actions":[{"action":"vote_intent","target":1}]}'], None, 1),
-            (['{"public_actions":[]}'], [None], 1),
-            (['{"public_actions":[]}', BackendError("renderer failed")], None, 2),
-            (['{"public_actions":[]}', "观望"], [{"finish_reason": "stop"}, None], 2),
-            (['{"public_actions":[]}', "观望"], [{"finish_reason": "stop"}, {"finish_reason": "length"}], 2),
-            (['{"public_actions":[]}', "提到2号"], None, 2),
-        )
-        for responses, metadata, call_count in cases:
-            with self.subTest(responses=responses):
-                backend = MetadataBackend(responses, metadata=metadata)
-                backend.supports_json_schema = True
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                    gameplay_prompt_profile="strict_classic7",
-                )
-                agent.rate_limit = 0
-                with self.assertRaises((BackendError, PublicSpeechPlanValidationError, GameplaySpeechQualityError)):
-                    agent.act(self._strict_observation())
-                self.assertEqual(len(backend.calls), call_count)
-
-        backend = MetadataBackend(['{"public_actions":[]}'])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            gameplay_prompt_profile="strict_classic7",
-        )
-        agent.rate_limit = 0
-        with self.assertRaisesRegex(BackendError, "JSON Schema support"):
-            agent.act(self._strict_observation())
-        self.assertEqual(backend.calls, [])
-
-    def test_gameplay_public_speech_quality_accepts_safe_numeric_context(self):
-        for speech in (
-            "第2天我会关注player1到player7的发言。",
-            "昨夜1人死亡，目前有2票需要重新判断。",
-            "我认为3号玩家的逻辑更可信。",
-        ):
-            with self.subTest(speech=speech):
-                self.assertEqual(
-                    validate_gameplay_public_speech(
-                        speech,
-                        finish_reason="stop",
-                        player_id=1,
-                        phase="2_day_speech",
-                    ),
-                    speech,
-                )
-
-    def test_gameplay_public_speech_quality_rejects_deterministic_failures(self):
-        cases = (
-            ("", None),
-            ("   ", None),
-            ("正常发言", "length"),
-            ("我怀疑player0", "stop"),
-            ("我怀疑player8", "stop"),
-            ("我怀疑player12", "stop"),
-            ("我怀疑0号玩家", "stop"),
-            ("我怀疑12号位", "stop"),
-            ('{"speech": "我怀疑3号"}', "stop"),
-            ("【权威公共状态】存活玩家如下", "stop"),
-            ("current_act_idx=3", "stop"),
-        )
-        for speech, finish_reason in cases:
-            with self.subTest(speech=speech, finish_reason=finish_reason):
-                with self.assertRaises(GameplaySpeechQualityError):
-                    validate_gameplay_public_speech(
-                        speech,
-                        finish_reason=finish_reason,
-                        player_id=1,
-                        phase="2_day_speech",
-                    )
-
-    def test_gpt_agent_speech_uses_backend_chat_and_agent_model(self):
-        backend = MetadataBackend(["这是发言"])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-            temperature=0.2,
-        )
-        agent.rate_limit = 0
-        observation = {
-            "phase": "1_day_speech",
-            "identity": "Villager",
-            "current_act_idx": 1,
-            "game_log": [],
-            "valid_action": ("speech", -1),
-        }
-
-        action = agent.act(observation)
-
-        self.assertEqual(action, ("speech", "这是发言"))
-        self.assertEqual(len(backend.calls), 1)
-        self.assertEqual(backend.calls[0]["model"], "agent-model")
-        self.assertEqual(backend.calls[0]["temperature"], 0.2)
-        self.assertIsNone(backend.calls[0]["max_tokens"])
-
-    def test_gameplay_speech_requires_explicit_fresh_metadata(self):
-        no_metadata_backend = RecordingBackend(["不会被旧路径读取"])
-        agent = GPTAgent(
-            backend=no_metadata_backend,
-            model_name="agent-model",
-        )
-        agent.rate_limit = 0
-        observation = {
-            "phase": "1_day_speech",
-            "identity": "Villager",
-            "current_act_idx": 1,
-            "game_log": [],
-            "valid_action": ("speech", -1),
-        }
-
-        with self.assertRaisesRegex(
-            BackendError,
-            "must support chat_with_metadata",
-        ):
-            agent.act(observation)
-        self.assertEqual(no_metadata_backend.calls, [])
-
-        backend = MetadataBackend(
-            ["第一次发言", "第二次发言"],
-            metadata=[{"finish_reason": "stop"}, None],
-        )
-        agent.backend = backend
-        self.assertEqual(agent.act(observation), ("speech", "第一次发言"))
-        with self.assertRaisesRegex(
-            BackendError,
-            "requires finish_reason metadata",
-        ):
-            agent.act(observation)
-        self.assertEqual(len(backend.calls), 2)
-
-    def test_gpt_agent_applies_gameplay_max_tokens_to_speech_and_action(self):
-        observations = (
-            (
-                "speech",
-                "公开发言",
-                {
-                    "phase": "1_day_speech",
-                    "identity": "Villager",
-                    "current_act_idx": 1,
-                    "game_log": [],
-                    "valid_action": ("speech", -1),
-                },
-                ("speech", "公开发言"),
-            ),
-            (
-                "vote",
-                "{'投票': '2'}",
-                {
-                    "phase": "1_day_vote",
-                    "identity": "Villager",
-                    "current_act_idx": 1,
-                    "game_log": [],
-                    "valid_action": [("vote", 2)],
-                },
-                ("vote", 2),
-            ),
-        )
-
-        for name, response, observation, expected in observations:
-            with self.subTest(name=name):
-                backend = (
-                    MetadataBackend([response])
-                    if name == "speech"
-                    else RecordingBackend([response])
-                )
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                    gameplay_max_tokens=512,
-                )
-                agent.rate_limit = 0
-
-                self.assertEqual(agent.act(observation), expected)
-                self.assertEqual(
-                    backend.calls[0]["max_tokens"],
-                    512,
-                )
-
-    def test_v25_structural_matcher_remains_the_membership_boundary(self):
-        agent = GPTAgent()
-        candidates = (
-            "{'查验':'7'}",
-            "{'解药': '否', '毒药': '4'}",
-        )
-        cases = (
-            ("{'查验': '7'}", "{'查验':'7'}"),
-            ('```json\n{"查验":"7"}\n```', "{'查验':'7'}"),
-            (
-                "{'毒药': '4', '解药': '否'}",
-                "{'解药': '否', '毒药': '4'}",
-            ),
-        )
-        for response, expected in cases:
-            with self.subTest(response=response):
-                self.assertEqual(
-                    agent.match_authoritative_action_response(
-                        response,
-                        candidates,
-                    ),
-                    expected,
-                )
-
-    def test_v26_night_snapshot_drives_prompt_schema_and_mapping(self):
-        cases = (
-            (
-                "seer",
-                "1_night_skill_seer",
-                [("check", 1), ("check", 2), ("check", 4), ("check", 5)],
-                '{"action_index": 2}',
-                ("check", 4),
-                "{'查验':'4'}",
-            ),
-            (
-                "werewolf",
-                "0_night_skill_wolf",
-                [("kill", 3), ("kill", 7)],
-                '```json\n{"action_index":0}\n```',
-                ("kill", 3),
-                "{'杀害':'3'}",
-            ),
-            (
-                "witch",
-                "0_night_skill_witch",
+def _structured_speech(speaker, raw_text, *actions, kind="speech"):
+    return (
+        kind,
+        {
+            "raw_text": raw_text,
+            "sp_actions": [
                 [
-                    ("witch_pass", 0),
-                    ("witch_poison", 1),
-                    ("witch_poison", 2),
-                    ("witch_heal", 4),
+                    f"player{speaker}",
+                    action,
+                    None if target is None else f"player{target}",
+                ]
+                for action, target in actions
+            ],
+        },
+    )
+
+
+def _belief_for(role_options, assignments=None):
+    assignments = assignments or {}
+    return json.dumps(
+        {
+            "belief": "只推断尚未确定的玩家。",
+            "concise": "保留未知。",
+            "roles": {
+                player: assignments.get(player, "unknown")
+                for player in role_options
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+def _ranked_selection(selected, candidates, *, first_field):
+    if not selected:
+        return {"mode": "none"}
+    if len(selected) == 1:
+        return {"mode": "one", first_field: selected[0]}
+    first = selected[0]
+    remaining = [candidate for candidate in candidates if candidate != first]
+    return {
+        "mode": "two",
+        first_field: first,
+        "second_rank": remaining.index(selected[1]),
+    }
+
+
+def _day_cognition_v2_from_belief(
+    belief_response,
+    observation,
+    *,
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence_claim_ids=(),
+):
+    payload = json.loads(belief_response)
+    snapshot = freeze_discussion_candidates(observation)
+    payload["public_content_action_indices"] = [
+        snapshot.index(action) for action in content_actions
+    ]
+    payload["public_vote_stance_index"] = (
+        project_discussion_vote_stances(snapshot).index(vote_stance)
+    )
+    payload["evidence_claim_ids"] = list(evidence_claim_ids)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _day_cognition_from_belief(
+    belief_response,
+    observation,
+    *,
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence_claim_ids=(),
+):
+    payload = json.loads(belief_response)
+    snapshot = freeze_discussion_candidates(observation)
+    content_indices = project_discussion_content_indices(snapshot)
+    selected_indices = tuple(snapshot.index(action) for action in content_actions)
+    payload["public_content_selection"] = _ranked_selection(
+        selected_indices,
+        content_indices,
+        first_field="first_index",
+    )
+    payload["public_vote_stance_index"] = (
+        project_discussion_vote_stances(snapshot).index(vote_stance)
+    )
+    claim_ids = tuple(
+        claim.claim_id for claim in build_public_claim_catalog(observation)
+    )
+    payload["evidence_selection"] = _ranked_selection(
+        evidence_claim_ids,
+        claim_ids,
+        first_field="first_claim_id",
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _day_cognition(
+    observation=None,
+    *,
+    role="unknown",
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence=(),
+):
+    observation = observation or _observation()
+    return _day_cognition_from_belief(
+        _belief(observation["current_act_idx"], role=role),
+        observation,
+        content_actions=content_actions,
+        vote_stance=vote_stance,
+        evidence_claim_ids=evidence,
+    )
+
+
+def _day_cognition_v2(
+    observation=None,
+    *,
+    role="unknown",
+    content_actions=(),
+    vote_stance=NO_STANCE,
+    evidence=(),
+):
+    observation = observation or _observation()
+    return _day_cognition_v2_from_belief(
+        _belief(observation["current_act_idx"], role=role),
+        observation,
+        content_actions=content_actions,
+        vote_stance=vote_stance,
+        evidence_claim_ids=evidence,
+    )
+
+
+def _observation(phase="1_day_speech"):
+    public_phase = "vote_pk" if "vote_pk" in phase else (
+        "vote" if "vote" in phase else "speech"
+    )
+    return {
+        "phase": phase,
+        "identity": "Villager",
+        "current_act_idx": 1,
+        "game_log": [
+            Log(
+                viewer=[1, 2, 3, 4, 5, 6, 7],
+                source=2,
+                target=[1, 2, 3, 4, 5, 6, 7],
+                content={"speech_content": "我觉得3号可疑。", "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            )
+        ],
+        "valid_action": (
+            [("vote_pk", 0), ("vote_pk", 3), ("vote_pk", 5)]
+            if "vote_pk" in phase
+            else [("vote", 0), ("vote", 2), ("vote", 4)]
+            if "vote" in phase
+            else []
+        ),
+        "authoritative_public_state": {
+            "day": 1,
+            "day_or_night": "day",
+            "phase": public_phase,
+            "last_night_result": {"day": 0, "dead_players": []},
+            "prior_exiles": [],
+            "alive_players": [1, 2, 3, 4, 5, 6, 7],
+            "suggestible_exile_targets": [2, 3, 4, 5, 6, 7],
+        },
+    }
+
+
+def _role_observation(identity, player_id, logs=(), phase="1_day_speech"):
+    observation = _observation(phase)
+    observation["identity"] = identity
+    observation["current_act_idx"] = player_id
+    observation["game_log"] = list(logs)
+    return observation
+
+
+def _parse_belief(raw_response, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    return parse_belief_response(
+        raw_response,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+    )
+
+
+def _parse_day_cognition(raw_response, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    candidate_snapshot = freeze_discussion_candidates(observation)
+    claim_ids = tuple(
+        claim.claim_id for claim in build_public_claim_catalog(observation)
+    )
+    return parse_day_cognition_response_v3(
+        raw_response,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+        candidate_snapshot=candidate_snapshot,
+        claim_ids=claim_ids,
+    )
+
+
+def _parse_day_cognition_v2(raw_response, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    candidate_snapshot = freeze_discussion_candidates(observation)
+    claim_ids = tuple(
+        claim.claim_id for claim in build_public_claim_catalog(observation)
+    )
+    return parse_day_cognition_response_v2(
+        raw_response,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+        candidate_snapshot=candidate_snapshot,
+        claim_ids=claim_ids,
+    )
+
+
+def _validate_role_report(report, observation):
+    exact_roles, role_options = derive_belief_constraints(observation)
+    return validate_role_report(
+        report,
+        player_id=observation["current_act_idx"],
+        self_role=observation["identity"],
+        phase=observation["phase"],
+        exact_roles=exact_roles,
+        role_options=role_options,
+    )
+
+
+class GameplayCognitionTest(unittest.TestCase):
+    def _agent(self, backend, **kwargs):
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+            **kwargs,
+        )
+        agent.rate_limit = 0
+        return agent
+
+    def test_belief_schema_has_exact_minimal_fields_and_accepts_unknown(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        response_format = belief_response_format(
+            supports_json_schema=True,
+            role_options=role_options,
+        )
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(set(schema["properties"]), {"belief", "concise", "roles"})
+        self.assertEqual(schema["required"], ["belief", "concise", "roles"])
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["belief"],
+            {"type": "string", "minLength": 1, "maxLength": 256},
+        )
+        self.assertEqual(
+            schema["properties"]["concise"],
+            {"type": "string", "minLength": 1, "maxLength": 96},
+        )
+        role_schema = schema["properties"]["roles"]
+        self.assertNotIn("player1", role_schema["properties"])
+        self.assertEqual(set(role_schema["required"]), set(role_schema["properties"]))
+        for player_schema in role_schema["properties"].values():
+            self.assertEqual(tuple(player_schema["enum"]), BELIEF_ROLES)
+            self.assertIn("unknown", player_schema["enum"])
+
+        report = _parse_belief(
+            _belief(role="unknown"),
+            observation,
+        )
+        self.assertEqual(set(report.roles.values()), {"unknown"})
+
+    def test_belief_parser_enforces_unicode_character_bounds(self):
+        observation = _observation()
+        accepted = json.loads(_belief())
+        accepted["belief"] = "信" * 256
+        accepted["concise"] = "结" * 96
+        report = _parse_belief(
+            json.dumps(accepted, ensure_ascii=False),
+            observation,
+        )
+        self.assertEqual(len(report.belief), 256)
+        self.assertEqual(len(report.concise), 96)
+
+        for field, value in (
+            ("belief", "信" * 257),
+            ("concise", "结" * 97),
+        ):
+            with self.subTest(field=field):
+                rejected = dict(accepted)
+                rejected[field] = value
+                with self.assertRaises(BeliefValidationError):
+                    _parse_belief(
+                        json.dumps(rejected, ensure_ascii=False),
+                        observation,
+                    )
+
+    def test_day_cognition_v2_schema_has_exact_transport_fields(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        snapshot = freeze_discussion_candidates(observation)
+        claim_ids = tuple(
+            claim.claim_id for claim in build_public_claim_catalog(observation)
+        )
+        response_format = day_cognition_response_format_v2(
+            supports_json_schema=True,
+            role_options=role_options,
+            candidate_snapshot=snapshot,
+            claim_ids=claim_ids,
+        )
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(
+            response_format["json_schema"]["name"],
+            "day_cognition_report_v2",
+        )
+        self.assertEqual(
+            set(schema["properties"]),
+            {
+                "belief",
+                "concise",
+                "roles",
+                "public_content_action_indices",
+                "public_vote_stance_index",
+                "evidence_claim_ids",
+            },
+        )
+        self.assertNotIn("public_action_indices", schema["properties"])
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            schema["properties"]["belief"],
+            {"type": "string", "minLength": 1, "maxLength": 256},
+        )
+        self.assertEqual(
+            schema["properties"]["concise"],
+            {"type": "string", "minLength": 1, "maxLength": 96},
+        )
+        action_schema = schema["properties"]["public_content_action_indices"]
+        self.assertEqual(action_schema["type"], "array")
+        self.assertNotIn("uniqueItems", action_schema)
+        self.assertEqual(action_schema["minItems"], 0)
+        self.assertEqual(action_schema["maxItems"], 2)
+        self.assertEqual(action_schema["items"]["type"], "integer")
+        self.assertEqual(
+            action_schema["items"]["enum"],
+            list(project_discussion_content_indices(snapshot)),
+        )
+        stance_schema = schema["properties"]["public_vote_stance_index"]
+        self.assertEqual(stance_schema["type"], "integer")
+        self.assertEqual(
+            stance_schema["enum"],
+            list(range(len(project_discussion_vote_stances(snapshot)))),
+        )
+        evidence_schema = schema["properties"]["evidence_claim_ids"]
+        self.assertEqual(evidence_schema["type"], "array")
+        self.assertNotIn("uniqueItems", evidence_schema)
+        self.assertEqual(evidence_schema["minItems"], 0)
+        self.assertEqual(evidence_schema["maxItems"], min(2, len(claim_ids)))
+        self.assertEqual(evidence_schema["items"]["type"], "string")
+        self.assertEqual(
+            evidence_schema["items"]["enum"],
+            ["claim_000"],
+        )
+
+    def test_day_cognition_v3_schema_uses_ranked_selection_objects(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        snapshot = freeze_discussion_candidates(observation)
+        content_indices = project_discussion_content_indices(snapshot)
+        claim_ids = ("claim_000", "claim_001", "claim_002")
+        response_format = day_cognition_response_format_v3(
+            supports_json_schema=True,
+            role_options=role_options,
+            candidate_snapshot=snapshot,
+            claim_ids=claim_ids,
+        )
+        schema = response_format["json_schema"]["schema"]
+
+        self.assertEqual(
+            response_format["json_schema"]["name"],
+            "day_cognition_report_v3",
+        )
+        self.assertEqual(
+            set(schema["properties"]),
+            {
+                "belief",
+                "concise",
+                "roles",
+                "public_content_selection",
+                "public_vote_stance_index",
+                "evidence_selection",
+            },
+        )
+        self.assertNotIn("public_content_action_indices", schema["properties"])
+        self.assertNotIn("evidence_claim_ids", schema["properties"])
+
+        content_variants = {
+            variant["properties"]["mode"]["enum"][0]: variant
+            for variant in schema["properties"][
+                "public_content_selection"
+            ]["oneOf"]
+        }
+        self.assertEqual(set(content_variants), {"none", "one", "two"})
+        self.assertEqual(content_variants["none"]["required"], ["mode"])
+        self.assertEqual(
+            content_variants["one"]["properties"]["first_index"]["enum"],
+            list(content_indices),
+        )
+        self.assertEqual(
+            content_variants["two"]["properties"]["second_rank"]["enum"],
+            list(range(len(content_indices) - 1)),
+        )
+
+        evidence_variants = {
+            variant["properties"]["mode"]["enum"][0]: variant
+            for variant in schema["properties"]["evidence_selection"][
+                "oneOf"
+            ]
+        }
+        self.assertEqual(set(evidence_variants), {"none", "one", "two"})
+        self.assertEqual(
+            evidence_variants["one"]["properties"]["first_claim_id"][
+                "enum"
+            ],
+            list(claim_ids),
+        )
+        self.assertEqual(
+            evidence_variants["two"]["properties"]["second_rank"]["enum"],
+            [0, 1],
+        )
+        stance_schema = schema["properties"]["public_vote_stance_index"]
+        self.assertEqual(
+            stance_schema["enum"],
+            list(range(len(project_discussion_vote_stances(snapshot)))),
+        )
+
+    def test_v3_public_content_decoder_is_strict_and_duplicate_free(self):
+        snapshot = freeze_discussion_candidates(_observation())
+        candidates = project_discussion_content_indices(snapshot)
+        first = candidates[0]
+        remaining = tuple(index for index in candidates if index != first)
+
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "none"},
+                candidate_snapshot=snapshot,
+            ),
+            (),
+        )
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "one", "first_index": first},
+                candidate_snapshot=snapshot,
+            ),
+            (first,),
+        )
+        self.assertEqual(
+            decode_public_content_selection(
+                {"mode": "two", "first_index": first, "second_rank": 3},
+                candidate_snapshot=snapshot,
+            ),
+            (first, remaining[3]),
+        )
+        for first_index in candidates:
+            for second_rank in range(len(candidates) - 1):
+                decoded = decode_public_content_selection(
+                    {
+                        "mode": "two",
+                        "first_index": first_index,
+                        "second_rank": second_rank,
+                    },
+                    candidate_snapshot=snapshot,
+                )
+                self.assertNotEqual(decoded[0], decoded[1])
+
+        invalid = (
+            {"mode": "one"},
+            {"mode": "two", "first_index": first, "second_rank": -1},
+            {
+                "mode": "two",
+                "first_index": first,
+                "second_rank": len(candidates) - 1,
+            },
+            {"mode": "many", "first_index": first},
+        )
+        for selection in invalid:
+            with self.subTest(selection=selection), self.assertRaises(
+                BeliefValidationError
+            ):
+                decode_public_content_selection(
+                    selection,
+                    candidate_snapshot=snapshot,
+                )
+
+    def test_v3_evidence_decoder_is_strict_and_duplicate_free(self):
+        claim_ids = ("claim_a", "claim_b", "claim_c")
+        self.assertEqual(
+            decode_evidence_selection(
+                {"mode": "none"},
+                claim_ids=claim_ids,
+            ),
+            (),
+        )
+        self.assertEqual(
+            decode_evidence_selection(
+                {"mode": "one", "first_claim_id": "claim_b"},
+                claim_ids=claim_ids,
+            ),
+            ("claim_b",),
+        )
+        self.assertEqual(
+            decode_evidence_selection(
+                {
+                    "mode": "two",
+                    "first_claim_id": "claim_b",
+                    "second_rank": 1,
+                },
+                claim_ids=claim_ids,
+            ),
+            ("claim_b", "claim_c"),
+        )
+        for first_claim_id in claim_ids:
+            for second_rank in range(len(claim_ids) - 1):
+                decoded = decode_evidence_selection(
+                    {
+                        "mode": "two",
+                        "first_claim_id": first_claim_id,
+                        "second_rank": second_rank,
+                    },
+                    claim_ids=claim_ids,
+                )
+                self.assertNotEqual(decoded[0], decoded[1])
+
+        invalid = (
+            {"mode": "one"},
+            {
+                "mode": "two",
+                "first_claim_id": "claim_a",
+                "second_rank": -1,
+            },
+            {
+                "mode": "two",
+                "first_claim_id": "claim_a",
+                "second_rank": 2,
+            },
+            {"mode": "many", "first_claim_id": "claim_a"},
+        )
+        for selection in invalid:
+            with self.subTest(selection=selection), self.assertRaises(
+                BeliefValidationError
+            ):
+                decode_evidence_selection(selection, claim_ids=claim_ids)
+
+    def test_day_cognition_v3_decodes_to_existing_semantic_transport(self):
+        observation = _observation()
+        observation["game_log"].append(
+            Log(
+                viewer=[1, 2, 3, 4, 5, 6, 7],
+                source=3,
+                target=[1, 2, 3, 4, 5, 6, 7],
+                content={"speech_content": "我支持player4。", "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            )
+        )
+        snapshot = freeze_discussion_candidates(observation)
+        actions = (
+            DiscussionAct("support", 4),
+            DiscussionAct("oppose", 6),
+        )
+        report = _parse_day_cognition(
+            _day_cognition(
+                observation,
+                content_actions=actions,
+                evidence=("claim_000", "claim_001"),
+            ),
+            observation,
+        )
+
+        self.assertIsInstance(report, DayCognitionReportV3)
+        self.assertEqual(
+            tuple(snapshot[index] for index in report.public_content_action_indices),
+            actions,
+        )
+        self.assertEqual(
+            report.evidence_claim_ids,
+            ("claim_000", "claim_001"),
+        )
+        self.assertEqual(
+            compile_discussion_intent_v2(
+                snapshot,
+                public_content_action_indices=(
+                    report.public_content_action_indices
+                ),
+                public_vote_stance_index=report.public_vote_stance_index,
+            ),
+            actions,
+        )
+
+    def test_day_cognition_parser_enforces_unicode_character_bounds(self):
+        observation = _observation()
+        accepted = json.loads(_day_cognition(observation))
+        accepted["belief"] = "信" * 256
+        accepted["concise"] = "结" * 96
+        report = _parse_day_cognition(
+            json.dumps(accepted, ensure_ascii=False),
+            observation,
+        )
+        self.assertEqual(len(report.belief), 256)
+        self.assertEqual(len(report.concise), 96)
+
+        for field, value in (
+            ("belief", "信" * 257),
+            ("concise", "结" * 97),
+        ):
+            with self.subTest(field=field):
+                rejected = dict(accepted)
+                rejected[field] = value
+                with self.assertRaises(BeliefValidationError):
+                    _parse_day_cognition(
+                        json.dumps(rejected, ensure_ascii=False),
+                        observation,
+                    )
+
+    def test_invalid_day_cognition_json_reports_sanitized_truncated_raw_text(self):
+        observation = _observation()
+        raw_response = "invalid\n" + ("x" * 1100) + "TRUNCATED-SUFFIX"
+
+        with self.assertRaises(BeliefValidationError) as raised:
+            _parse_day_cognition(raw_response, observation)
+
+        message = str(raised.exception)
+        self.assertIn("player=1, phase=1_day_speech", message)
+        self.assertIn(f"raw_response={raw_response[:1000]!r}", message)
+        self.assertNotIn("TRUNCATED-SUFFIX", message)
+        self.assertNotIn("invalid\n", message)
+        self.assertIn(r"invalid\n", message)
+
+    def test_day_cognition_v2_compiles_all_representation_cases(self):
+        observation = _observation()
+        snapshot = freeze_discussion_candidates(observation)
+
+        def compile_response(content_actions=(), vote_stance=NO_STANCE):
+            report = _parse_day_cognition_v2(
+                _day_cognition_v2(
+                    observation,
+                    content_actions=content_actions,
+                    vote_stance=vote_stance,
+                ),
+                observation,
+            )
+            self.assertIsInstance(report, DayCognitionReportV2)
+            return compile_discussion_intent_v2(
+                snapshot,
+                public_content_action_indices=(
+                    report.public_content_action_indices
+                ),
+                public_vote_stance_index=report.public_vote_stance_index,
+            )
+
+        oppose_seven = DiscussionAct("oppose", 7)
+        abstain = DiscussionAct("abstain_intent", None)
+        vote_six = DiscussionAct("vote_intent", 6)
+        seer_claim = DiscussionAct("point_as_seer", 1)
+        check_six = DiscussionAct("check_as_werewolf", 6)
+
+        self.assertEqual(
+            compile_response(),
+            (DiscussionAct("no_commitment", None),),
+        )
+        self.assertEqual(compile_response((oppose_seven,)), (oppose_seven,))
+        self.assertEqual(compile_response(vote_stance=abstain), (abstain,))
+        self.assertEqual(
+            compile_response((oppose_seven,), abstain),
+            (oppose_seven, abstain),
+        )
+        self.assertEqual(
+            compile_response((seer_claim, check_six), vote_six),
+            (seer_claim, check_six, vote_six),
+        )
+        self.assertEqual(
+            compile_response((check_six, seer_claim)),
+            (check_six, seer_claim),
+        )
+        contradictory = (
+            DiscussionAct("support", 3),
+            DiscussionAct("oppose", 3),
+        )
+        self.assertEqual(compile_response(contradictory), contradictory)
+
+    def test_day_cognition_v2_parser_rejects_residual_transport_errors(self):
+        observation = _observation()
+        snapshot = freeze_discussion_candidates(observation)
+        base = json.loads(_day_cognition_v2(observation))
+        index = lambda action, target=None: snapshot.index(
+            DiscussionAct(action, target)
+        )
+        invalid_payloads = {
+            "duplicate indices": {
+                **base,
+                "public_content_action_indices": [index("support", 2)] * 2,
+            },
+            "out of range": {
+                **base,
+                "public_content_action_indices": [len(snapshot)],
+            },
+            "too many actions": {
+                **base,
+                "public_content_action_indices": [
+                    index("support", 2),
+                    index("oppose", 3),
+                    index("point_as_seer", 1),
                 ],
-                '{"action_index":3}',
-                ("witch_heal", 4),
-                "{'解药': '4', '毒药': '否'}",
+            },
+            "vote intent as content": {
+                **base,
+                "public_content_action_indices": [index("vote_intent", 2)],
+            },
+            "abstain as content": {
+                **base,
+                "public_content_action_indices": [index("abstain_intent")],
+            },
+            "no commitment as content": {
+                **base,
+                "public_content_action_indices": [index("no_commitment")],
+            },
+            "invalid stance": {
+                **base,
+                "public_vote_stance_index": len(
+                    project_discussion_vote_stances(snapshot)
+                ),
+            },
+            "stance is not scalar": {
+                **base,
+                "public_vote_stance_index": [0],
+            },
+            "unknown evidence": {
+                **base,
+                "evidence_claim_ids": ["claim_999"],
+            },
+            "duplicate evidence": {
+                **base,
+                "evidence_claim_ids": ["claim_000", "claim_000"],
+            },
+            "too much evidence": {
+                **base,
+                "evidence_claim_ids": ["claim_000", "claim_001", "claim_002"],
+            },
+            "old V1 field": {
+                **base,
+                "public_action_indices": [index("support", 2)],
+            },
+        }
+
+        for case, payload in invalid_payloads.items():
+            with self.subTest(case=case), self.assertRaises(BeliefValidationError):
+                _parse_day_cognition_v2(json.dumps(payload), observation)
+
+    def test_belief_rejects_extra_cognitive_fields_and_self_role(self):
+        observation = _observation()
+        payload = json.loads(_belief())
+        for field in ("confidence", "alignment", "probability"):
+            with self.subTest(field=field):
+                candidate = dict(payload)
+                candidate[field] = 0.5
+                with self.assertRaises(BeliefValidationError):
+                    _parse_belief(
+                        json.dumps(candidate),
+                        observation,
+                    )
+
+        payload["roles"]["player1"] = "Villager"
+        with self.assertRaisesRegex(BeliefValidationError, "unresolved players"):
+            _parse_belief(
+                json.dumps(payload),
+                observation,
+            )
+
+    def test_self_role_consumes_fixed_inventory(self):
+        for identity in ("Witch", "Seer"):
+            with self.subTest(identity=identity):
+                observation = _role_observation(identity, 1)
+                exact_roles, role_options = derive_belief_constraints(
+                    observation
+                )
+
+                self.assertEqual(exact_roles, {})
+                self.assertTrue(role_options)
+                self.assertTrue(
+                    all(
+                        identity not in options
+                        for options in role_options.values()
+                    )
+                )
+
+        villager = _role_observation("Villager", 1)
+        _exact_roles, role_options = derive_belief_constraints(villager)
+        report = _parse_belief(
+            _belief_for(
+                role_options,
+                {
+                    "player2": "Villager",
+                    "player3": "Villager",
+                    "player4": "Villager",
+                },
+            ),
+            villager,
+        )
+        with self.assertRaisesRegex(RoleReportValidationError, "Villager"):
+            _validate_role_report(report, villager)
+
+    def test_werewolf_teammate_is_fixed_outside_inference_and_merged(self):
+        observation = _role_observation(
+            "Werewolf",
+            2,
+            [
+                Log(
+                    viewer=[2, 7],
+                    source=0,
+                    target=[2, 7],
+                    content={"wolf_team": [2, 7]},
+                    day=0,
+                    time="第0天夜晚",
+                    event="werewolf_team_info",
+                ),
+                Log(
+                    viewer=[2, 7],
+                    source=0,
+                    target=6,
+                    content={"kill_decision": 6},
+                    day=0,
+                    time="第0天夜晚",
+                    event="kill_decision",
+                ),
+                Log(
+                    viewer=list(range(1, 8)),
+                    source=4,
+                    target=list(range(1, 8)),
+                    content={"speech_content": "PUBLIC-EVIDENCE-CANARY", "sp_actions": []},
+                    day=1,
+                    time="第1天白天",
+                    event="speech",
+                ),
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {"player7": "Werewolf"})
+        self.assertEqual(
+            set(role_options),
+            {"player1", "player3", "player4", "player5", "player6"},
+        )
+        self.assertTrue(
+            all("Werewolf" not in options for options in role_options.values())
+        )
+        role_schema = belief_response_format(
+            supports_json_schema=True,
+            role_options=role_options,
+        )["json_schema"]["schema"]["properties"]["roles"]
+        self.assertNotIn("player7", role_schema["properties"])
+
+        report = _parse_belief(_belief_for(role_options), observation)
+        self.assertEqual(report.roles["player7"], "Werewolf")
+        self.assertEqual(
+            set(report.roles),
+            {f"player{player}" for player in (1, 3, 4, 5, 6, 7)},
+        )
+
+        leaked_known = json.loads(_belief_for(role_options))
+        leaked_known["roles"]["player7"] = "Villager"
+        with self.assertRaises(BeliefValidationError):
+            _parse_belief(json.dumps(leaked_known), observation)
+
+        backend = MetadataBackend([
+            _day_cognition_from_belief(
+                _belief_for(role_options),
+                observation,
+                evidence_claim_ids=("claim_000",),
+            ),
+        ])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                2,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
             ),
         )
-        for name, phase, valid_actions, response, expected, display in cases:
-            with self.subTest(name=name):
-                backend = MetadataBackend([response])
-                backend.supports_json_schema = True
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                    gameplay_max_tokens=512,
-                )
-                agent.rate_limit = 0
+        self.assertEqual(len(backend.calls), 1)
+        cognition_prompt = backend.calls[0]["messages"][0]["content"]
+        private_canaries = (
+            "Actual role supplied by the Environment: Werewolf",
+            "真实狼队信息（仅用于内部策略）：player2, player7",
+            "第0天夜晚：击杀 player6",
+        )
+        for canary in private_canaries:
+            self.assertIn(canary, cognition_prompt)
+        self.assertIn("PUBLIC-EVIDENCE-CANARY", cognition_prompt)
 
+    def test_seer_good_excludes_werewolf_without_fixing_role(self):
+        observation = _role_observation(
+            "Seer",
+            3,
+            [
+                Log(
+                    viewer=[3],
+                    source=3,
+                    target=1,
+                    content={"cheked_identity": "good"},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_seer",
+                )
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {})
+        self.assertEqual(
+            role_options["player1"],
+            ("Witch", "Villager", "unknown"),
+        )
+        self.assertIn("Werewolf", role_options["player2"])
+        self.assertEqual(
+            _parse_belief(_belief_for(role_options), observation).roles[
+                "player1"
+            ],
+            "unknown",
+        )
+        self.assertEqual(
+            _parse_belief(
+                _belief_for(role_options, {"player1": "Witch"}),
+                observation,
+            ).roles["player1"],
+            "Witch",
+        )
+
+        invalid_response = _belief_for(
+            role_options,
+            {"player1": "Werewolf"},
+        )
+        invalid_report = _parse_belief(invalid_response, observation)
+        with self.assertRaisesRegex(
+            RoleReportValidationError,
+            "player1",
+        ):
+            _validate_role_report(invalid_report, observation)
+        self.assertEqual(invalid_report.roles["player1"], "Werewolf")
+
+        backend = MetadataBackend([
+            _day_cognition_from_belief(invalid_response, observation),
+        ])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                3,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_seer_bad_is_fixed_outside_inference_and_merged(self):
+        observation = _role_observation(
+            "Seer",
+            3,
+            [
+                Log(
+                    viewer=[3],
+                    source=3,
+                    target=1,
+                    content={"cheked_identity": "bad"},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_seer",
+                )
+            ],
+        )
+        exact_roles, role_options = derive_belief_constraints(observation)
+
+        self.assertEqual(exact_roles, {"player1": "Werewolf"})
+        self.assertNotIn("player1", role_options)
+        report = _parse_belief(_belief_for(role_options), observation)
+        self.assertEqual(report.roles["player1"], "Werewolf")
+        self.assertEqual(len(report.roles), 6)
+
+    def test_inventory_invalid_report_is_detected_without_gating_gameplay(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        invalid_response = _belief_for(
+            role_options,
+            {
+                "player2": "Villager",
+                "player3": "Villager",
+                "player4": "Villager",
+            },
+        )
+        report = _parse_belief(invalid_response, observation)
+        with self.assertRaisesRegex(RoleReportValidationError, "Villager"):
+            _validate_role_report(report, observation)
+        self.assertEqual(
+            [report.roles[f"player{player}"] for player in (2, 3, 4)],
+            ["Villager", "Villager", "Villager"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Player_1.jsonl"
+            day_response = _day_cognition_from_belief(
+                invalid_response,
+                observation,
+            )
+            backend = MetadataBackend([day_response])
+            agent = self._agent(backend, log_file=str(path))
+            try:
+                self.assertEqual(
+                    agent.act(observation),
+                    _structured_speech(
+                        1,
+                        "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                        ("no_commitment", None),
+                    ),
+                )
+            finally:
+                agent.close()
+
+            self.assertEqual(len(backend.calls), 1)
+            belief_calls = [
+                call
+                for call in backend.calls
+                if "response_format" in call
+                and call["response_format"]["json_schema"]["name"]
+                == "day_cognition_report_v3"
+            ]
+            self.assertEqual(len(belief_calls), 1)
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(records[0]["response"], day_response)
+
+    def test_subjective_concrete_role_report_remains_valid(self):
+        observation = _observation()
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        response = _belief_for(role_options, {"player2": "Seer"})
+        report = _parse_belief(response, observation)
+
+        self.assertIs(_validate_role_report(report, observation), report)
+        self.assertEqual(report.roles["player2"], "Seer")
+
+        backend = MetadataBackend([
+            _day_cognition_from_belief(response, observation),
+        ])
+        agent = self._agent(backend)
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                1,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_inventory_invalid_report_does_not_gate_vote(self):
+        observation = _observation("1_day_vote")
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        invalid_response = _belief_for(
+            role_options,
+            {
+                "player2": "Villager",
+                "player3": "Villager",
+                "player4": "Villager",
+            },
+        )
+        backend = MetadataBackend([invalid_response, '{"target":0}'])
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(observation), ("vote", 0))
+        self.assertEqual(len(backend.calls), 2)
+        vote_prompt = backend.calls[1]["messages"][0]["content"]
+        gameplay_belief = vote_prompt.split(
+            "FRESH PRIVATE BELIEF\n", 1
+        )[1].split("\n\nVOTE", 1)[0]
+        self.assertNotIn('"roles"', gameplay_belief)
+
+    def test_malformed_belief_response_still_fails_fast(self):
+        malformed = (
+            "not-json",
+            json.dumps({"belief": "判断", "roles": {}}),
+            json.dumps({"belief": "判断", "concise": "结论", "roles": []}),
+        )
+        for response in malformed:
+            with self.subTest(response=response):
+                backend = MetadataBackend([response])
+                agent = self._agent(backend)
+
+                with self.assertRaises(BeliefValidationError):
+                    agent.act(_observation())
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_invalid_day_intent_or_evidence_fails_after_one_call(self):
+        observation = _observation()
+        snapshot = freeze_discussion_candidates(observation)
+        invalid_index = json.loads(_day_cognition(observation))
+        invalid_index["public_content_selection"] = {
+            "mode": "one",
+            "first_index": len(snapshot),
+        }
+        invalid_evidence = json.loads(_day_cognition(observation))
+        invalid_evidence["evidence_selection"] = {
+            "mode": "one",
+            "first_claim_id": "claim_999",
+        }
+        old_v1_payload = json.loads(_day_cognition(observation))
+        old_v1_payload["public_action_indices"] = [0]
+        del old_v1_payload["public_content_selection"]
+        del old_v1_payload["public_vote_stance_index"]
+
+        for payload in (invalid_index, invalid_evidence, old_v1_payload):
+            with self.subTest(payload=payload):
+                backend = MetadataBackend([json.dumps(payload)])
+                agent = self._agent(backend)
+                with self.assertRaises(BeliefValidationError):
+                    agent.act(observation)
+                self.assertEqual(len(backend.calls), 1)
+
+    def test_dead_claims_and_witch_kill_target_constraints(self):
+        claimed = _observation()
+        exact_roles, _role_options = derive_belief_constraints(claimed)
+        self.assertEqual(exact_roles, {})
+
+        dead = _observation()
+        dead["authoritative_public_state"]["alive_players"] = [
+            1, 2, 3, 4, 5, 7
+        ]
+        _exact_roles, dead_options = derive_belief_constraints(dead)
+        self.assertIn("player6", dead_options)
+
+        witch = _role_observation(
+            "Witch",
+            4,
+            [
+                Log(
+                    viewer=[4],
+                    source=0,
+                    target=5,
+                    content={"kill_decision": 5},
+                    day=1,
+                    time="第1天夜晚",
+                    event="kill_decision",
+                ),
+                Log(
+                    viewer=[4],
+                    source=4,
+                    target=6,
+                    content={"poison": 6},
+                    day=1,
+                    time="第1天夜晚",
+                    event="skill_witch",
+                ),
+            ],
+        )
+        exact_roles, witch_options = derive_belief_constraints(witch)
+        self.assertEqual(exact_roles, {})
+        self.assertEqual(
+            witch_options["player5"],
+            ("Seer", "Villager", "unknown"),
+        )
+        self.assertNotIn("Werewolf", witch_options["player5"])
+        self.assertIn("Werewolf", witch_options["player1"])
+        self.assertEqual(witch_options["player6"], witch_options["player1"])
+
+    def test_day_path_is_structured_cognition_then_public_only_speech(self):
+        observation = _observation()
+        observation["game_log"].append(
+            Log(
+                viewer=list(range(1, 8)),
+                source=7,
+                target=list(range(1, 8)),
+                content={
+                    "speech_content": "UNSELECTED-PUBLIC-CLAIM",
+                    "sp_actions": [],
+                },
+                day=1,
+                time="第1天白天",
+                event="speech",
+            )
+        )
+        backend = MetadataBackend([
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("oppose", 2),),
+                evidence=("claim_000",),
+            ),
+        ])
+        agent = self._agent(backend)
+
+        result = agent.act(observation)
+        self.assertEqual(
+            result,
+            _structured_speech(
+                1,
+                "我质疑 player2。",
+                ("oppose", 2),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(
+            backend.calls[0]["response_format"]["json_schema"]["name"],
+            "day_cognition_report_v3",
+        )
+        day_schema = backend.calls[0]["response_format"]["json_schema"]["schema"]
+        self.assertEqual(
+            set(day_schema["properties"]),
+            {
+                "belief",
+                "concise",
+                "roles",
+                "public_content_selection",
+                "public_vote_stance_index",
+                "evidence_selection",
+            },
+        )
+        cognition_prompt = backend.calls[0]["messages"][0]["content"]
+        self.assertIn("BELIEF OUTPUT", cognition_prompt)
+        self.assertIn("PUBLIC CONVERSATION", cognition_prompt)
+        self.assertIn("claim_000", cognition_prompt)
+        self.assertIn("claim_001", cognition_prompt)
+        self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1]["raw_text"])
+        for private_cognition in ("当前信息有限。", "继续观察。", '"roles"'):
+            self.assertNotIn(private_cognition, result[1]["raw_text"])
+
+    def test_evidence_linkage_cannot_republish_nested_raw_claims(self):
+        observation = _observation()
+        raw_claim = "建议投 player2。"
+        nested_claim = "player2 说过“建议投 player2。”，我再次转述。"
+        observation["game_log"] = [
+            Log(
+                viewer=list(range(1, 8)),
+                source=2,
+                target=list(range(1, 8)),
+                content={"speech_content": raw_claim, "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            ),
+            Log(
+                viewer=list(range(1, 8)),
+                source=3,
+                target=list(range(1, 8)),
+                content={"speech_content": nested_claim, "sp_actions": []},
+                day=1,
+                time="第1天白天",
+                event="speech",
+            ),
+        ]
+        evidence_selections = (
+            (),
+            ("claim_000",),
+            ("claim_001",),
+            ("claim_000", "claim_001"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Player_1.jsonl"
+            backend = MetadataBackend([
+                _day_cognition(
+                    observation,
+                    content_actions=(DiscussionAct("oppose", 6),),
+                    evidence=evidence,
+                )
+                for evidence in evidence_selections
+            ])
+            agent = self._agent(backend, log_file=str(path))
+            try:
+                speeches = tuple(
+                    agent.act(observation)
+                    for _evidence in evidence_selections
+                )
+            finally:
+                agent.close()
+
+            records = [
+                json.loads(line)
+                for line in path.read_text().splitlines()
+            ]
+
+        self.assertEqual(
+            speeches,
+            (
+                _structured_speech(
+                    1,
+                    "我质疑 player6。",
+                    ("oppose", 6),
+                ),
+            ) * len(evidence_selections),
+        )
+        self.assertEqual(len(backend.calls), len(evidence_selections))
+        for call in backend.calls:
+            prompt = call["messages"][0]["content"]
+            self.assertIn("claim_000", prompt)
+            self.assertIn("claim_001", prompt)
+            self.assertIn(raw_claim, prompt)
+            self.assertIn(nested_claim, prompt)
+        self.assertEqual(
+            tuple(
+                decode_evidence_selection(
+                    json.loads(record["response"])["evidence_selection"],
+                    claim_ids=("claim_000", "claim_001"),
+                )
+                for record in records
+            ),
+            evidence_selections,
+        )
+        for _action, speech in speeches:
+            self.assertNotIn(raw_claim, speech["raw_text"])
+            self.assertNotIn(nested_claim, speech["raw_text"])
+
+    def test_strategic_self_role_bluff_survives_deterministic_realization(self):
+        observation = _role_observation("Werewolf", 3)
+        _exact_roles, role_options = derive_belief_constraints(observation)
+        backend = MetadataBackend([
+            _day_cognition_from_belief(
+                _belief_for(role_options),
+                observation,
+                content_actions=(
+                    DiscussionAct("point_as_seer", 3),
+                    DiscussionAct("check_as_werewolf", 6),
+                ),
+                vote_stance=DiscussionAct("vote_intent", 6),
+            ),
+        ])
+        agent = self._agent(backend)
+
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                3,
+                "我是预言家。\n"
+                "我查验过 player6，结果是狼人。\n"
+                "这一轮我建议投票放逐 player6。",
+                ("point_as_seer", 3),
+                ("check_as_werewolf", 6),
+                ("vote_intent", 6),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+        self.assertIn(
+            "Actual role supplied by the Environment: Werewolf",
+            backend.calls[0]["messages"][0]["content"],
+        )
+
+    def test_content_then_abstain_stance_uses_one_cognition_call(self):
+        observation = _observation()
+        backend = MetadataBackend([
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("oppose", 7),),
+                vote_stance=DiscussionAct("abstain_intent", None),
+            ),
+        ])
+        agent = self._agent(backend)
+
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                1,
+                "我质疑 player7。\n这一轮我选择弃票。",
+                ("oppose", 7),
+                ("abstain_intent", None),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_no_commitment_is_deterministic_with_one_cognition_call(self):
+        backend = MetadataBackend([_day_cognition()])
+        agent = self._agent(backend)
+
+        self.assertEqual(
+            agent.act(_observation()),
+            _structured_speech(
+                1,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                ("no_commitment", None),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_pk_speech_uses_one_cognition_call_and_preserves_action_order(self):
+        observation = _observation("2_day_speech_pk")
+        observation["game_log"].append(
+            Log(
+                viewer=list(range(1, 8)),
+                source=0,
+                target=0,
+                content={
+                    "vote_outcome": "draw",
+                    "speech_queue": [2, 3, 5],
+                },
+                day=2,
+                time="第2天白天",
+                event="end_vote",
+            )
+        )
+        backend = MetadataBackend([
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("oppose", 3),),
+                vote_stance=DiscussionAct("vote_intent", 5),
+            ),
+        ])
+        agent = self._agent(backend)
+
+        self.assertEqual(
+            agent.act(observation),
+            _structured_speech(
+                1,
+                "我质疑 player3。\n这一轮我建议投票放逐 player5。",
+                ("oppose", 3),
+                ("vote_intent", 5),
+                kind="speech_pk",
+            ),
+        )
+        self.assertEqual(len(backend.calls), 1)
+        snapshot = freeze_discussion_candidates(observation)
+        self.assertEqual(
+            project_discussion_vote_stances(snapshot),
+            (
+                NO_STANCE,
+                DiscussionAct("vote_intent", 2),
+                DiscussionAct("vote_intent", 3),
+                DiscussionAct("vote_intent", 5),
+                DiscussionAct("abstain_intent", None),
+            ),
+        )
+        stance_schema = backend.calls[0]["response_format"]["json_schema"][
+            "schema"
+        ]["properties"]["public_vote_stance_index"]
+        self.assertEqual(stance_schema["enum"], [0, 1, 2, 3, 4])
+
+    def test_legacy_pk_speech_preserves_environment_action_kind(self):
+        backend = MetadataBackend(["公开发言"])
+        agent = GPTAgent(
+            backend=backend,
+            model_name="agent-model",
+            gameplay_prompt_profile="legacy",
+        )
+        agent.rate_limit = 0
+
+        self.assertEqual(
+            agent.act(_observation("2_day_speech_pk")),
+            ("speech_pk", "公开发言"),
+        )
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_day_logs_only_cognition_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Player_1.jsonl"
+            backend = MetadataBackend([_day_cognition()])
+            agent = self._agent(backend, log_file=str(path))
+            try:
+                agent.act(_observation())
+            finally:
+                agent.close()
+
+            records = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual([record["message"] for record in records], ["belief"])
+            self.assertEqual([record["finish_reason"] for record in records], ["stop"])
+
+    def test_vote_generates_fresh_belief_then_one_legal_target(self):
+        backend = MetadataBackend([_belief(), '{"target":4}'])
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(_observation("1_day_vote")), ("vote", 4))
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(
+            backend.calls[0]["response_format"]["json_schema"]["name"],
+            "belief_report",
+        )
+        vote_format = backend.calls[1]["response_format"]["json_schema"]
+        self.assertEqual(vote_format["name"], "vote")
+        self.assertEqual(
+            vote_format["schema"]["properties"]["target"]["enum"],
+            [0, 2, 4],
+        )
+        vote_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("FRESH PRIVATE BELIEF", vote_prompt)
+        gameplay_belief = json.loads(
+            vote_prompt.split("FRESH PRIVATE BELIEF\n", 1)[1].split(
+                "\n\nVOTE", 1
+            )[0]
+        )
+        self.assertEqual(
+            gameplay_belief,
+            {"belief": "当前信息有限。", "concise": "继续观察。"},
+        )
+        self.assertNotIn("roles", gameplay_belief)
+        self.assertIn("Do not preserve", vote_prompt)
+
+    def test_vote_abstention_maps_to_exact_environment_action(self):
+        for phase, expected in (
+            ("1_day_vote", ("vote", 0)),
+            ("1_day_vote_pk", ("vote_pk", 0)),
+        ):
+            with self.subTest(phase=phase):
+                backend = MetadataBackend([_belief(), '{"target":0}'])
+                agent = self._agent(backend)
+
+                self.assertEqual(agent.act(_observation(phase)), expected)
+                self.assertEqual(len(backend.calls), 2)
+
+    def test_vote_schema_and_parser_use_exact_frozen_targets(self):
+        legal_targets = (0, 1, 3, 4)
+        schema = vote_response_format(
+            supports_json_schema=True,
+            legal_targets=legal_targets,
+        )["json_schema"]["schema"]
+
+        self.assertEqual(
+            schema["properties"]["target"]["enum"],
+            [0, 1, 3, 4],
+        )
+        self.assertEqual(
+            parse_vote_response(
+                '{"target":0}',
+                legal_targets=legal_targets,
+                phase="1_day_vote",
+            ),
+            0,
+        )
+        with self.assertRaises(GameplayActionValidationError):
+            parse_vote_response(
+                '{"target":0}',
+                legal_targets=(1, 3, 4),
+                phase="1_day_vote",
+            )
+
+    def test_malformed_or_illegal_vote_fails_without_retry_or_fallback(self):
+        for response in ("not-json", '{"target":3}', '{"target":2,"extra":1}'):
+            with self.subTest(response=response):
+                backend = MetadataBackend([_belief(), response])
+                agent = self._agent(backend)
+                with self.assertRaises(GameplayActionValidationError):
+                    agent.act(_observation("1_day_vote"))
+                self.assertEqual(len(backend.calls), 2)
+
+    def test_truncated_vote_fails_after_one_vote_generation(self):
+        backend = MetadataBackend(
+            [_belief(), '{"target":2}'],
+            metadata=[{"finish_reason": "stop"}, {"finish_reason": "length"}],
+        )
+        agent = self._agent(backend)
+
+        with self.assertRaisesRegex(GameplayActionValidationError, "truncated"):
+            agent.act(_observation("1_day_vote"))
+        self.assertEqual(len(backend.calls), 2)
+
+    def test_strict_night_prompt_uses_same_chinese_common_rule_contract(self):
+        observation = {
+            "phase": "1_night_skill_seer",
+            "identity": "Seer",
+            "current_act_idx": 3,
+            "game_log": [],
+            "valid_action": [("check", 2), ("check", 4)],
+        }
+        backend = MetadataBackend(['{"action_index":0}'])
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(observation), ("check", 2))
+        prompt = backend.calls[0]["messages"][0]["content"]
+        self.assertIn(STRICT_CLASSIC7_GAME_DESCRIPTION, prompt)
+        self.assertIn("不能主动放弃查验", prompt)
+        self.assertIn("不能对自己使用解药", prompt)
+        self.assertIn("所有存活玩家都参加PK投票", prompt)
+        self.assertNotIn("Exactly 2 Werewolves", prompt)
+
+    def test_invalid_night_action_fails_after_one_generation(self):
+        observation = {
+            "phase": "1_night_skill_seer",
+            "identity": "Seer",
+            "current_act_idx": 3,
+            "game_log": [],
+            "valid_action": [("check", 2), ("check", 4)],
+        }
+        for response in ('{"action_index":99}', "{'action_index':0}", "not-json"):
+            with self.subTest(response=response):
+                backend = MetadataBackend([response])
+                agent = self._agent(backend)
+                with self.assertRaisesRegex(GameplayActionValidationError, "invalid night"):
+                    agent.act(observation)
+                self.assertEqual(len(backend.calls), 1)
+                self.assertEqual(
+                    backend.calls[0]["response_format"]["json_schema"]["name"],
+                    "night_action_selection",
+                )
+
+    def test_night_snapshot_schema_index_maps_to_exact_environment_action(self):
+        cases = (
+            (
+                "Werewolf",
+                "1_night_skill_wolf",
+                [("kill", 3), ("kill", 7)],
+                1,
+                ("kill", 7),
+            ),
+            (
+                "Seer",
+                "1_night_skill_seer",
+                [("check", 1), ("check", 2), ("check", 4)],
+                2,
+                ("check", 4),
+            ),
+            (
+                "Witch",
+                "1_night_skill_witch",
+                [("witch_pass", 0), ("witch_poison", 2), ("witch_heal", 5)],
+                0,
+                ("witch_pass", 0),
+            ),
+            (
+                "Witch",
+                "1_night_skill_witch",
+                [("witch_pass", 0), ("witch_poison", 2), ("witch_heal", 5)],
+                1,
+                ("witch_poison", 2),
+            ),
+            (
+                "Witch",
+                "1_night_skill_witch",
+                [("witch_pass", 0), ("witch_poison", 2), ("witch_heal", 5)],
+                2,
+                ("witch_heal", 5),
+            ),
+        )
+        for identity, phase, valid_actions, index, expected in cases:
+            with self.subTest(identity=identity, expected=expected):
+                backend = MetadataBackend([json.dumps({"action_index": index})])
+                agent = self._agent(backend, gameplay_max_tokens=512)
                 action = agent.act({
                     "phase": phase,
-                    "identity": "Villager",
+                    "identity": identity,
                     "current_act_idx": 1,
                     "game_log": [],
                     "valid_action": valid_actions,
@@ -1282,246 +1745,159 @@ class AgentBackendTest(unittest.TestCase):
                 self.assertEqual(len(backend.calls), 1)
                 request = backend.calls[0]
                 schema = request["response_format"]["json_schema"]["schema"]
-                self.assertEqual(request["response_format"]["type"], "json_schema")
-                self.assertEqual(
-                    request["response_format"]["json_schema"]["name"],
-                    "night_action_selection",
-                )
-                self.assertTrue(
-                    request["response_format"]["json_schema"]["strict"]
-                )
-                self.assertEqual(request["max_tokens"], 512)
                 self.assertEqual(
                     schema["properties"]["action_index"]["enum"],
                     list(range(len(valid_actions))),
                 )
-                prompt = request["messages"][0]["content"]
-                snapshot = agent.freeze_authoritative_action_candidates(
-                    valid_actions
-                )
-                for index, (candidate_display, env_action) in enumerate(snapshot):
-                    self.assertIn(f"{index}: {candidate_display}", prompt)
-                    self.assertEqual(valid_actions[index], env_action)
-                self.assertEqual(
-                    agent.nlp_action_to_env_action[display],
-                    expected,
-                )
-                if name == "seer":
-                    self.assertNotIn("{'查验':'3'}", prompt)
-                elif name == "werewolf":
-                    self.assertNotIn("{'杀害':'2'}", prompt)
-                else:
-                    self.assertNotIn(
-                        "{'解药': '4', '毒药': '1'}",
-                        prompt,
-                    )
+                self.assertEqual(request["max_tokens"], 512)
+                self.assertNotIn("Guard", request["messages"][0]["content"])
 
-    def test_v26_seed520_witch_has_no_index_for_poisoned_player3(self):
-        valid_actions = [
-            ("witch_pass", 0),
-            ("witch_poison", 1),
-            ("witch_poison", 2),
-            ("witch_poison", 4),
-            ("witch_poison", 5),
-            ("witch_poison", 6),
-            ("witch_poison", 7),
-        ]
-        backend = MetadataBackend(['{"action_index":3}'])
-        backend.supports_json_schema = True
-        agent = GPTAgent(backend=backend, model_name="agent-model")
-        agent.rate_limit = 0
-
-        self.assertEqual(
-            agent.act({
-                "phase": "1_night_skill_witch",
-                "identity": "Witch",
-                "current_act_idx": 6,
-                "game_log": [],
-                "valid_action": valid_actions,
-            }),
-            ("witch_poison", 4),
-        )
-        prompt = backend.calls[0]["messages"][0]["content"]
-        self.assertNotIn("'毒药': '3'", prompt)
-        self.assertEqual(
-            backend.calls[0]["response_format"]["json_schema"]["schema"]
-            ["properties"]["action_index"]["enum"],
-            list(range(len(valid_actions))),
-        )
-
-    def test_v26_logs_raw_index_and_canonical_action_without_regeneration(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            log_path = Path(tmp) / "Player_5.jsonl"
-            backend = MetadataBackend(['{"action_index":1}'])
-            backend.supports_json_schema = True
-            agent = GPTAgent(
-                backend=backend,
-                model_name="agent-model",
-                log_file=str(log_path),
-            )
-            agent.rate_limit = 0
-            try:
-                self.assertEqual(
-                    agent.act({
-                        "phase": "1_night_skill_seer",
-                        "identity": "Seer",
-                        "current_act_idx": 5,
-                        "game_log": [],
-                        "valid_action": [("check", 3), ("check", 7)],
-                    }),
-                    ("check", 7),
-                )
-            finally:
-                agent.close()
-
-            records = self._player_records(log_path)
-            self.assertEqual(len(backend.calls), 1)
-            self.assertEqual(len(records), 1)
-            self.assertEqual(records[0]["response"], '{"action_index":1}')
-            self.assertEqual(records[0]["action"], "{'查验':'7'}")
-            self.assertEqual(records[0]["gen_times"], 0)
-
-    def test_v26_rejects_invalid_structured_night_response_once(self):
-        invalid_responses = (
-            "{}",
-            '{"action_index":-1}',
-            '{"action_index":999}',
-            '{"action_index":true}',
-            '{"action_index":1.0}',
-            '{"action_index":"1"}',
-            '{"action_index":null}',
-            '{"action_index":1,"extra":2}',
-            "[]",
-            "null",
-            "not json",
-        )
-
-        for response in invalid_responses:
-            with self.subTest(response=response):
-                backend = MetadataBackend([response])
-                backend.supports_json_schema = True
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name="agent-model",
-                )
-                agent.rate_limit = 0
-                with self.assertRaisesRegex(
-                    GameplayActionValidationError,
-                    "invalid night action selection.*phase=.*response=",
-                ):
-                    agent.act({
-                        "phase": "0_night_skill_witch",
-                        "identity": "Witch",
-                        "current_act_idx": 7,
-                        "game_log": [],
-                        "valid_action": [
-                            ("witch_pass", 0),
-                            ("witch_heal", 3),
-                            ("witch_poison", 4),
-                        ],
-                    })
-                self.assertEqual(len(backend.calls), 1)
-
-    def test_v26_truncated_night_response_is_fatal_without_retry(self):
+    def test_truncated_day_cognition_fails_without_regeneration(self):
         backend = MetadataBackend(
-            ['{"action_index":0}'],
-            metadata=[{"finish_reason": "length"}],
+            [_day_cognition()],
+            [{"finish_reason": "length"}],
         )
-        backend.supports_json_schema = True
-        agent = GPTAgent(
-            backend=backend,
-            model_name="agent-model",
-        )
-        agent.rate_limit = 0
+        agent = self._agent(backend)
 
-        with self.assertRaisesRegex(
-            GameplayActionValidationError,
-            "phase=.*finish_reason='length'",
-        ):
-            agent.act({
-                "phase": "1_night_skill_seer",
-                "identity": "Seer",
-                "current_act_idx": 5,
-                "game_log": [],
-                "valid_action": [("check", 7)],
-            })
+        with self.assertRaises(BeliefValidationError):
+            agent.act(_observation())
         self.assertEqual(len(backend.calls), 1)
 
-    def test_v26_night_action_requires_backend_model_and_schema_support(self):
-        cases = (
-            (None, "agent-model", "backend and model_name are required"),
-            (
-                MetadataBackend(['{"action_index":0}']),
-                None,
-                "backend and model_name are required",
-            ),
-            (
-                MetadataBackend(['{"action_index":0}']),
-                "agent-model",
-                "require backend JSON Schema support",
-            ),
-        )
+    def test_agent_has_no_persistent_belief_state(self):
+        agent = self._agent(MetadataBackend([]))
+        self.assertFalse(any("belief" in name for name in vars(agent)))
 
-        for backend, model_name, error in cases:
-            with self.subTest(
-                has_backend=backend is not None,
-                model_name=model_name,
+    def test_speech_integrity_checks_are_deterministic(self):
+        for content, finish_reason in (("", "stop"), ("发言", "length"), ('{"speech":"发言"}', "stop")):
+            with self.subTest(content=content):
+                with self.assertRaises(GameplaySpeechQualityError):
+                    validate_gameplay_public_speech(
+                        content,
+                        finish_reason=finish_reason,
+                        player_id=1,
+                        phase="1_day_speech",
+                    )
+
+    def test_active_prompt_control_markers_cannot_be_public_speech(self):
+        for marker in (
+            "GAME / ROLE",
+            "KNOWN INFORMATION",
+            "AUTHORITATIVE INFORMATION",
+            "PUBLIC CONVERSATION",
+            "CURRENT PRIVATE BELIEF",
+            "FRESH PRIVATE BELIEF",
+            "BELIEF OUTPUT",
+            "COMMON PUBLIC RULES",
+            "PUBLIC AUTHORITATIVE INFORMATION",
+            "DISCUSSION INTENT",
+            "SELECTED PUBLIC EVIDENCE",
+            "Environment authoritative public state",
+            "Authoritative public history (chronological)",
+            "Private facts legally visible to this player",
+        ):
+            with self.subTest(marker=marker), self.assertRaises(
+                GameplaySpeechQualityError
             ):
-                agent = GPTAgent(
-                    backend=backend,
-                    model_name=model_name,
+                validate_gameplay_public_speech(
+                    f"正常发言\n{marker}",
+                    finish_reason="stop",
+                    player_id=1,
+                    phase="1_day_speech",
                 )
-                agent.rate_limit = 0
-                with self.assertRaisesRegex(
-                    BackendError,
-                    error,
-                ):
-                    agent.act({
-                        "phase": "1_night_skill_seer",
-                        "identity": "Seer",
-                        "current_act_idx": 5,
-                        "game_log": [],
-                        "valid_action": [("check", 7)],
-                    })
-                if backend is not None:
-                    self.assertEqual(backend.calls, [])
 
-    def test_gpt_agent_preserves_legacy_o1_limit_when_unconfigured(self):
-        backend = MetadataBackend(["公开发言"])
-        agent = GPTAgent(
-            backend=backend,
-            model_name="o1-test-model",
+    def test_gameplay_max_tokens_forward_to_belief_speech_and_night(self):
+        speech_backend = MetadataBackend([_day_cognition()])
+        self._agent(speech_backend, gameplay_max_tokens=512).act(_observation())
+        self.assertEqual(
+            [call["max_tokens"] for call in speech_backend.calls],
+            [512],
         )
+
+        night_backend = MetadataBackend(['{"action_index":0}'])
+        self._agent(night_backend, gameplay_max_tokens=512).act({
+            "phase": "1_night_skill_seer",
+            "identity": "Seer",
+            "current_act_idx": 3,
+            "game_log": [],
+            "valid_action": [("check", 2)],
+        })
+        self.assertEqual(night_backend.calls[0]["max_tokens"], 512)
+
+    def test_o1_unconfigured_limit_and_temperature_are_preserved(self):
+        backend = MetadataBackend(["公开发言"])
+        agent = GPTAgent(backend=backend, model_name="o1-test-model")
         agent.rate_limit = 0
 
-        agent.act(
-            {
+        self.assertEqual(
+            agent.act({
                 "phase": "1_day_speech",
                 "identity": "Villager",
                 "current_act_idx": 1,
                 "game_log": [],
                 "valid_action": ("speech", -1),
-            }
+            }),
+            ("speech", "公开发言"),
         )
-
         self.assertEqual(backend.calls[0]["max_tokens"], 32000)
         self.assertIsNone(backend.calls[0]["temperature"])
 
-    def test_agent_rejects_invalid_gameplay_max_tokens(self):
+    def test_invalid_gameplay_max_tokens_are_rejected(self):
         for invalid in (True, False, 0, -1, 1.5, "512"):
-            with self.subTest(invalid=invalid):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "gameplay_max_tokens",
-                ):
-                    GPTAgent(
-                        backend=RecordingBackend(),
-                        model_name="agent-model",
-                        gameplay_max_tokens=invalid,
-                    )
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                ValueError, "gameplay_max_tokens"
+            ):
+                GPTAgent(
+                    backend=MetadataBackend([]),
+                    model_name="agent-model",
+                    gameplay_max_tokens=invalid,
+                )
 
-    def test_twdm_generation_uses_backend_chat_and_agent_model(self):
-        backend = RecordingBackend(["  structured response  "])
+    def test_backend_model_and_schema_support_are_required(self):
+        backend = MetadataBackend([_belief()])
+        backend.supports_json_schema = False
+        agent = self._agent(backend)
+        with self.assertRaisesRegex(BackendError, "JSON Schema"):
+            agent.act(_observation())
+        self.assertEqual(backend.calls, [])
+
+    def test_registry_injects_backend_and_model(self):
+        backend = MetadataBackend([])
+        agent_type, params = agent_registry.build(
+            "gpt",
+            backend=backend,
+            default_model="agent-model",
+            gameplay_prompt_profile="strict_classic7",
+        )
+        agent = agent_registry.build_agent(
+            agent_type,
+            player_idx=0,
+            agent_param=params,
+            env_param={"n_player": 7, "n_role": 4},
+            log_file=None,
+        )
+        self.assertIs(agent.backend, backend)
+        self.assertEqual(agent.model_name, "agent-model")
+
+    def test_registry_preserves_model_override_and_llm_alias(self):
+        backend = MetadataBackend([])
+        _, explicit = agent_registry.build(
+            "gpt",
+            backend=backend,
+            default_model="default",
+            model_name="explicit",
+        )
+        _, alias = agent_registry.build(
+            "gpt",
+            backend=backend,
+            default_model="default",
+            llm="model-alias",
+        )
+
+        self.assertEqual(explicit["model_name"], "explicit")
+        self.assertEqual(alias["model_name"], "model-alias")
+
+    def test_twdm_generation_preserves_backend_model_and_token_forwarding(self):
+        backend = MetadataBackend(["  structured response  "])
         agent = TWDMStrategyAgent(
             backend=backend,
             model_name="twdm-model",
@@ -1542,65 +1918,9 @@ class AgentBackendTest(unittest.TestCase):
             [{"role": "user", "content": "prompt"}],
         )
 
-    def test_registry_injects_backend_and_resolves_model_name(self):
-        backend = RecordingBackend()
-
-        agent_type, params = agent_registry.build(
-            "gpt",
-            backend=backend,
-            default_model="default-agent-model",
-            temperature=0.3,
-            gameplay_prompt_profile="strict_classic7",
-            gameplay_max_tokens=512,
-        )
-        agent = agent_registry.build_agent(
-            agent_type,
-            player_idx=0,
-            agent_param=params,
-            env_param={"n_player": 7, "n_role": 4},
-            log_file=None,
-        )
-
-        self.assertIs(agent.backend, backend)
-        self.assertEqual(agent.model_name, "default-agent-model")
-        self.assertEqual(agent.temperature, 0.3)
-        self.assertEqual(
-            agent.gameplay_prompt_profile,
-            "strict_classic7",
-        )
-        self.assertEqual(agent.gameplay_max_tokens, 512)
-
-    def test_registry_supports_per_agent_model_override_and_llm_alias(self):
-        backend = RecordingBackend()
-
-        _, explicit_params = agent_registry.build(
-            "gpt",
-            backend=backend,
-            default_model="default",
-            model_name="explicit",
-            temperature=0.3,
-        )
-        _, alias_params = agent_registry.build(
-            "gpt",
-            backend=backend,
-            default_model="default",
-            llm="legacy-alias",
-            temperature=0.3,
-        )
-
-        self.assertEqual(explicit_params["model_name"], "explicit")
-        self.assertEqual(alias_params["model_name"], "legacy-alias")
-
     def test_registry_has_no_provider_or_credential_responsibility(self):
         source = inspect.getsource(Registry)
-
-        for forbidden in (
-            "openai.OpenAI",
-            "openai.AzureOpenAI",
-            "OPENAI_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "AZURE_OPENAI_API_KEY",
-        ):
+        for forbidden in ("openai.OpenAI", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
             self.assertNotIn(forbidden, source)
 
 

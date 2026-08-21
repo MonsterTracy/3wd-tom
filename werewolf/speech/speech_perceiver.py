@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -16,13 +17,19 @@ _PIPE_TRIPLET_PATTERN = re.compile(
     r"\s*[|｜]\s*"
     r"(?P<action>[a-zA-Z_]+)"
     r"\s*[|｜]\s*"
-    r"(?P<object>(?:player\s*)?[1-7])"
+    r"(?P<object>(?:player\s*[1-7]\s*至\s*player\s*[1-7]|"
+    r"(?:player\s*)?[1-7]))"
     r"\s*[\"'`]?\s*[,;，；。.！!]?\s*$",
     flags=re.IGNORECASE,
 )
 
 _BULLET_PREFIX_PATTERN = re.compile(
     r"^\s*(?:[-*•]+\s*|\d+\s*[.)、:：-]\s*)"
+)
+
+_EXPLICIT_PLAYER_RANGE_PATTERN = re.compile(
+    r"^player\s*(?P<start>[1-7])\s*至\s*player\s*(?P<end>[1-7])$",
+    flags=re.IGNORECASE,
 )
 
 _EMPTY_RESPONSE_MARKERS = {
@@ -42,12 +49,6 @@ _SELF_ROLE_ACTIONS = {
     "平民": "point_as_villager",
     "预言家": "point_as_seer",
     "女巫": "point_as_witch",
-    "守卫": "point_as_guard",
-}
-
-_A1_SPECIFIC_TO_BROAD_ACTION = {
-    "check_as_good": "point_as_villager",
-    "check_as_werewolf": "point_as_werewolf",
 }
 
 # This intentionally covers only literal first-person role declarations.
@@ -62,7 +63,7 @@ _SELF_ROLE_CLAIM_PATTERN = re.compile(
     r"|我身份(?:是|为|：|:)\s*"
     r")"
     r"(?:一名|一个|普通的?)?\s*"
-    r"(?P<role>狼人|村民|平民|预言家|女巫|守卫)"
+    r"(?P<role>狼人|村民|平民|预言家|女巫)"
 )
 
 
@@ -105,6 +106,18 @@ class SpeechActionValidationError(ValueError):
         return self._raw_response
 
 
+@dataclass(frozen=True)
+class SpeechParseAuditResult:
+    """One online parse result with the actual backend response."""
+
+    normalized_actions: list[list[str]]
+    raw_response: str | None
+    parse_status: str
+    protected_self_claim_actions: list[list[str]]
+    error_type: str | None
+    error_message: str | None
+
+
 class SpeechPerceiver:
     """Convert one public speech turn into structured speech actions.
 
@@ -140,38 +153,75 @@ class SpeechPerceiver:
         """Parse one speech turn without interrupting the game on failure."""
 
         del context
+        return self.parse_with_audit(
+            speaker=speaker,
+            speech=speech,
+            day=day,
+            phase=phase,
+        ).normalized_actions
 
+    def parse_with_audit(
+        self,
+        speaker: int,
+        speech: str,
+        day: int,
+        phase: str,
+    ) -> SpeechParseAuditResult:
+        """Parse once through the online tolerant path and retain audit data."""
+
+        precondition_error = None
         if self.backend is None or not self.model_name:
-            return []
-
-        if type(speaker) is not int or not 1 <= speaker <= 7:
-            return []
-
-        if not isinstance(speech, str) or not speech.strip():
-            return []
-
-        protected_actions = (
-            self._extract_explicit_self_claim_actions(
-                speaker=speaker,
-                speech=speech,
+            precondition_error = RuntimeError(
+                "speech parser backend and model must be configured"
             )
-        )
+        elif type(speaker) is not int or not 1 <= speaker <= 7:
+            precondition_error = ValueError(
+                "speaker must be an integer in [1, 7]"
+            )
+        elif not isinstance(speech, str) or not speech.strip():
+            precondition_error = ValueError("speech must be non-empty text")
+        if precondition_error is not None:
+            return SpeechParseAuditResult(
+                normalized_actions=[],
+                raw_response=None,
+                parse_status="parser_error",
+                protected_self_claim_actions=[],
+                error_type=type(precondition_error).__name__,
+                error_message=str(precondition_error),
+            )
 
+        protected_actions = self._extract_explicit_self_claim_actions(
+            speaker=speaker,
+            speech=speech,
+        )
         try:
-            return self._parse_configured(
+            actions, raw_response = self._parse_configured_with_response(
                 speaker=speaker,
                 speech=speech,
                 day=day,
                 phase=phase,
-                protected_actions=(
-                    protected_actions
-                ),
+                protected_actions=protected_actions,
             )
-        except Exception:
-            # A literal public self-role declaration is still valid public
-            # evidence even if the LLM parser fails. No hidden role or
-            # game-state information is used here.
-            return protected_actions
+            return SpeechParseAuditResult(
+                normalized_actions=actions,
+                raw_response=raw_response,
+                parse_status="ok",
+                protected_self_claim_actions=protected_actions,
+                error_type=None,
+                error_message=None,
+            )
+        except Exception as exc:
+            raw_response = getattr(exc, "raw_response", None)
+            if not isinstance(raw_response, str):
+                raw_response = None
+            return SpeechParseAuditResult(
+                normalized_actions=protected_actions,
+                raw_response=raw_response,
+                parse_status="parser_error",
+                protected_self_claim_actions=protected_actions,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
 
     def parse_strict(
         self,
@@ -294,6 +344,11 @@ class SpeechPerceiver:
             max_tokens=(
                 SPEECH_PARSER_MAX_TOKENS
             ),
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            },
         )
 
         try:
@@ -307,17 +362,15 @@ class SpeechPerceiver:
                 speaker=speaker,
                 strict=strict,
             )
-            llm_actions = (
-                self._canonicalize_a1_actions(
-                    llm_actions
-                )
-            )
         except SpeechActionValidationError as exc:
             raise SpeechActionValidationError(
                 exc.failures,
                 raw_response=response_text,
             ) from exc
         except ValueError as exc:
+            exc.raw_response = response_text
+            raise
+        except Exception as exc:
             exc.raw_response = response_text
             raise
 
@@ -336,10 +389,9 @@ class SpeechPerceiver:
         day: int,
         phase: str,
     ) -> str:
-        """Build the ONUW-style public-speech parsing prompt."""
+        """Build the formal public-speech parsing prompt."""
 
         action_names, _ = _load_tom_schema()
-
         allowed_actions = "\n".join(
             f"- {action_name}"
             for action_name in action_names
@@ -347,9 +399,7 @@ class SpeechPerceiver:
 
         return f"""你是狼人杀公开发言的结构化动作解析器。
 
-你只抽取下面这一段公开发言中由当前发言者明确声称了什么，不判断这些声称是否真实、合法、合理、符合角色能力或能在一局游戏中执行，不读取隐藏身份，也不推测玩家没有说出的私下想法。
-
-即使明确声明针对发言者自己、一次查验多个目标、一次表达多个投票目标、彼此矛盾或按正常狼人杀规则不能同时执行，也要逐项忠实抽取。不得根据游戏常识修正、降级、挑选或丢弃明确公开命题。
+只抽取当前发言者在下面公开发言中明确表达的命题。不要判断真假，不读取隐藏身份，不推测私下想法。
 
 当前发言者：player{speaker}
 当前天数：Day {day}
@@ -364,51 +414,40 @@ object 必须是 player1 到 player7。
 允许的 action 只有：
 {allowed_actions}
 
-动作语义按四个语义模块组织。模块只用于理解语义，输出仍是上述平坦三元组。
+动作语义：
+1. point_as_werewolf：明确声称或判断目标是狼人；如果狼人结论来自speaker自己的查验声明，改用check_as_werewolf。
+2. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。“好人”“非狼”“好人阵营”“可信”都不能产生该动作。
+3. point_as_seer：明确判断目标是预言家。
+4. point_as_witch：明确判断目标是女巫。
+5. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验好人自动推导。
+6. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
+7. check_as_good：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
+8. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
+9. save：speaker明确公开声称自己救了目标。
+10. poison：speaker明确公开声称自己毒了目标。
+11. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
 
-ROLE_ESTIMATE（角色与阵营判断）：
-1. point_as_werewolf：只有当前发言者明确公开判断某玩家是狼人时使用，例如“X 是狼人”“我认为 X 就是狼人”“我认定 X 为狼人”。
-2. point_as_villager：当前发言者明确判断某玩家是村民、平民或非狼好人阵营。
-3. point_as_seer：当前发言者明确判断某玩家是预言家。
-4. point_as_witch：当前发言者明确判断某玩家是女巫。
-5. point_as_guard：当前发言者明确判断某玩家是守卫。
-
-SOCIAL_STANCE（社会与论述立场）：
-6. support：当前发言者明确认可、同意或支持 target 的发言、逻辑、主张或可信度。
-7. oppose：当前发言者明确反对、不认可、不信任或批评 target 的发言、逻辑、主张或可信度，包括质疑、认为发言可疑或逻辑有问题、对 target 保留意见。
-
-CLAIMED_SKILL_REPORT（公开声称的技能信息）：
-8. check_as_good：当前发言者声称自己获得 target 为非狼阵营的查验结果。
-9. check_as_werewolf：当前发言者声称自己获得 target 为狼人的查验结果。
-10. save：当前发言者声称自己已经对 target 使用解药或完成救人。
-11. poison：当前发言者声称自己已经对 target 使用毒药。
-12. guard：当前发言者声称自己已经守护 target。
-
-ACTION_INTENT（当前行动意图）：
-13. vote_intent：当前发言者在发言时，对当前待执行投票作出的无条件、明确、自身投票承诺。
-
-抽取规则（A1：最具体、非冗余、显式原子命题编码）：
-- 显式性：只抽取发言直接表达的命题，不得根据常识、游戏逻辑或其他 action 推导额外 action。
-- 最具体性：如果一个具体 action 已经完整表达命题，不再输出它的宽泛版本。
-- 非冗余性：同一语义不得因为“通常相关”而重复编码。不得自动扩展 vote_intent → oppose、point_as_werewolf → oppose、point_as_villager → support、check_as_werewolf → point_as_werewolf 或 oppose、check_as_good → point_as_villager 或 support、poison → oppose、save → support 或 guard → support。
-- 独立命题共存：同一发言明确表达多个不同命题时，保留全部动作，并按原文顺序输出。
-- 第一人称明确自报具体身份属于受保护动作，必须优先且稳定抽取。例如“我是6号玩家，身份是村民”必须输出当前发言者对自己的 point_as_villager。
-- 发言前半段已经明确自报具体身份时，即使后文表示“暂时没有怀疑对象”“继续观察”“信息不足”或保持中立，也不能省略已经出现的自报身份动作。
-- 修饰明确社会或论述立场的“暂时”“比较”等措辞不转换成数值强度。但“倾向投”“可能投”等不确定投票表达不是 vote_intent，投票偏好本身也不等于 support 或 oppose。
-- “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级成 point_as_werewolf；只有明确判断“X 是狼人”才使用 point_as_werewolf。
-- 角色或阵营判断使用 point_as_*；普通判断不能替代技能查验结果，也不自动追加 support 或 oppose。
-- 只有当前发言者明确声称自己的“查验/check/inspection”结果时，才使用 check_as_good 或 check_as_werewolf，且不得只输出对应的 point_as_*。普通认好、普通怀疑、转述他人查验、推测、否定或条件查验不得使用 check_as_*；普通认好或认狼使用 point_as_*。
-- 技能 action 只表示公开发言中的主观声明，不表示真实游戏事实，也不重复输出其宽泛结论。
-- save、poison 和 guard 只表示当前发言者声称自己已经完成的技能行为。建议、猜测、转述、未来计划、条件或否定表达不得使用。
-- vote_intent 只表示当前发言者对当前这一轮待执行投票的无条件自身承诺，不表示怀疑或反对，也不自动产生 oppose。允许“今天我投3号”“我的票挂3号”“这一轮我会投3号”。条件承诺、可能性表达、未来其他轮次的计划、请求他人投票、转述他人投票意图、已完成的投票或实际投票系统事件不得使用，例如“如果3号不解释，我就投他”“我可能投3号”“明天再考虑投3号”“大家投3号”“2号说他会投3号”“我已经投了3号”。
-- 同一种 action 可以针对多个不同 target；只有 action 和 target 都相同才是重复。这里记录的是公开声称，不是环境最终执行的游戏动作。
-- 单纯转述、复述或引用别人的查验、身份声明或立场，不视为当前发言者自己的立场。
-- 如果当前发言者明确表示认同某人的发言，可以输出对该玩家的 support；只有当前发言者本人也明确接受某个具体身份结论时，才输出相应 point_as_*。
-- “我是好人”不是具体身份声明，不输出 point_as_villager。
-- “我不是狼人”是身份否定，当前动作集合不能准确表达，不输出。
-- 不补充发言中没有表达的动作。
-- 不输出真实角色，不输出 guesses，不输出置信度、分数、阵营、阶段或其他字段。
-- 删除完全重复的动作，但不要删除同一 subject/object 上 action 不同的动作。
+抽取规则：
+- 只抽取发言直接表达的命题，不得根据常识或其他动作推导。
+- 对普通的带目标动作，目标必须在支持该动作的同一个明确命题或分句中，以 playerN 或 N号被明确点名。
+- 不得从代词、省略宾语、“这个/那个玩家/他/她”、前一句、前一个action、discourse context或多个可能antecedent之一推断目标；动作含义明确但同一支持命题未显式点名目标时，不输出该动作。
+- 第一人称明确自报具体身份（如“我是预言家”）中，“我”明确指向当前发言者，仍必须抽取对当前speaker的 point_as_* ；这不是target推断。
+- 原文明示的显式连续编号范围（如“2号到4号”）仍按范围顺序展开每个目标；这不是discourse antecedent推断。
+- 穷尽抽取所有明确属于上述可表示类别的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
+- 第一人称明确自报具体身份必须抽取。
+- “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级为 point_as_werewolf。
+- most-specific-source：同一个semantic claim只使用最具体predicate，不得从一个specific claim自动派生generic actions。
+- 查验来源的好人/非狼只产生check_as_good，不自动产生point_as_villager或support；查验来源的狼人只产生check_as_werewolf，不自动产生point_as_werewolf、oppose或vote_intent。
+- 只有原文另外、独立地明确表达第二个formal proposition时，才允许为同一目标输出第二个action。
+- save、poison只表示speaker公开声称的技能动作，不自动产生任何身份判断；不得读取真实角色或环境技能记录进行truth validation。
+- vote_intent不等于环境实际vote，也不自动产生oppose；“大家应该关注3号”不构成speaker自己的投票意图。
+- “查验 player5 是好人”等查验结果单独存在时不得产生 support；只有另有“支持、相信、说得对”等明确认可文本才产生 support。
+- 查验结果为“好人”不得产生 point_as_villager、point_as_seer 或 point_as_witch；只有另外明确说出具体角色判断时才抽取对应 point_as_*。
+- “player4 是预言家”等明确具体角色判断必须抽取；parser只忠实表示原文，不判断游戏机制是否合理。
+- 转述别人的身份声明或立场，不视为当前发言者自己的立场。
+- “我是好人”和“我不是狼人”都不能产生 point_as_villager。
+- 连续玩家范围必须按原文顺序展开成多个原子三元组。
+- 删除完全重复的动作，不输出真实角色、guesses、置信度或解释。
 
 示例：
 输入：我是预言家，3号是狼人。
@@ -416,99 +455,57 @@ ACTION_INTENT（当前行动意图）：
 player{speaker} | point_as_seer | player{speaker}
 player{speaker} | point_as_werewolf | player3
 
-输入：我是6号玩家，身份是村民。目前信息不足，我暂时没有明确怀疑对象。
+输入：我是6号玩家，身份是村民。
 输出：
 player{speaker} | point_as_villager | player{speaker}
 
-输入：我觉得3号是狼。
-输出：
-player{speaker} | point_as_werewolf | player3
-
-输入：我不同意3号的逻辑。
+输入：我不同意3号的逻辑，但支持4号。
 输出：
 player{speaker} | oppose | player3
+player{speaker} | support | player4
 
-输入：7号跳预言家查杀1号，我暂时站7号。
+输入：昨晚我查验2号是好人，救了3号，今天投4号。
 输出：
-player{speaker} | support | player7
-
-输入：我是预言家，昨晚查验2号，结果是好人。
-输出：
-player{speaker} | point_as_seer | player{speaker}
 player{speaker} | check_as_good | player2
+player{speaker} | save | player3
+player{speaker} | vote_intent | player4
 
-输入：我查验自己为好人。
+输入：我昨晚查验3号是狼人。
 输出：
-player{speaker} | check_as_good | player{speaker}
-
-输入：经查验，1号、2号、3号都是好人。
-输出：
-player{speaker} | check_as_good | player1
-player{speaker} | check_as_good | player2
-player{speaker} | check_as_good | player3
-
-输入：我是预言家，昨晚验了3号，是查杀。
-输出：
-player{speaker} | point_as_seer | player{speaker}
 player{speaker} | check_as_werewolf | player3
 
-输入：我验3号查杀，今天投3号。
+输入：我是女巫，昨晚毒了5号。
 输出：
-player{speaker} | check_as_werewolf | player3
-player{speaker} | vote_intent | player3
+player{speaker} | point_as_witch | player{speaker}
+player{speaker} | poison | player5
 
-输入：我验3号金水，也同意他的逻辑。
-输出：
-player{speaker} | check_as_good | player3
-player{speaker} | support | player3
-
-输入：第一晚我救了2号，昨晚我毒了3号。
-输出：
-player{speaker} | save | player2
-player{speaker} | poison | player3
-
-输入：昨晚我守了4号。
-输出：
-player{speaker} | guard | player4
-
-输入：今天我投3号。
-输出：
-player{speaker} | vote_intent | player3
-
-输入：我准备投1号，也准备投2号。
-输出：
-player{speaker} | vote_intent | player1
-player{speaker} | vote_intent | player2
-
-输入：这一轮我倾向投4号。
+输入：3号是好人。
 输出：
 NONE
 
-输入：我不信3号，今天我投3号。
+输入：我反对 player2 至 player4 的发言。
 输出：
+player{speaker} | oppose | player2
 player{speaker} | oppose | player3
-player{speaker} | vote_intent | player3
+player{speaker} | oppose | player4
 
-输入：3号是好人，但为了统一票型今天投3号。
-输出：
-player{speaker} | point_as_villager | player3
-player{speaker} | vote_intent | player3
-
-输入：1号大概率是真的预言家，我建议先相信1号。
-输出：
-player{speaker} | point_as_seer | player1
-player{speaker} | support | player1
-
-输入：1号和7号都在跳预言家，我还需要继续听。
+输入：基于以上判断，我投这一票。我就投他。那我投这个人。
 输出：
 NONE
+
+输入：player2和player3都在发言。那我投他。
+输出：
+NONE
+
+输入：这一轮我投4号。
+输出：
+player{speaker} | vote_intent | player4
 
 输出协议：
-- 每个动作单独一行，格式必须严格为：subject | action | object
-- 整个回答的每一个非空行都必须符合上述协议；不要混入无法解析的行。
-- 最多输出7个动作，不要重复动作，不要输出超长文本。
+- 每个动作单独一行，格式严格为：subject | action | object
+- 穷尽输出所有明确动作，不要重复动作。
 - 没有可抽取动作时，只输出：NONE
-- 不输出 JSON，不输出解释，不输出 Markdown 代码块。
+- 不输出 JSON、解释或 Markdown 代码块。
 
 待解析的玩家发言：
 player{speaker}: {speech}"""
@@ -596,10 +593,7 @@ player{speaker}: {speech}"""
                 ):
                     continue
 
-                normalized = [
-                    str(value)
-                    for value in action
-                ]
+                normalized = list(action)
                 key = tuple(normalized)
 
                 if key in seen:
@@ -609,30 +603,6 @@ player{speaker}: {speech}"""
                 merged.append(normalized)
 
         return merged
-
-    @staticmethod
-    def _canonicalize_a1_actions(
-        actions: Sequence[Sequence[str]],
-    ) -> list[list[str]]:
-        """Remove only broad actions superseded by same-target checks."""
-
-        superseded = {
-            (
-                action[0],
-                _A1_SPECIFIC_TO_BROAD_ACTION[
-                    action[1]
-                ],
-                action[2],
-            )
-            for action in actions
-            if action[1]
-            in _A1_SPECIFIC_TO_BROAD_ACTION
-        }
-        return [
-            list(action)
-            for action in actions
-            if tuple(action) not in superseded
-        ]
 
     @classmethod
     def _extract_response_actions(
@@ -981,21 +951,9 @@ player{speaker}: {speech}"""
             ) = raw_action
 
             try:
-                if strict:
-                    speech_action_type.from_values(
-                        subject=raw_subject,
-                        action=action_name,
-                        object_=object_player,
-                    )
-
-                action = (
-                    speech_action_type
-                    .from_values(
-                        subject=speaker,
-                        action=action_name,
-                        object_=(
-                            object_player
-                        ),
+                object_players = (
+                    cls._expand_explicit_player_range(
+                        object_player
                     )
                 )
             except (
@@ -1014,16 +972,49 @@ player{speaker}: {speech}"""
                     )
                 continue
 
-            normalized = action.to_list()
-            key = tuple(normalized)
+            for atomic_object in object_players:
+                try:
+                    if strict:
+                        speech_action_type.from_values(
+                            subject=raw_subject,
+                            action=action_name,
+                            object_=atomic_object,
+                        )
 
-            if key in seen:
-                continue
+                    action = (
+                        speech_action_type
+                        .from_values(
+                            subject=speaker,
+                            action=action_name,
+                            object_=atomic_object,
+                        )
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                ) as exc:
+                    if strict:
+                        failures.append(
+                            {
+                                "candidate": item,
+                                "reason": (
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            }
+                        )
+                    continue
 
-            seen.add(key)
-            actions.append(
-                normalized
-            )
+                normalized = action.to_list()
+                key = tuple(normalized)
+
+                if key in seen:
+                    continue
+
+                seen.add(key)
+                actions.append(
+                    normalized
+                )
 
         if failures:
             raise SpeechActionValidationError(
@@ -1031,6 +1022,28 @@ player{speaker}: {speech}"""
             )
 
         return actions
+
+    @staticmethod
+    def _expand_explicit_player_range(
+        object_player: Any,
+    ) -> list[Any]:
+        """Expand only the confirmed ascending ``playerN 至 playerM`` form."""
+
+        if not isinstance(object_player, str):
+            return [object_player]
+        match = _EXPLICIT_PLAYER_RANGE_PATTERN.fullmatch(
+            object_player.strip()
+        )
+        if match is None:
+            return [object_player]
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if start > end:
+            raise ValueError("player range must be ascending")
+        return [
+            f"player{player_id}"
+            for player_id in range(start, end + 1)
+        ]
 
     @staticmethod
     def _read_raw_action(
@@ -1082,5 +1095,6 @@ player{speaker}: {speech}"""
 
 __all__ = [
     "SPEECH_PARSER_MAX_TOKENS",
+    "SpeechParseAuditResult",
     "SpeechPerceiver",
 ]

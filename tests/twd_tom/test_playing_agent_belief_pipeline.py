@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from werewolf.models.twd_tom.public_events import public_speech_actions
-from script.twd_tom.collect import _write_audit_manifest
+from archive.legacy_tom.script.twd_tom.collect import _write_audit_manifest
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.collector import TWDToMSampleCollector

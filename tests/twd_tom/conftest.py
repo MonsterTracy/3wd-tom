@@ -3,7 +3,9 @@ import os
 
 import pytest
 
-from script.twd_tom.project_suspicion_to_pairs import project_suspicion_sample
+from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
+    project_suspicion_sample,
+)
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     public_event_digest,

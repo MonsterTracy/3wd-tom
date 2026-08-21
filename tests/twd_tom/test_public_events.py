@@ -12,7 +12,7 @@ from werewolf.models.twd_tom.public_events import (
 
 
 def test_public_event_schema_identifies_extended_speech_actions():
-    assert PUBLIC_EVENT_SCHEMA_VERSION == "classic7_public_event_sequence_v2"
+    assert PUBLIC_EVENT_SCHEMA_VERSION == "classic7_public_event_sequence_v3"
 
 
 def _events():
@@ -120,6 +120,22 @@ def test_digests_separate_public_text_from_structured_model_input():
     assert structured_input_digest(first) == structured_input_digest(
         deepcopy(first)
     )
+
+
+def test_public_speech_preserves_targetless_null_and_requires_speaker_subject():
+    events = _events()
+    events[2]["sp_actions"] = [
+        ["player1", "abstain_intent", None],
+        ["player1", "no_commitment", None],
+    ]
+    assert normalize_public_events(events)[2]["sp_actions"] == [
+        ["player1", "abstain_intent", None],
+        ["player1", "no_commitment", None],
+    ]
+
+    events[2]["sp_actions"] = [["player2", "oppose", "player3"]]
+    with pytest.raises(ValueError, match="subject must equal event speaker"):
+        normalize_public_events(events)
 
 
 @pytest.mark.parametrize("event_index", [0, 3, 4, 5])
