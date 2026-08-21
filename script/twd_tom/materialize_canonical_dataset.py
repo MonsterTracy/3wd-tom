@@ -73,9 +73,16 @@ def _load_games(canonical_root: Path) -> list[dict[str, Any]]:
         raise NotADirectoryError(
             f"canonical root is not a directory: {canonical_root}"
         )
-    game_directories = sorted(path for path in canonical_root.iterdir() if path.is_dir())
+    games_root = canonical_root / "games"
+    if not games_root.is_dir():
+        raise NotADirectoryError(
+            f"canonical games directory is not a directory: {games_root}"
+        )
+    game_directories = sorted(
+        path for path in games_root.iterdir() if path.is_dir()
+    )
     if not game_directories:
-        raise ValueError("canonical root contains no game directories")
+        raise ValueError("canonical games directory contains no game directories")
 
     games = []
     seen_game_ids = set()

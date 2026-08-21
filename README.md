@@ -172,7 +172,7 @@ Materialize C1 and strict D ToM1/ToM2 records from the frozen game directory:
 
 ```bash
 python -m script.twd_tom.materialize_canonical_dataset \
-  --canonical-root <A_C0_OUTPUT_ROOT>/games \
+  --canonical-root <A_C0_OUTPUT_ROOT> \
   --output-dir <NEW_DATASET_DIRECTORY> \
   --annotation-run-id <ANNOTATION_RUN_ID> \
   --config configs/twd_tom_server_qwen35_9b.yaml \

@@ -152,8 +152,8 @@ def canonical_game_root(tmp_path):
     }
     provenance["artifact_digest"] = canonical_digest(provenance)
 
-    root = tmp_path / "canonical" / "games"
-    game = root / "game_0001_seed_402"
+    root = tmp_path / "canonical"
+    game = root / "games" / "game_0001_seed_402"
     game.mkdir(parents=True)
     (game / "trajectory.json").write_text(
         f"{canonical_json(trajectory)}\n",
@@ -239,3 +239,18 @@ def test_existing_destination_is_rejected(canonical_game_root, tmp_path):
     destination.mkdir()
     with pytest.raises(FileExistsError, match="already exists"):
         _build(canonical_game_root, destination)
+
+
+def test_each_game_directory_requires_paired_artifacts(
+    canonical_game_root,
+    tmp_path,
+):
+    observer_views = (
+        canonical_game_root
+        / "games"
+        / "game_0001_seed_402"
+        / "observer_views.json"
+    )
+    observer_views.unlink()
+    with pytest.raises(FileNotFoundError, match="observer_views.json"):
+        _build(canonical_game_root, tmp_path / "dataset")
