@@ -608,8 +608,14 @@ def parse_day_cognition_response_v3(
     try:
         payload = json.loads(raw_response)
     except (TypeError, json.JSONDecodeError) as exc:
+        raw_excerpt = (
+            raw_response
+            if isinstance(raw_response, str)
+            else str(raw_response)
+        )[:1000]
         raise BeliefValidationError(
-            f"Day cognition response is not valid JSON ({context})"
+            f"Day cognition response is not valid JSON "
+            f"({context}, raw_response={raw_excerpt!r})"
         ) from exc
     required_fields = {
         "belief",

@@ -720,6 +720,20 @@ class GameplayCognitionTest(unittest.TestCase):
                         observation,
                     )
 
+    def test_invalid_day_cognition_json_reports_sanitized_truncated_raw_text(self):
+        observation = _observation()
+        raw_response = "invalid\n" + ("x" * 1100) + "TRUNCATED-SUFFIX"
+
+        with self.assertRaises(BeliefValidationError) as raised:
+            _parse_day_cognition(raw_response, observation)
+
+        message = str(raised.exception)
+        self.assertIn("player=1, phase=1_day_speech", message)
+        self.assertIn(f"raw_response={raw_response[:1000]!r}", message)
+        self.assertNotIn("TRUNCATED-SUFFIX", message)
+        self.assertNotIn("invalid\n", message)
+        self.assertIn(r"invalid\n", message)
+
     def test_day_cognition_v2_compiles_all_representation_cases(self):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
