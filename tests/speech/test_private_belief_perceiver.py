@@ -129,15 +129,7 @@ def test_prompt_defines_player_suspicion_without_pair_support_semantics():
         "仍有可能",
         "输出空数组",
         "允许全部列出",
-        "HARD CONSTRAINTS",
-        'MUST INCLUDE: ["player1"]',
-        'MUST EXCLUDE: ["player3","player6"]',
-        "Your output is invalid if it omits any MUST INCLUDE player",
-        "没有额外软怀疑时，精确输出 MUST INCLUDE",
         "Your observer identity is exactly: player3",
-        'known_werewolves: ["player1"]',
-        'known_non_werewolves: ["player3","player6"]',
-        "Current legal_candidates: player1, player2, player4, player5, player7",
         "player1, player2, player3, player4, player5, player6, player7",
         '"raw_text":"earlier public speech"',
         '"sp_actions":[["player2","point_as_werewolf","player6"]]',
@@ -153,6 +145,12 @@ def test_prompt_defines_player_suspicion_without_pair_support_semantics():
         "strictly reduce",
         "pair support",
         "complete pair",
+        "HARD CONSTRAINTS",
+        "MUST INCLUDE",
+        "MUST EXCLUDE",
+        "Environment-derived known_werewolves",
+        "Environment-derived known_non_werewolves",
+        "Current legal_candidates",
     ):
         assert forbidden not in prompt
 
@@ -255,13 +253,13 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
         ),
         (
             '{"suspected_werewolves":'
-            '["player1","player3","player4","player5"]}',
+            '["player1","player2","player4","player5"]}',
             3,
             "Seer",
             ["player3"],
             ["player2", "player6", "player7"],
             STATUS_OK,
-            ["player1", "player3", "player4", "player5"],
+            ["player1", "player2", "player4", "player5"],
         ),
         (
             '{"suspected_werewolves":[]}',
@@ -269,8 +267,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             ["player2"],
             ["player3"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            [],
         ),
         (
             '{"suspected_werewolves":["player2"]}',
@@ -287,8 +285,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             [],
             ["player2", "player3"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            ["player2"],
         ),
         (
             '{"suspected_werewolves":["player3"]}',
@@ -296,8 +294,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Villager",
             [],
             ["player1", "player3"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            ["player3"],
         ),
         (
             '{"suspected_werewolves":["player5"]}',
@@ -305,30 +303,30 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Witch",
             [],
             ["player4", "player5"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            STATUS_OK,
+            ["player5"],
         ),
         (
-            '{"suspected_werewolves":["player2","player5"]}',
+            '{"suspected_werewolves":["player5"]}',
+            2,
+            "Werewolf",
+            ["player5"],
+            ["player1", "player3", "player4", "player6", "player7"],
+            STATUS_OK,
+            ["player5"],
+        ),
+        (
+            '{"suspected_werewolves":["player3"]}',
             2,
             "Werewolf",
             ["player2", "player5"],
             ["player1", "player3", "player4", "player6", "player7"],
             STATUS_OK,
-            ["player2", "player5"],
-        ),
-        (
-            '{"suspected_werewolves":["player2"]}',
-            2,
-            "Werewolf",
-            ["player2", "player5"],
-            ["player1", "player3", "player4", "player6", "player7"],
-            STATUS_SEMANTIC_ERROR,
-            None,
+            ["player3"],
         ),
     ],
 )
-def test_suspicion_semantics_use_only_hard_knowledge(
+def test_hard_knowledge_does_not_constrain_self_report_content(
     response,
     player_id,
     identity,
@@ -348,12 +346,23 @@ def test_suspicion_semantics_use_only_hard_knowledge(
     assert result["suspected_werewolves"] == expected
 
 
-def test_report_does_not_call_offline_pair_projector(monkeypatch):
+def test_reporter_rejects_observer_self_suspicion_only_as_illegal_identity():
+    result, _, _ = _report(
+        '{"suspected_werewolves":["player3"]}',
+        player_id=3,
+        known_werewolves=[],
+        known_non_werewolves=[],
+    )
+    assert result["status"] == STATUS_SEMANTIC_ERROR
+    assert result["suspected_werewolves"] is None
+
+
+def test_report_does_not_call_dataset_belief_conversion(monkeypatch):
     def forbidden(*_args, **_kwargs):
-        raise AssertionError("pair projector must remain offline")
+        raise AssertionError("belief conversion must remain in the Dataset")
 
     monkeypatch.setattr(
-        "werewolf.models.twd_tom.belief_labels.suspicion_set_to_pair_target",
+        "werewolf.models.twd_tom.belief_labels.suspicion_set_to_belief_vector",
         forbidden,
     )
     result, backend, agent = _report(
@@ -462,7 +471,7 @@ def test_reporter_uses_public_history_once_and_only_role_private_logs():
     ]
 
     result, backend, _ = _report(
-        '{"suspected_werewolves":["player1","player5"]}',
+        '{"suspected_werewolves":["player5"]}',
         player_id=1,
         identity="Werewolf",
         known_werewolves=["player1", "player5"],
@@ -624,9 +633,9 @@ def test_full_candidate_report_succeeds_once_without_retry():
     assert len(backend.calls) == 1
 
 
-def test_current_prompt_version_is_player_suspicion_v2():
+def test_current_prompt_version_is_player_suspicion_v3():
     assert LABEL_PROMPT_VERSION == (
-        "classic7_pre_speech_player_suspicion_prompt_v2"
+        "classic7_pre_speech_player_suspicion_prompt_v3"
     )
 
 

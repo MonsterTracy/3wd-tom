@@ -1,1 +1,0 @@
-"""Archived Werewolf model packages."""

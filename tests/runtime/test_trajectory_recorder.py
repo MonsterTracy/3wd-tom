@@ -230,14 +230,6 @@ class TrajectoryEnvironment:
         return self._observation(2, marker="terminal"), 0, True, {"Werewolf": -1}
 
 
-class PostSpeechCollector:
-    def __init__(self, order):
-        self.order = order
-
-    def record(self, env, **kwargs):
-        self.order.append("post-speech-collector")
-
-
 def _agents(*, first=None, second=None):
     agents = [ScriptedAgent() for _ in range(7)]
     agents[0] = first or ScriptedAgent([STRICT_SPEECH_ACTION])
@@ -292,13 +284,10 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
     env = TrajectoryEnvironment()
     agents = _agents()
     recorder = _recorder(tmp_path)
-    collector = PostSpeechCollector(env.order)
-
     assert eval(
         env,
         agents,
         ROLES,
-        tom_collector=collector,
         trajectory_recorder=recorder,
     ) == "Villager win"
 
@@ -411,9 +400,8 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
         without_digest.pop("boundary_digest")
         assert boundary["boundary_digest"] == canonical_digest(without_digest)
 
-    assert env.order[-1] == "post-speech-collector"
     assert all(not item.startswith("view:2:") for item in env.order)
-    assert any(item.startswith("view:1:") for item in env.order[:-1])
+    assert any(item.startswith("view:1:") for item in env.order)
     assert OBSERVATION_SCHEMA_VERSION == "classic7_agent_observation_v1"
 
 

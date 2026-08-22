@@ -1,9 +1,4 @@
-"""Run one seven-player Werewolf rollout.
-
-Legacy ToM samples are collected immediately before each public speech. Formal
-ToM and Public Belief Matrix samples are collected after a speech completes and
-before the next action. Collectors never receive role assignments.
-"""
+"""Run one seven-player Werewolf rollout with optional belief self-reports."""
 
 from __future__ import annotations
 
@@ -20,54 +15,24 @@ import yaml
 
 from werewolf.agents import agent_registry
 from werewolf.backends import (
-    OpenAICompatibleBackend,
     create_backend,
     load_named_backends,
     resolve_backend,
 )
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
-from archive.legacy_tom.werewolf.models.tom.collection import (
-    Collector as TomCollector,
-)
-from archive.legacy_tom.werewolf.models.tom.reporter import (
-    BeliefReporter,
-    FORMAL_REPORTER_BASE_URL,
-    FORMAL_REPORTER_MODEL,
-)
-from werewolf.models.public_belief_matrix.collection import (
-    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
-    PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY,
-    PublicBeliefMatrixSampleCollector,
-)
-from werewolf.models.public_belief_matrix.reporter import PublicBeliefMatrixReporter
 from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
-    PublicOnlyBeliefSnapshotCollector,
 )
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
 )
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
-    make_public_only_twd_tom_sample,
-)
-from werewolf.models.twd_tom.shadow import (
-    SecondOrderToMShadow,
 )
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
-)
-from werewolf.speech.public_belief_perceiver import PublicOnlyBeliefReporter
-
-
-PRIVATE_CONDITIONED_COLLECTION_MODE = "private_conditioned"
-PUBLIC_ONLY_COLLECTION_MODE = "public_only"
-COLLECTION_MODES = (
-    PRIVATE_CONDITIONED_COLLECTION_MODE,
-    PUBLIC_ONLY_COLLECTION_MODE,
-    PUBLIC_BELIEF_MATRIX_COLLECTION_MODE,
 )
 
 
@@ -102,8 +67,6 @@ def eval(
     roles_,
     sample_collector=None,
     call_audit=None,
-    tom2_shadow=None,
-    tom_collector=None,
     trajectory_recorder=None,
 ):
     """Run one game and optionally collect subjective ToM samples.
@@ -111,13 +74,10 @@ def eval(
     The environment needs the hidden role assignment to simulate the
     game, but that assignment is never passed to the ToM collector.
 
-    Legacy ToM routes collect before each public ``speech`` or ``speech_pk``.
-    The formal ToM and PBM routes collect after that speech completes and
-    before the next action. Formal labels use each alive observer's legal
-    post-speech observation.
-
-    The optional trajectory recorder materializes PRE views before legacy
-    collectors and POST views immediately after a successful environment step.
+    Playing-agent belief labels are collected immediately before each public
+    ``speech`` or ``speech_pk`` from each alive observer's legal observation.
+    The optional trajectory recorder materializes PRE views before collection
+    and POST views immediately after a successful environment step.
     """
 
     for agent in agent_list:
@@ -141,8 +101,6 @@ def eval(
         ]
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
-        action_round = getattr(env, "day", None)
-
         if trajectory_recorder is not None:
             trajectory_recorder.before_agent_act(
                 env,
@@ -156,22 +114,10 @@ def eval(
                 ),
             )
 
-        post_speech_collection = (
-            sample_collector is not None
-            and getattr(sample_collector, "collection_timing", None)
-            == PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY
-        )
         if (
             trigger in PUBLIC_SPEECH_EVENTS
         ):
-            if tom2_shadow is not None:
-                tom2_shadow.record(
-                    step_idx=step_idx,
-                    phase=action_phase,
-                    speaker_id=current_act_idx,
-                    public_events=env.public_events,
-                )
-            if sample_collector is not None and not post_speech_collection:
+            if sample_collector is not None:
                 sample_collector.record(
                     env,
                     step_idx=step_idx,
@@ -226,24 +172,6 @@ def eval(
                 env,
                 observation_after=obs,
                 terminal_after=done,
-            )
-
-        if trigger in PUBLIC_SPEECH_EVENTS and tom_collector is not None:
-            tom_collector.record(
-                env,
-                step_idx=step_idx,
-                round_number=action_round,
-                phase=trigger,
-                speaker_id=current_act_idx,
-            )
-
-        if trigger in PUBLIC_SPEECH_EVENTS and post_speech_collection:
-            sample_collector.record(
-                env,
-                step_idx=step_idx,
-                trigger=trigger,
-                phase=action_phase,
-                speaker_id=current_act_idx,
             )
 
         step_idx += 1
@@ -756,108 +684,19 @@ def build_twd_tom_sample_collector(
     output_path,
     game_id,
     report_audit=None,
-    collection_mode=PRIVATE_CONDITIONED_COLLECTION_MODE,
-    reporter_dispatch=None,
 ):
-    """Build the selected readonly belief collection stack."""
+    """Build the sole playing-agent readonly belief collection stack."""
 
-    if collection_mode == PRIVATE_CONDITIONED_COLLECTION_MODE:
-        snapshot_collector = (
-            PlayingAgentBeliefSnapshotCollector(
-                PlayingAgentBeliefReporter(
-                    audit_hook=report_audit,
-                ),
-                agent_list,
-            )
-        )
-        sample_builder = None
-    elif collection_mode == PUBLIC_ONLY_COLLECTION_MODE:
-        dispatches = []
-        for agent in agent_list:
-            backend_id = getattr(agent, "backend_id", None)
-            model_name = getattr(agent, "model_name", None)
-            backend = getattr(agent, "backend", None)
-            if not isinstance(backend_id, str) or not backend_id.strip():
-                raise ValueError("every public-only dispatch requires backend_id")
-            if not isinstance(model_name, str) or not model_name.strip():
-                raise ValueError("every public-only dispatch requires model_name")
-            if backend is None or not hasattr(backend, "chat"):
-                raise TypeError("every public-only dispatch requires backend.chat()")
-            dispatches.append(
-                {
-                    "backend": backend,
-                    "backend_id": backend_id,
-                    "model_name": model_name,
-                }
-            )
-        snapshot_collector = PublicOnlyBeliefSnapshotCollector(
-            PublicOnlyBeliefReporter(audit_hook=report_audit),
-            dispatches,
-        )
-        sample_builder = make_public_only_twd_tom_sample
-    elif collection_mode == PUBLIC_BELIEF_MATRIX_COLLECTION_MODE:
-        if not isinstance(reporter_dispatch, dict):
-            raise TypeError("PBM collection requires one shared reporter_dispatch")
-        return PublicBeliefMatrixSampleCollector(
-            output_path=output_path,
-            game_id=game_id,
-            reporter=PublicBeliefMatrixReporter(audit_hook=report_audit),
-            reporter_dispatch=reporter_dispatch,
-        )
-    else:
-        raise ValueError(f"collection_mode must be one of {COLLECTION_MODES}")
-
-    arguments = {
-        "output_path": output_path,
-        "snapshot_collector": snapshot_collector,
-        "game_id": game_id,
-    }
-    if sample_builder is not None:
-        arguments["sample_builder"] = sample_builder
+    snapshot_collector = PlayingAgentBeliefSnapshotCollector(
+        PlayingAgentBeliefReporter(
+            audit_hook=report_audit,
+        ),
+        agent_list,
+    )
     return TWDToMSampleCollector(
-        **arguments,
-    )
-
-
-def build_tom_collector(
-    *,
-    env,
-    reporter_backend,
-    output_path,
-    game_id,
-    seed,
-):
-    """Build the single formal post-speech collection path."""
-
-    if env.n_guard == 1 and env.n_witch == 0:
-        episode_context = "seer_guard"
-    elif env.n_guard == 0 and env.n_witch == 1:
-        episode_context = "seer_witch"
-    else:
-        raise ValueError("formal ToM requires seer_guard or seer_witch")
-    return TomCollector(
-        output_path,
+        output_path=output_path,
+        snapshot_collector=snapshot_collector,
         game_id=game_id,
-        seed=seed,
-        episode_context=episode_context,
-        reporter=BeliefReporter(reporter_backend),
-    )
-
-
-def _build_formal_tom_reporter_backend(tom_sample_path):
-    if tom_sample_path is None:
-        return None
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not isinstance(api_key, str) or not api_key.strip():
-        raise ValueError(
-            "DEEPSEEK_API_KEY is required for --tom_sample_path"
-        )
-    return OpenAICompatibleBackend(
-        api_key=api_key.strip(),
-        base_url=FORMAL_REPORTER_BASE_URL,
-        default_model=FORMAL_REPORTER_MODEL,
-        max_retries=0,
-        supports_json_schema=False,
     )
 
 
@@ -902,11 +741,6 @@ def _write_role_assignment(
 
 def main_cli(args):
     """CLI implementation."""
-
-    tom_sample_path = getattr(args, "tom_sample_path", None)
-    formal_reporter_backend = _build_formal_tom_reporter_backend(
-        tom_sample_path
-    )
 
     if args.log_save_path is None:
         run_name = time.strftime(
@@ -1021,65 +855,11 @@ def main_cli(args):
     )
 
     begin = time.time()
-    sample_collector = None
-    tom_collector = None
-    tom2_shadow = None
-
-    sample_path = getattr(
-        args,
-        "twd_tom_sample_path",
-        None,
+    result = eval(
+        env,
+        agent_list,
+        roles,
     )
-
-    game_id = os.path.basename(
-        os.path.normpath(
-            args.log_save_path
-        )
-    )
-    shadow_options = _resolve_tom2_shadow_options(args)
-
-    try:
-        if sample_path is not None:
-            sample_collector = (
-                build_twd_tom_sample_collector(
-                    agent_list=agent_list,
-                    output_path=sample_path,
-                    game_id=game_id,
-                )
-            )
-        if tom_sample_path is not None:
-            tom_collector = build_tom_collector(
-                env=env,
-                reporter_backend=formal_reporter_backend,
-                output_path=tom_sample_path,
-                game_id=game_id,
-                seed=getattr(args, "random_seed", None),
-            )
-        if shadow_options is not None:
-            checkpoint_path, device, output_path = shadow_options
-            tom2_shadow = SecondOrderToMShadow(
-                checkpoint_path=checkpoint_path,
-                device=device,
-                output_path=output_path,
-                game_id=game_id,
-            )
-        result = eval(
-            env,
-            agent_list,
-            roles,
-            sample_collector=(
-                sample_collector
-            ),
-            tom2_shadow=tom2_shadow,
-            tom_collector=tom_collector,
-        )
-    finally:
-        if sample_collector is not None:
-            sample_collector.close()
-        if tom_collector is not None:
-            tom_collector.close()
-        if tom2_shadow is not None:
-            tom2_shadow.close()
 
     print(
         time.time() - begin,
@@ -1119,60 +899,7 @@ def build_arg_parser() -> (
         default=None,
     )
 
-    parser.add_argument(
-        "--tom_sample_path",
-        type=str,
-        default=None,
-        help="optional JSONL path for formal post-speech ToM samples",
-    )
-
-    parser.add_argument(
-        "--twd_tom_sample_path",
-        type=str,
-        default=None,
-        help=(
-            "optional JSONL path for "
-            "playing-agent ToM samples"
-        ),
-    )
-
-    parser.add_argument(
-        "--twd_tom2_shadow_checkpoint",
-        type=str,
-        default=None,
-    )
-
-    parser.add_argument(
-        "--twd_tom2_shadow_device",
-        type=str,
-        default=None,
-    )
-
-    parser.add_argument(
-        "--twd_tom2_shadow_output_path",
-        type=str,
-        default=None,
-    )
-
     return parser
-
-
-def _resolve_tom2_shadow_options(args):
-    values = (
-        getattr(args, "twd_tom2_shadow_checkpoint", None),
-        getattr(args, "twd_tom2_shadow_device", None),
-        getattr(args, "twd_tom2_shadow_output_path", None),
-    )
-    if values == (None, None, None):
-        return None
-    if any(not isinstance(value, str) or not value.strip() for value in values):
-        raise ValueError(
-            "second-order shadow checkpoint, device, and output path "
-            "must be provided together"
-        )
-    if values[1] == "auto":
-        raise ValueError("second-order shadow device must be explicit")
-    return values
 
 
 if __name__ == "__main__":
