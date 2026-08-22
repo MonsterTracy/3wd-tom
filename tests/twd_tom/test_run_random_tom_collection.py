@@ -4,14 +4,12 @@ from copy import deepcopy
 import pytest
 
 from run_random import (
+    build_arg_parser,
     build_twd_tom_sample_collector,
     eval,
 )
 from werewolf.models.twd_tom.collector import (
     TWDToMSampleCollector,
-)
-from werewolf.models.public_belief_matrix.collection import (
-    PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY,
 )
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
@@ -185,6 +183,72 @@ class RecordingSampleCollector:
         )
 
 
+def test_eval_orders_trajectory_pre_boundary_before_belief_and_action():
+    events = []
+
+    class OrderedAgent(ScriptedAgent):
+        def act(self, observation):
+            events.append("agent.act")
+            return super().act(observation)
+
+    class OrderedEnvironment(ScriptedEnvironment):
+        def step(self, action):
+            events.append("env.step")
+            return super().step(action)
+
+    class OrderedCollector(RecordingSampleCollector):
+        def record(self, env, **kwargs):
+            events.append("belief.record")
+            return super().record(env, **kwargs)
+
+    class OrderedRecorder:
+        def start(self, env, *, roles):
+            events.append("trajectory.start")
+
+        def before_agent_act(self, env, **kwargs):
+            events.append("trajectory.before_agent_act")
+
+        def after_agent_act(self, action):
+            events.append("trajectory.after_agent_act")
+
+        def after_env_step(self, env, **kwargs):
+            events.append("trajectory.after_env_step")
+
+        def complete(self, env, *, winner):
+            events.append("trajectory.complete")
+
+    env = OrderedEnvironment(
+        transitions=[
+            (
+                {"current_act_idx": 1, "phase": "1_day_vote"},
+                0,
+                True,
+                {"Werewolf": -1},
+            )
+        ]
+    )
+    agents = [OrderedAgent([("speech", "ordered speech")])]
+
+    eval(
+        env,
+        agents,
+        roles_=["Villager"],
+        sample_collector=OrderedCollector(),
+        trajectory_recorder=OrderedRecorder(),
+    )
+
+    assert events == [
+        "trajectory.start",
+        "trajectory.before_agent_act",
+        "belief.record",
+        "agent.act",
+        "trajectory.after_agent_act",
+        "env.step",
+        "trajectory.after_env_step",
+        "trajectory.complete",
+    ]
+
+
 def test_eval_collects_all_alive_observers_before_public_speech():
     env = ScriptedEnvironment(
         transitions=[
@@ -294,35 +358,6 @@ def test_eval_collects_all_alive_observers_before_public_speech():
         agent.reset_count == 1
         for agent in agents
     )
-
-
-def test_eval_collects_public_belief_matrix_after_completed_speech():
-    env = ScriptedEnvironment(
-        transitions=[
-            ({"current_act_idx": 2, "phase": "1_day_vote"}, 0, False, {}),
-            (
-                {"current_act_idx": 2, "phase": "1_day_vote"},
-                0,
-                True,
-                {"Werewolf": -1},
-            ),
-        ]
-    )
-    agents = [
-        ScriptedAgent([("speech", "completed speech")]),
-        ScriptedAgent([("vote", 1)]),
-    ]
-    collector = RecordingSampleCollector()
-    collector.collection_timing = PUBLIC_BELIEF_MATRIX_SUPERVISION_BOUNDARY
-
-    eval(env, agents, roles_=["Werewolf", "Villager"], sample_collector=collector)
-
-    assert len(collector.calls) == 1
-    call = collector.calls[0]
-    assert call["environment_step_count"] == 1
-    assert call["observer_ids"] is None
-    assert call["public_history"][-1]["event_type"] == "public_speech"
-    assert call["public_history"][-1]["raw_text"] == "completed speech"
 
 
 def test_eval_collects_speech_pk():
@@ -462,9 +497,7 @@ def test_current_speech_enters_only_the_next_pre_speech_snapshot():
     assert [call["environment_step_count"] for call in collector.calls] == [0, 1]
 
 
-def test_multi_action_speech_has_one_pre_speech_snapshot_and_one_dataset_row(
-    projected_sample_factory,
-):
+def test_multi_action_speech_has_one_pre_speech_snapshot_and_one_dataset_row():
     first_actions = [
         ["player1", "point_as_werewolf", "player3"],
         ["player1", "support", "player2"],
@@ -557,6 +590,8 @@ def test_sample_collector_builder_has_no_roles_argument():
     )
 
     forbidden = {
+        "collection_mode",
+        "reporter_dispatch",
         "roles",
         "true_roles",
         "wolf_labels",
@@ -566,3 +601,19 @@ def test_sample_collector_builder_has_no_roles_argument():
     assert forbidden.isdisjoint(
         signature.parameters
     )
+
+    collector_signature = inspect.signature(TWDToMSampleCollector)
+    assert "sample_builder" not in collector_signature.parameters
+
+    option_strings = {
+        option
+        for action in build_arg_parser()._actions
+        for option in action.option_strings
+    }
+    assert {
+        "--tom_sample_path",
+        "--twd_tom_sample_path",
+        "--twd_tom2_shadow_checkpoint",
+        "--twd_tom2_shadow_device",
+        "--twd_tom2_shadow_output_path",
+    }.isdisjoint(option_strings)

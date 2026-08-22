@@ -12,31 +12,18 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from itertools import combinations
 from typing import Any
 
 
 NUM_PLAYERS = 7
 
-# This objective environment configuration also defines the fixed pair-label
-# space.
 NUM_WEREWOLVES = 2
 
-PROJECTED_SCHEMA_VERSION = (
-    "classic7_pre_speech_suspicion_pair_distribution_v2"
-)
-PROJECTION_VERSION = (
-    "classic7_player_suspicion_pair_projection_base2_v1"
-)
-TARGET_ENCODING = PROJECTION_VERSION
 RAW_LABEL_FIELD = "suspected_werewolves"
 RAW_LABEL_TYPE = "finite_symbolic_player_set"
 NUMERIC_ANNOTATION_PRESENT = False
 RAW_LABEL_SEMANTICS = (
     "observer_internal_player_suspicion_set_v1"
-)
-TARGET_INTERPRETATION = (
-    "deterministic_base2_projection_of_player_suspicion_and_hard_knowledge_v1"
 )
 SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v1"
 LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
@@ -51,45 +38,7 @@ PRIVATE_CONTEXT_SERIALIZED = False
 REPORT_TIMING = "pre_public_speech"
 TRUTH_BASED_OBSERVER_SELECTION = False
 OBSERVER_SELECTION = "publicly_alive_players"
-LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v2"
-PUBLIC_ONLY_LABEL_PROMPT_VERSION = (
-    "classic7_pre_speech_public_only_player_suspicion_prompt_v1"
-)
-PUBLIC_ONLY_LABEL_PROVENANCE = (
-    "alive_observer_public_only_pre_speech_report_v1"
-)
-FORMAL_ANNOTATION_SCHEMA_VERSION = (
-    "classic7_pre_speech_v27_valid_only_no_guess_v1"
-)
-FORMAL_LABEL_PROVENANCE = (
-    "v27_valid_source_report_and_deterministic_hard_knowledge_v1"
-)
-FORMALIZATION_POLICY_VERSION = "v27_valid_only_no_guess_supervision_v1"
-PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION = (
-    "classic7_pre_speech_public_only_valid_only_no_guess_v1"
-)
-PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE = (
-    "public_only_valid_source_report_v1"
-)
-PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION = (
-    "public_only_valid_source_report_only_no_guess_v1"
-)
-PUBLIC_ONLY_MODEL_INPUT_SCOPE = "public_events_only"
-PUBLIC_ONLY_PRIVATE_FIELDS_USAGE = "none"
-PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE = "public_events_only"
-SOURCE_REPORT_OBSERVER_PROVENANCE = "original_self_report"
-SOURCE_REPORT_ANNOTATION_CONFIDENCE = "source"
-DETERMINISTIC_HARD_KNOWLEDGE_OBSERVER_PROVENANCE = (
-    "deterministic_unique_hard_knowledge_pair_v1"
-)
-DETERMINISTIC_HARD_KNOWLEDGE_ANNOTATION_CONFIDENCE = "exact"
-MARGINAL_SEMANTICS = "two_wolf_membership_probability_v1"
-PAIR_ORDERING = "global_lexicographic_two_player_combinations"
-MODEL_OUTPUT = "observer_pair_logits"
-OUTPUT_ACTIVATION = "softmax_over_pair_classes"
-TARGET_DISTRIBUTION_IS_REPORTER_PROBABILITY = False
-TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING = True
-
+LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v3"
 PAD_TOKEN = "<pad>"
 NONE_TOKEN = "<none>"
 
@@ -100,34 +49,6 @@ PLAYER_NAMES: tuple[str, ...] = tuple(
     for player_id in range(1, NUM_PLAYERS + 1)
 )
 CANONICAL_PLAYER_ORDERING = PLAYER_NAMES
-SECOND_ORDER_TARGET_ENCODING = "classic7_second_order_wolf_pair_distribution_v2"
-SECOND_ORDER_OBSERVER_READOUT = "public_event_query_attention_v1"
-SECOND_ORDER_OBSERVER_EVENT_CONDITIONING = (
-    "cyclic_relative_player_relations_v1"
-)
-SECOND_ORDER_SUBJECT_SUPERVISION = (
-    "post_completed_public_speech_pre_next_action_v1"
-)
-
-
-CANONICAL_WOLF_PAIRS: tuple[tuple[str, str], ...] = tuple(
-    combinations(
-        PLAYER_NAMES,
-        NUM_WEREWOLVES,
-    )
-)
-
-NUM_WOLF_PAIR_CLASSES = len(
-    CANONICAL_WOLF_PAIRS
-)
-
-
-def canonical_wolf_pairs() -> tuple[tuple[str, str], ...]:
-    """Return the sole global 21-class two-Werewolf ordering."""
-
-    return CANONICAL_WOLF_PAIRS
-
-
 # Minimal ONUW-style action vocabulary adapted to the roles supported by
 # the seven-player environment.
 #
@@ -199,40 +120,6 @@ def canonicalize_player_set(values: Any, *, field_name: str) -> list[str]:
         normalized.append(value)
     return sorted(normalized, key=PLAYER_TO_ID.__getitem__)
 
-
-def validate_player_suspicion(
-    suspected_werewolves: Any,
-    known_werewolves: Any,
-    known_non_werewolves: Any,
-) -> list[str]:
-    """Validate one player-level suspicion set against observer hard knowledge."""
-
-    suspected = canonicalize_player_set(
-        suspected_werewolves,
-        field_name="suspected_werewolves",
-    )
-    known_wolves = canonicalize_player_set(
-        known_werewolves,
-        field_name="known_werewolves",
-    )
-    known_non_wolves = canonicalize_player_set(
-        known_non_werewolves,
-        field_name="known_non_werewolves",
-    )
-    known_wolf_set = set(known_wolves)
-    known_non_wolf_set = set(known_non_wolves)
-    if known_wolf_set & known_non_wolf_set:
-        raise ValueError("hard knowledge sets must be disjoint")
-    suspected_set = set(suspected)
-    if not known_wolf_set.issubset(suspected_set):
-        raise ValueError(
-            "suspected_werewolves must contain all known_werewolves"
-        )
-    if suspected_set & known_non_wolf_set:
-        raise ValueError(
-            "suspected_werewolves cannot contain known_non_werewolves"
-        )
-    return suspected
 
 ACTION_TO_ID: dict[str, int] = {
     PAD_TOKEN: 0,
@@ -406,16 +293,10 @@ def parse_speech_action(item: Sequence[Any]) -> SpeechAction:
 __all__ = [
     "NUM_PLAYERS",
     "NUM_WEREWOLVES",
-    "NUM_WOLF_PAIR_CLASSES",
-    "CANONICAL_WOLF_PAIRS",
-    "PROJECTED_SCHEMA_VERSION",
-    "PROJECTION_VERSION",
-    "TARGET_ENCODING",
     "RAW_LABEL_FIELD",
     "RAW_LABEL_TYPE",
     "NUMERIC_ANNOTATION_PRESENT",
     "RAW_LABEL_SEMANTICS",
-    "TARGET_INTERPRETATION",
     "SUPERVISION_SCOPE",
     "LABEL_PROVENANCE",
     "LABEL_SOURCE",
@@ -430,35 +311,10 @@ __all__ = [
     "TRUTH_BASED_OBSERVER_SELECTION",
     "OBSERVER_SELECTION",
     "LABEL_PROMPT_VERSION",
-    "PUBLIC_ONLY_LABEL_PROMPT_VERSION",
-    "PUBLIC_ONLY_LABEL_PROVENANCE",
-    "FORMAL_ANNOTATION_SCHEMA_VERSION",
-    "FORMAL_LABEL_PROVENANCE",
-    "FORMALIZATION_POLICY_VERSION",
-    "PUBLIC_ONLY_FORMAL_ANNOTATION_SCHEMA_VERSION",
-    "PUBLIC_ONLY_FORMAL_LABEL_PROVENANCE",
-    "PUBLIC_ONLY_FORMALIZATION_POLICY_VERSION",
-    "PUBLIC_ONLY_MODEL_INPUT_SCOPE",
-    "PUBLIC_ONLY_PRIVATE_FIELDS_USAGE",
-    "PUBLIC_ONLY_BELIEF_INFORMATION_SCOPE",
-    "SOURCE_REPORT_OBSERVER_PROVENANCE",
-    "SOURCE_REPORT_ANNOTATION_CONFIDENCE",
-    "DETERMINISTIC_HARD_KNOWLEDGE_OBSERVER_PROVENANCE",
-    "DETERMINISTIC_HARD_KNOWLEDGE_ANNOTATION_CONFIDENCE",
-    "MARGINAL_SEMANTICS",
-    "PAIR_ORDERING",
-    "MODEL_OUTPUT",
-    "OUTPUT_ACTIVATION",
-    "TARGET_DISTRIBUTION_IS_REPORTER_PROBABILITY",
-    "TARGET_DISTRIBUTION_IS_DETERMINISTIC_ENCODING",
     "PAD_TOKEN",
     "NONE_TOKEN",
     "PLAYER_NAMES",
     "CANONICAL_PLAYER_ORDERING",
-    "SECOND_ORDER_TARGET_ENCODING",
-    "SECOND_ORDER_OBSERVER_READOUT",
-    "SECOND_ORDER_OBSERVER_EVENT_CONDITIONING",
-    "SECOND_ORDER_SUBJECT_SUPERVISION",
     "ACTION_NAMES",
     "TARGETLESS_ACTION_NAMES",
     "GUESS_ROLE_NAMES",
@@ -471,7 +327,5 @@ __all__ = [
     "normalize_action",
     "normalize_guess_role",
     "canonicalize_player_set",
-    "validate_player_suspicion",
-    "canonical_wolf_pairs",
     "parse_speech_action",
 ]

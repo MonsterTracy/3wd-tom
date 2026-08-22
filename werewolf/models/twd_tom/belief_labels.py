@@ -1,20 +1,60 @@
-"""Build global two-Werewolf pair targets and player marginals."""
+"""Deterministic belief-label conversions used by tom-v2 and frozen models."""
 
 from __future__ import annotations
 
+from itertools import combinations
 from typing import Any
 
 import torch
 
 from werewolf.models.twd_tom.schema import (
-    NUM_WOLF_PAIR_CLASSES,
     NUM_PLAYERS,
     PLAYER_NAMES,
     PLAYER_TO_ID,
     canonicalize_player_set,
-    canonical_wolf_pairs,
-    validate_player_suspicion,
+    normalize_player,
 )
+
+
+def suspicion_set_to_belief_vector(
+    suspected_werewolves: Any,
+    *,
+    observer_id: Any,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Convert one suspicion set to the frozen sparse seven-player row."""
+
+    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+        raise TypeError("dtype must be a floating-point torch dtype")
+    observer = normalize_player(observer_id)
+    suspected = canonicalize_player_set(
+        suspected_werewolves,
+        field_name="suspected_werewolves",
+    )
+    if observer in suspected:
+        raise ValueError("suspected_werewolves cannot contain the observer")
+    target = torch.zeros(NUM_PLAYERS, dtype=dtype, device=device)
+    if suspected:
+        for player in suspected:
+            target[PLAYER_TO_ID[player] - 1] = 1.0
+    else:
+        target.fill_(1.0)
+        target[PLAYER_TO_ID[observer] - 1] = 0.0
+    target /= target.sum()
+
+    if not torch.isfinite(target).all() or torch.any(target < 0.0):
+        raise RuntimeError("constructed belief target must be finite and non-negative")
+    if target[PLAYER_TO_ID[observer] - 1].item() != 0.0:
+        raise RuntimeError("constructed belief target diagonal must be zero")
+    if not torch.isclose(
+        target.sum(),
+        torch.ones((), dtype=dtype, device=device),
+        rtol=1e-5,
+        atol=1e-6,
+    ):
+        raise RuntimeError("constructed belief target must sum to one")
+    return target
 
 
 def canonicalize_known_players(values: Any, *, field_name: str) -> list[str]:
@@ -41,7 +81,7 @@ def close_hard_knowledge(
         raise ValueError("hard knowledge sets must be disjoint")
     hard_support = [
         pair
-        for pair in canonical_wolf_pairs()
+        for pair in combinations(PLAYER_NAMES, 2)
         if set(known_wolves).issubset(pair)
         and set(pair).isdisjoint(known_non_wolves)
     ]
@@ -58,101 +98,8 @@ def close_hard_knowledge(
         if all(player not in pair for pair in hard_support)
     ]
     return closed_wolves, closed_non_wolves
-
-
-def suspicion_set_to_pair_target(
-    suspected_werewolves: Any,
-    known_werewolves: Any,
-    known_non_werewolves: Any,
-    *,
-    dtype: torch.dtype = torch.float32,
-    device: torch.device | str | None = None,
-) -> torch.Tensor:
-    """Project one soft suspicion set over the global 21 pairs."""
-
-    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
-        raise TypeError("dtype must be a floating-point torch dtype")
-    known_wolves, known_non_wolves = close_hard_knowledge(
-        known_werewolves,
-        known_non_werewolves,
-    )
-    suspected = validate_player_suspicion(
-        suspected_werewolves,
-        known_wolves,
-        known_non_wolves,
-    )
-    known_wolf_set = set(known_wolves)
-    known_non_wolf_set = set(known_non_wolves)
-    soft_suspects = set(suspected) - known_wolf_set
-    pairs = canonical_wolf_pairs()
-    target = torch.zeros(
-        NUM_WOLF_PAIR_CLASSES,
-        dtype=dtype,
-        device=device,
-    )
-    for pair_index, pair in enumerate(pairs):
-        if (
-            known_wolf_set.issubset(pair)
-            and set(pair).isdisjoint(known_non_wolf_set)
-        ):
-            target[pair_index] = 2 ** len(set(pair) & soft_suspects)
-    target /= target.sum()
-
-    if not torch.isfinite(target).all() or torch.any(target < 0.0):
-        raise RuntimeError("constructed pair target must be finite and non-negative")
-    if not torch.isclose(
-        target.sum(),
-        torch.ones((), dtype=dtype, device=device),
-        rtol=1e-5,
-        atol=1e-6,
-    ):
-        raise RuntimeError("constructed pair target must sum to one")
-    return target
-
-
-def pair_probabilities_to_belief_marginals(
-    pair_probabilities: torch.Tensor,
-) -> torch.Tensor:
-    """Convert global pair probabilities to seven player marginals."""
-
-    if not isinstance(pair_probabilities, torch.Tensor):
-        raise TypeError("pair_probabilities must be a tensor")
-    if not torch.is_floating_point(pair_probabilities):
-        raise TypeError("pair_probabilities must use a floating-point dtype")
-    if pair_probabilities.ndim < 2 or tuple(
-        pair_probabilities.shape[-2:]
-    ) != (NUM_PLAYERS, NUM_WOLF_PAIR_CLASSES):
-        raise ValueError("pair_probabilities must end with shape [7, 21]")
-    if not torch.isfinite(pair_probabilities).all():
-        raise ValueError("pair_probabilities must contain only finite values")
-    if torch.any(pair_probabilities < 0.0):
-        raise ValueError("pair_probabilities cannot contain negative values")
-
-    row_sums = pair_probabilities.sum(dim=-1)
-    valid_or_zero = torch.isclose(
-        row_sums,
-        torch.ones_like(row_sums),
-        rtol=1e-5,
-        atol=1e-6,
-    ) | (row_sums == 0.0)
-    if not valid_or_zero.all():
-        raise ValueError("pair probability rows must sum to one or remain zero")
-
-    incidence = torch.zeros(
-        (NUM_WOLF_PAIR_CLASSES, NUM_PLAYERS),
-        dtype=pair_probabilities.dtype,
-        device=pair_probabilities.device,
-    )
-    for pair_index, pair in enumerate(canonical_wolf_pairs()):
-        for player in pair:
-            incidence[pair_index, PLAYER_TO_ID[player] - 1] = 1.0
-
-    return torch.einsum("...oc,cp->...op", pair_probabilities, incidence)
-
-
 __all__ = [
-    "suspicion_set_to_pair_target",
+    "suspicion_set_to_belief_vector",
     "canonicalize_known_players",
     "close_hard_knowledge",
-    "pair_probabilities_to_belief_marginals",
 ]

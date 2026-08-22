@@ -13,7 +13,6 @@ from script.twd_tom.train import (
 
 def make_config(**overrides):
     values = {
-        "tom_order": 2,
         "output_dir": "outputs/test",
         "dataset_path": "data/train.jsonl",
         "validation_dataset_path": "data/val.jsonl",
@@ -43,7 +42,6 @@ def test_scheduler_config_validation(overrides, message):
 def test_scheduler_cli_arguments():
     args = build_arg_parser().parse_args(
         [
-            "--tom-order", "2",
             "--output-dir", "outputs/run",
             "--dataset", "data/train.jsonl",
             "--validation-dataset", "data/val.jsonl",

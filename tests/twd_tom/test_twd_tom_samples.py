@@ -103,7 +103,7 @@ def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
     assert "believed_werewolves" not in sample
     assert sample["known_non_werewolves"]["player1"] == ["player1"]
     assert sample["label_prompt_version"] == (
-        "classic7_pre_speech_player_suspicion_prompt_v2"
+        "classic7_pre_speech_player_suspicion_prompt_v3"
     )
     assert sample["label_prompt_version"] == LABEL_PROMPT_VERSION
     assert "target_distribution_is_reporter_probability" not in sample
@@ -120,7 +120,7 @@ def test_sample_requires_exact_observer_reports():
         make_twd_tom_sample(public_snapshot=snapshot, reports={})
 
 
-def test_sample_persists_hard_fact_semantic_error_without_repair():
+def test_sample_persists_observer_legality_error_without_repair():
     snapshot = freeze_public_snapshot(
         game_id="game_001",
         step_idx=1,
@@ -130,7 +130,7 @@ def test_sample_persists_hard_fact_semantic_error_without_repair():
         observer_ids=[1],
         public_events=_events(speaker="player1"),
     )
-    error = "suspected_werewolves cannot contain known_non_werewolves"
+    error = "suspected_werewolves cannot contain the observer"
     sample = make_twd_tom_sample(
         public_snapshot=snapshot,
         reports={

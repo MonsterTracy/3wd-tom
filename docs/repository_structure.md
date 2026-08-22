@@ -1,62 +1,22 @@
-# Repository structure and storage boundary
+# 仓库结构
 
-## Source tree
+## tom-v2 当前 active path
 
-| Path | Responsibility |
+| 路径 | 职责 |
 |---|---|
-| `werewolf/agents/` | Agent abstractions, Planner/Renderer orchestration, prompt and action contracts |
-| `werewolf/backends/` | Named OpenAI-compatible backend loading and request handling |
-| `werewolf/envs/` | Seven-player game state, observations, valid actions, phases, and public events |
-| `werewolf/speech/` | Online/offline speech parsing and playing-agent belief reports |
-| `werewolf/models/twd_tom/` | ToM schemas, collection helpers, Dataset, backbones, targets, losses, metrics, and shadow inference |
-| `script/twd_tom/` | Canonical A/C0 collection, D split, audit, training, and evaluation entry points |
-| `archive/legacy_tom/` | Importable historical formal-ToM and online V2.7 collection/processing code |
-| `tests/` | Self-contained deterministic tests organized by subsystem |
-| `configs/` | Reusable runtime profiles; see `configs/README.md` |
-| `docs/` | Research contracts, architecture, provenance, and deployment guidance |
+| `run_random.py` | 在公开发言前触发唯一 self-report collector |
+| `werewolf/speech/private_belief_perceiver.py` | 构造并解析 playing-agent private readonly query |
+| `werewolf/models/twd_tom/belief_snapshot.py` | 取得 observer 合法信息并检查 agent 状态不变 |
+| `werewolf/models/twd_tom/samples.py` | 冻结 public cutoff，保存符号 belief snapshot |
+| `werewolf/models/twd_tom/collector.py` | 将 raw sample 写入 JSONL |
+| `werewolf/models/twd_tom/belief_labels.py` | 将相对怀疑集合确定性转换为归一化 belief row |
+| `werewolf/models/twd_tom/dataset.py` | 输出 7×7 observer-conditioned target 与两个 mask |
+| `tests/twd_tom/` | 时间边界、只读性、符号标签和写入契约测试 |
 
-The root entry points `run_battle.py`, `run_random.py`, and `run_batch.sh`
-remain part of the gameplay interface. The repository does not contain a
-`jobs/` directory or an in-repository model-service manager.
+## 本阶段保留但不重构的计算层
 
-## Collection entry points
+`werewolf/models/twd_tom/belief_backbone.py`、loss、metrics、`script/twd_tom/train.py` 与 `eval.py` 保持不变，等待后续阶段与新 Dataset target 对齐。
 
-`python -m script.twd_tom.collect_canonical_trajectories` is the canonical
-gameplay collection interface. It calls `run_random.eval()` with only the
-canonical trajectory recorder and emits paired A/C0 artifacts.
+## 已退出 tom-v2 主线
 
-The downstream entry point is
-`script.twd_tom.materialize_canonical_dataset`, which calls
-`werewolf.offline_annotation` (C1) and
-`werewolf.offline_materialization` (D), followed by
-`script.twd_tom.split_offline_d_training_data`, `TWDToMDataset`, and the
-current `script.twd_tom.train` / `eval` entry points. Online belief collection
-and pre-D processing commands moved to `archive/legacy_tom` and are not normal
-mainline entry points.
-
-## External runtime storage
-
-The following root directories are intentionally outside the Git delivery
-boundary:
-
-| Root | Typical contents |
-|---|---|
-| `data/` | Collection/source raw runs |
-| `datasets/` | Identified dataset packages, aggregated raw data, materialized formal data, and frozen splits |
-| `logs/` | Game, backend-call, configuration, and run logs |
-| `outputs/` | Training/evaluation checkpoints and metrics |
-| `review/` | Data audits, human review, reparse reports, and review packages |
-| `checkpoints/` | Model checkpoints stored independently of a run tree |
-| `models/` | Root-level external model weights or provider caches |
-
-The root-level `models/` storage path is distinct from the tracked source
-package `werewolf/models/`.
-
-Small, sanitized examples should be added under a deliberate `examples/`
-directory rather than relaxing the ignore policy for runtime data roots.
-
-## Local-only files
-
-Secrets, virtual environments, caches, IDE state, generated presentation
-assets, and provider downloads are local-only. `.env.example` is the sole
-tracked credential template; `.env` must never be committed.
+仓库不再提供 public-only reporter、PBM、external offline annotation/materialization、D splitter、online ToM2 shadow 或 tom-v1 archive 的可导入实现。tom-v1 历史由 Git 保存。

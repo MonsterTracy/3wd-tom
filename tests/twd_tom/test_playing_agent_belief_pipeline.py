@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from werewolf.models.twd_tom.public_events import public_speech_actions
-from archive.legacy_tom.script.twd_tom.collect import _write_audit_manifest
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.collector import TWDToMSampleCollector
@@ -208,9 +207,11 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
     assert sample["belief_errors"]["player4"] is None
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
-    with pytest.raises(ValueError, match="field set mismatch"):
-        TWDToMDataset.from_jsonl(path, tom_order=2)
-
+    dataset = TWDToMDataset.from_jsonl(path)
+    item = dataset[0]
+    assert item["belief_targets"].shape == (7, 7)
+    assert item["observer_alive_mask"].all()
+    assert "pair_targets" not in item
 
 def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     tmp_path,
@@ -244,8 +245,8 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     agents = []
     backends = []
     responses = {
-        1: '{"suspected_werewolves":["player1","player2"]}',
-        2: '{"suspected_werewolves":["player1","player2"]}',
+        1: '{"suspected_werewolves":["player2","player3"]}',
+        2: '{"suspected_werewolves":["player1"]}',
         3: '{"suspected_werewolves":["player1"]}',
         4: '{"suspected_werewolves":[]}',
         5: '{"suspected_werewolves":[]}',
@@ -370,32 +371,5 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     serialized = path.read_text(encoding="utf-8")
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
-    with pytest.raises(ValueError, match="field set mismatch"):
-        TWDToMDataset.from_jsonl(path, tom_order=2)
-
-
-def test_collection_manifest_records_frozen_label_contract(tmp_path):
-    path = _write_audit_manifest(
-        log_save_path=tmp_path,
-        game_id="game_train",
-        roles=["Werewolf", "Werewolf", "Seer", "Witch", "Villager", "Villager", "Villager"],
-        role2agent_list=["profile"] * 7,
-        sample_path=tmp_path / "game_train.jsonl",
-        random_seed=1,
-    )
-    manifest = json.loads(path.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == (
-        "classic7_pre_speech_player_suspicion_v2"
-    )
-    assert manifest["label_prompt_version"] == (
-        "classic7_pre_speech_player_suspicion_prompt_v2"
-    )
-    assert "pair_class_count" not in manifest
-    assert "pair_ordering" not in manifest
-    assert manifest["raw_label_field"] == "suspected_werewolves"
-    assert manifest["online_pair_projection"] is False
-    assert manifest["label_source"] == "playing_agent_readonly_self_report"
-    assert manifest["model_input_scope"] == "structured_public_events_only"
-    assert manifest["report_side_effect_free"] is True
-    assert manifest["global_truth_injected"] is False
-    assert manifest["private_context_serialized"] is False
+    with pytest.raises(ValueError, match="status=ok for every alive observer"):
+        TWDToMDataset.from_jsonl(path)

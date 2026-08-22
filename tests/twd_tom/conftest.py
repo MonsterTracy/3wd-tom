@@ -3,9 +3,6 @@ import os
 
 import pytest
 
-from archive.legacy_tom.script.twd_tom.project_suspicion_to_pairs import (
-    project_suspicion_sample,
-)
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     public_event_digest,
@@ -22,7 +19,14 @@ from tests.twd_tom.public_event_fixtures import make_training_sample
 
 @pytest.fixture
 def suspicion_sample_factory():
-    def make(*, game_id="game_001", step_idx=1, observers=(1, 3, 5)):
+    def make(
+        *,
+        game_id="game_001",
+        step_idx=1,
+        observers=(1, 2, 3, 5),
+        suspicions_by_observer=None,
+        failed_observer=None,
+    ):
         actions = [["player2", "point_as_werewolf", "player7"]]
         public_events = make_public_events(actions, speaker_id=2)
         suspicions = {}
@@ -33,14 +37,14 @@ def suspicion_sample_factory():
         known_non_werewolves = {}
         for index, observer_id in enumerate(observers):
             subject = f"player{observer_id}"
-            if index == 0:
+            if observer_id == failed_observer:
                 suspicions[subject] = None
                 statuses[subject] = "parse_error"
-            elif index == 1:
-                suspicions[subject] = ["player7"]
-                statuses[subject] = "ok"
             else:
-                suspicions[subject] = []
+                default = ["player7"] if observer_id != 7 and index < 3 else []
+                suspicions[subject] = list(
+                    (suspicions_by_observer or {}).get(observer_id, default)
+                )
                 statuses[subject] = "ok"
             errors[subject] = (
                 "synthetic invalid report"
@@ -73,14 +77,6 @@ def suspicion_sample_factory():
             "public_action_count": len(actions),
             "label_prompt_version": LABEL_PROMPT_VERSION,
         }
-    return make
-
-
-@pytest.fixture
-def projected_sample_factory(suspicion_sample_factory):
-    def make(**kwargs):
-        return project_suspicion_sample(suspicion_sample_factory(**kwargs))
-
     return make
 
 

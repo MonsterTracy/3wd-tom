@@ -22,7 +22,6 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_NAMES,
     canonicalize_player_set,
     normalize_player,
-    validate_player_suspicion,
 )
 
 
@@ -195,18 +194,11 @@ class PlayingAgentBeliefReporter:
                 known_non_werewolves=known_non_werewolves,
             )
 
-        try:
-            suspected = self.validate_semantics(
-                observer_id=observer,
-                suspected_werewolves=suspected,
-                known_werewolves=known_werewolves,
-                known_non_werewolves=known_non_werewolves,
-            )
-        except (TypeError, ValueError) as exc:
+        if observer in suspected:
             return self._result(
                 observer=observer,
                 status=STATUS_SEMANTIC_ERROR,
-                error=str(exc),
+                error="suspected_werewolves cannot contain the observer",
                 agent_backend_id=agent_backend_id,
                 known_werewolves=known_werewolves,
                 known_non_werewolves=known_non_werewolves,
@@ -257,21 +249,14 @@ class PlayingAgentBeliefReporter:
             raise ValueError("public snapshot requires public_action_count")
         canonical_identifiers = list(PLAYER_NAMES)
         canonical_list = ", ".join(canonical_identifiers)
-        known_wolf_list = json.dumps(
+        canonicalize_player_set(
             known_werewolves,
-            separators=(",", ":"),
+            field_name="known_werewolves",
         )
-        known_non_wolf_list = json.dumps(
+        canonicalize_player_set(
             known_non_werewolves,
-            separators=(",", ":"),
+            field_name="known_non_werewolves",
         )
-        known_non_wolf_set = set(known_non_werewolves)
-        legal_candidates = [
-            player
-            for player in canonical_identifiers
-            if player not in known_non_wolf_set
-        ]
-        legal_candidate_list = ", ".join(legal_candidates)
         public_history = json.dumps(
             copy_public_events(
                 public_snapshot.public_events
@@ -285,26 +270,15 @@ class PlayingAgentBeliefReporter:
 请只根据你截至本次公开发言之前合法拥有的公开历史和自己的私人信息，报告你当前内部真实怀疑哪些具体玩家是狼人。不要为了阵营策略欺骗这个私有 reporter。不得使用 god view、actual roles、其他玩家私人信息、当前尚未生成的发言或未来信息。
 
 Your observer identity is exactly: {observer}
-Environment-derived known_werewolves: {known_wolf_list}
-Environment-derived known_non_werewolves: {known_non_wolf_list}
-Current legal_candidates: {legal_candidate_list}
 Canonical player IDs (complete ordered list):
 {canonical_list}
 Canonical pre-speech public_events:
 {public_history}
 
-`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。它等于全部 known_werewolves 加上当前相对更可疑的额外软怀疑；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入。若你确实相对怀疑全部 legal_candidates，允许全部列出，也允许列出 0、1、2 或更多人。
-
-HARD CONSTRAINTS
-MUST INCLUDE: {known_wolf_list}
-MUST EXCLUDE: {known_non_wolf_list}
-Your output is invalid if it omits any MUST INCLUDE player or contains any MUST EXCLUDE player.
-
-没有额外软怀疑时，精确输出 MUST INCLUDE；若 MUST INCLUDE 为空，此时输出空数组。只允许上面的 canonical player IDs，不得重复。
+`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。只报告你当前认为相对更可疑的其他玩家，不得包含 observer 自己；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入。允许列出 0、1、2 或更多人；若确实怀疑所有其他玩家，允许全部列出；没有怀疑对象时输出空数组。只允许上面的 canonical player IDs，不得重复。
 
 Before answering, silently verify this checklist:
 - 这是我的内部真实怀疑，而不是公开发言策略吗？
-- 是否满足 HARD CONSTRAINTS？
 - 是否把“仍可能”误当成“当前值得怀疑”？
 - 是否错误地强行补足两人？
 - 是否只输出允许的 JSON？
@@ -340,23 +314,6 @@ Return only this JSON structure:
         return canonicalize_player_set(
             parsed["suspected_werewolves"],
             field_name="suspected_werewolves",
-        )
-
-    @staticmethod
-    def validate_semantics(
-        *,
-        observer_id: int | str,
-        suspected_werewolves: list[str],
-        known_werewolves: list[str],
-        known_non_werewolves: list[str],
-    ) -> list[str]:
-        """Validate only against the observer's legally visible state."""
-
-        normalize_player(observer_id)
-        return validate_player_suspicion(
-            suspected_werewolves,
-            known_werewolves,
-            known_non_werewolves,
         )
 
     @staticmethod

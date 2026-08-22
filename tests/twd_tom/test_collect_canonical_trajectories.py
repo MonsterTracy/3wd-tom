@@ -7,7 +7,12 @@ import pytest
 import yaml
 
 import script.twd_tom.collect_canonical_trajectories as batch_module
-from werewolf.models.twd_tom.public_events import public_event_digest
+from werewolf.models.twd_tom.public_events import (
+    public_event_digest,
+    structured_input_digest,
+)
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION, LABEL_PROVENANCE
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
@@ -211,6 +216,48 @@ def _complete_artifacts(recorder, *, winner="Villager"):
     _write_json(recorder.observer_view_output_path, provenance)
 
 
+def _belief_snapshot(game_id):
+    public_events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "turn_start",
+            "speaker": "player2",
+        },
+    ]
+    subjects = [f"player{player_id}" for player_id in range(1, 8)]
+    return {
+        "schema_version": SAMPLE_SCHEMA_VERSION,
+        "game_id": game_id,
+        "step_idx": 0,
+        "phase": "1_day_speech",
+        "speaker_id": 2,
+        "report_trigger": "pre_public_speech",
+        "public_event_schema_version": batch_module.PUBLIC_EVENT_SCHEMA_VERSION,
+        "public_events": public_events,
+        "public_event_digest": public_event_digest(public_events),
+        "structured_input_digest": structured_input_digest(public_events),
+        "observer_ids": list(range(1, 8)),
+        "suspected_werewolves": {subject: [] for subject in subjects},
+        "known_werewolves": {subject: [] for subject in subjects},
+        "known_non_werewolves": {subject: [] for subject in subjects},
+        "belief_status": {subject: "ok" for subject in subjects},
+        "belief_errors": {subject: None for subject in subjects},
+        "label_cutoff_step_idx": 0,
+        "public_action_count": 0,
+        "label_prompt_version": LABEL_PROMPT_VERSION,
+        "label_provenance": LABEL_PROVENANCE,
+        "agent_backend_ids": {
+            subject: f"backend-{player_id}"
+            for player_id, subject in enumerate(subjects, start=1)
+        },
+    }
+
+
 def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
     calls = {
         "backend": [],
@@ -249,12 +296,15 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
         ]
         return object(), agents, list(ROLES), list(PROFILES)
 
-    def fake_run_game(env, agents, roles, *, trajectory_recorder):
+    def fake_run_game(
+        env, agents, roles, *, sample_collector, trajectory_recorder
+    ):
         seed = trajectory_recorder._base["environment_seed"]
         calls["game"].append(seed)
         if seed == fail_seed:
             raise RuntimeError("synthetic gameplay failure")
         winner = "Villager" if seed % 2 else "Werewolf"
+        sample_collector.write(_belief_snapshot(trajectory_recorder._base["game_id"]))
         _complete_artifacts(trajectory_recorder, winner=winner)
         return f"{winner} win"
 
@@ -291,6 +341,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["batch_code_commit"] == COMMIT
     assert plan["seeds"] == [1001, 1002, 1003]
     assert plan["planned_game_count"] == 3
+    assert plan["collectors_enabled"] is True
     assert plan["backend_max_retries"] == 0
     assert plan["stop_on_first_failure"] is True
     assert plan["rerun_on_failure"] is False
@@ -301,6 +352,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
 
     assert summary["schema_version"] == batch_module.BATCH_SUMMARY_SCHEMA_VERSION
     assert summary["completed_game_count"] == 3
+    assert summary["total_belief_snapshot_count"] == 3
     assert summary["game_ids"] == [
         "canonical-pilot-001_game_0001_seed_1001",
         "canonical-pilot-001_game_0002_seed_1002",
@@ -315,9 +367,23 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         game_dir = output_root / "games" / f"game_{game_number:04d}_seed_{seed}"
         assert (game_dir / "trajectory.json").is_file()
         assert (game_dir / "observer_views.json").is_file()
+        belief_path = game_dir / batch_module.BELIEF_SNAPSHOTS_FILENAME
+        assert belief_path.is_file()
+        belief_record = json.loads(belief_path.read_text())
+        assert belief_record["label_provenance"] == LABEL_PROVENANCE
+        assert belief_record["label_cutoff_step_idx"] == 0
+        assert belief_record["observer_ids"] == list(range(1, 8))
+        serialized_belief = belief_path.read_text()
+        assert '"observation"' not in serialized_belief
+        assert '"true_roles"' not in serialized_belief
+        assert '"winner"' not in serialized_belief
         game_summary = json.loads((game_dir / "summary.json").read_text())
         assert game_summary["environment_seed"] == seed
         assert game_summary["completion_status"] == "COMPLETE"
+        assert game_summary["belief_snapshot_count"] == 1
+        assert game_summary["belief_snapshots_sha256"] == batch_module._sha256(
+            belief_path
+        )
         game_payload = deepcopy(game_summary)
         game_digest = game_payload.pop("summary_digest")
         assert game_digest == canonical_digest(game_payload)

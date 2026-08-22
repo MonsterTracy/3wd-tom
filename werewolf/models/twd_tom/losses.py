@@ -1,302 +1,173 @@
-"""Masked categorical losses for observer-specific distributions."""
+"""Masked distribution loss for observer-conditioned player beliefs."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
 
-from werewolf.models.twd_tom.schema import (
-    NUM_PLAYERS,
-    NUM_WOLF_PAIR_CLASSES,
-)
+from werewolf.models.twd_tom.schema import NUM_PLAYERS
 
 
-VALID_REDUCTIONS = {
-    "none",
-    "sum",
-    "mean",
-}
+VALID_REDUCTIONS = {"none", "sum", "mean"}
 
 
-def masked_distribution_cross_entropy(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    subject_mask: torch.Tensor,
+def masked_belief_distribution_loss(
+    belief_logits: torch.Tensor,
+    belief_targets: torch.Tensor,
+    observer_alive_mask: torch.Tensor,
+    diagonal_target_mask: torch.Tensor,
     *,
     reduction: str = "mean",
 ) -> torch.Tensor:
-    """Compute soft-target cross entropy over supervised observer rows."""
-
-    logits, targets, subject_mask = _validate_distribution_loss_inputs(
-        logits=logits,
-        targets=targets,
-        subject_mask=subject_mask,
-        reduction=reduction,
-    )
-    valid_subject_count = subject_mask.sum()
-    if valid_subject_count.item() == 0:
-        raise ValueError("subject_mask must select at least one valid observer")
-
-    per_subject_loss = -(
-        targets * F.log_softmax(logits, dim=-1)
-    ).sum(dim=-1)
-    masked_loss = per_subject_loss * subject_mask.to(per_subject_loss.dtype)
-    if reduction == "none":
-        return masked_loss
-    total_loss = masked_loss.sum()
-    if reduction == "sum":
-        return total_loss
-    return total_loss / valid_subject_count.to(dtype=total_loss.dtype)
-
-
-def masked_distribution_kl_divergence(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    subject_mask: torch.Tensor,
-    *,
-    reduction: str = "mean",
-) -> torch.Tensor:
-    """Compute target-to-prediction KL over valid observer rows."""
+    """Compute soft-target cross entropy over alive observer rows."""
 
     (
-        logits,
-        targets,
-        subject_mask,
-    ) = _validate_distribution_loss_inputs(
-        logits=logits,
-        targets=targets,
-        subject_mask=subject_mask,
+        belief_logits,
+        belief_targets,
+        observer_alive_mask,
+        diagonal_target_mask,
+    ) = _validate_belief_loss_inputs(
+        belief_logits=belief_logits,
+        belief_targets=belief_targets,
+        observer_alive_mask=observer_alive_mask,
+        diagonal_target_mask=diagonal_target_mask,
         reduction=reduction,
     )
+    valid_observer_count = observer_alive_mask.sum()
+    if valid_observer_count.item() == 0:
+        raise ValueError("observer_alive_mask must select at least one observer")
 
-    log_probabilities = F.log_softmax(
-        logits,
-        dim=-1,
+    masked_logits = belief_logits.masked_fill(~diagonal_target_mask, -torch.inf)
+    log_probabilities = F.log_softmax(masked_logits, dim=-1)
+    per_target_loss = torch.where(
+        diagonal_target_mask,
+        -belief_targets * log_probabilities,
+        torch.zeros_like(belief_targets),
     )
-
-    per_class_loss = F.kl_div(
-        log_probabilities,
-        targets,
-        reduction="none",
+    per_observer_loss = per_target_loss.sum(dim=-1)
+    masked_loss = per_observer_loss * observer_alive_mask.to(
+        dtype=per_observer_loss.dtype
     )
-
-    per_subject_loss = per_class_loss.sum(
-        dim=-1
-    )
-
-    numeric_mask = subject_mask.to(
-        dtype=per_subject_loss.dtype
-    )
-
-    masked_loss = (
-        per_subject_loss
-        * numeric_mask
-    )
-
     if reduction == "none":
         return masked_loss
-
     total_loss = masked_loss.sum()
-
     if reduction == "sum":
         return total_loss
-
-    valid_subject_count = (
-        subject_mask.sum()
-    )
-
-    if valid_subject_count.item() == 0:
-        # Keep the returned zero connected to the computation graph so
-        # backward() remains valid for an all-failed collection batch.
-        return logits.sum() * 0.0
-
-    return total_loss / valid_subject_count.to(
-        dtype=total_loss.dtype
-    )
+    return total_loss / valid_observer_count.to(dtype=total_loss.dtype)
 
 
-def _validate_distribution_loss_inputs(
+def masked_belief_probabilities(
+    belief_logits: torch.Tensor,
+    diagonal_target_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Return row-normalized player beliefs with an exact zero diagonal."""
+
+    if not isinstance(belief_logits, torch.Tensor):
+        raise TypeError("belief_logits must be a tensor")
+    if not isinstance(diagonal_target_mask, torch.Tensor):
+        raise TypeError("diagonal_target_mask must be a tensor")
+    if belief_logits.ndim != 3 or tuple(belief_logits.shape[-2:]) != (
+        NUM_PLAYERS,
+        NUM_PLAYERS,
+    ):
+        raise ValueError("belief_logits must have shape [B, 7, 7]")
+    if diagonal_target_mask.shape != belief_logits.shape:
+        raise ValueError("diagonal_target_mask must match belief_logits shape")
+    if diagonal_target_mask.dtype is not torch.bool:
+        raise TypeError("diagonal_target_mask must use torch.bool")
+    if not torch.is_floating_point(belief_logits):
+        raise TypeError("belief_logits must use a floating-point dtype")
+    if not torch.isfinite(belief_logits).all():
+        raise ValueError("belief_logits must contain only finite values")
+    mask = diagonal_target_mask.to(device=belief_logits.device)
+    if torch.any(mask.sum(dim=-1) == 0):
+        raise ValueError("every observer row requires at least one target")
+    probabilities = F.softmax(belief_logits.masked_fill(~mask, -torch.inf), dim=-1)
+    return probabilities.masked_fill(~mask, 0.0)
+
+
+def _validate_belief_loss_inputs(
     *,
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    subject_mask: torch.Tensor,
+    belief_logits: torch.Tensor,
+    belief_targets: torch.Tensor,
+    observer_alive_mask: torch.Tensor,
+    diagonal_target_mask: torch.Tensor,
     reduction: str,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-]:
-    """Validate subjective-belief loss inputs."""
-
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     if reduction not in VALID_REDUCTIONS:
         raise ValueError(
-            "reduction must be one of "
-            f"{sorted(VALID_REDUCTIONS)}, "
-            f"got {reduction!r}"
+            f"reduction must be one of {sorted(VALID_REDUCTIONS)}, got {reduction!r}"
         )
-
     tensors = {
-        "logits": logits,
-        "targets": targets,
-        "subject_mask": subject_mask,
+        "belief_logits": belief_logits,
+        "belief_targets": belief_targets,
+        "observer_alive_mask": observer_alive_mask,
+        "diagonal_target_mask": diagonal_target_mask,
     }
-
     for field_name, tensor in tensors.items():
-        if not isinstance(
-            tensor,
-            torch.Tensor,
-        ):
-            raise TypeError(
-                f"{field_name} must be a tensor"
-            )
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"{field_name} must be a tensor")
 
-    if logits.ndim != 3:
-        raise ValueError("logits must have shape [B, 7, C]")
-
-    batch_size = logits.shape[0]
-    class_count = logits.shape[2]
-
-    expected_shape = (
-        batch_size,
+    if belief_logits.ndim != 3 or tuple(belief_logits.shape[-2:]) != (
         NUM_PLAYERS,
-        class_count,
-    )
-
-    if class_count != NUM_WOLF_PAIR_CLASSES:
-        raise ValueError(
-            f"logits final dimension must contain {NUM_WOLF_PAIR_CLASSES} "
-            "pair classes"
-        )
-
-    if tuple(logits.shape) != expected_shape:
-        raise ValueError(f"logits must have shape [B, {NUM_PLAYERS}, C]")
-
-    if tuple(targets.shape) != expected_shape:
-        raise ValueError(
-            "targets must have the same shape as logits"
-        )
-
-    expected_mask_shape = (
-        batch_size,
         NUM_PLAYERS,
-    )
-
-    if (
-        tuple(subject_mask.shape)
-        != expected_mask_shape
     ):
-        raise ValueError(
-            "subject_mask must have shape "
-            f"[B, {NUM_PLAYERS}]"
-        )
+        raise ValueError("belief_logits must have shape [B, 7, 7]")
+    if belief_logits.shape[0] <= 0:
+        raise ValueError("batch size must be positive")
+    if belief_targets.shape != belief_logits.shape:
+        raise ValueError("belief_targets must match belief_logits shape")
+    expected_observer_shape = (belief_logits.shape[0], NUM_PLAYERS)
+    if observer_alive_mask.shape != expected_observer_shape:
+        raise ValueError("observer_alive_mask must have shape [B, 7]")
+    if diagonal_target_mask.shape != belief_logits.shape:
+        raise ValueError("diagonal_target_mask must have shape [B, 7, 7]")
+    if not torch.is_floating_point(belief_logits):
+        raise TypeError("belief_logits must use a floating-point dtype")
+    if not torch.is_floating_point(belief_targets):
+        raise TypeError("belief_targets must use a floating-point dtype")
+    if observer_alive_mask.dtype is not torch.bool:
+        raise TypeError("observer_alive_mask must use torch.bool")
+    if diagonal_target_mask.dtype is not torch.bool:
+        raise TypeError("diagonal_target_mask must use torch.bool")
+    if not torch.isfinite(belief_logits).all():
+        raise ValueError("belief_logits must contain only finite values")
+    if not torch.isfinite(belief_targets).all():
+        raise ValueError("belief_targets must contain only finite values")
+    if torch.any(belief_targets < 0.0):
+        raise ValueError("belief_targets cannot contain negative values")
 
-    if batch_size <= 0:
-        raise ValueError(
-            "batch size must be positive"
-        )
-
-    if not torch.is_floating_point(
-        logits
-    ):
-        raise TypeError(
-            "logits must use a "
-            "floating-point dtype"
-        )
-
-    if not torch.is_floating_point(
-        targets
-    ):
-        raise TypeError(
-            "targets must use a "
-            "floating-point dtype"
-        )
-
-    if subject_mask.dtype != torch.bool:
-        raise TypeError(
-            "subject_mask must use torch.bool"
-        )
-
-    if not torch.isfinite(
-        logits
-    ).all():
-        raise ValueError(
-            "logits must contain only "
-            "finite values"
-        )
-
-    if not torch.isfinite(
-        targets
-    ).all():
-        raise ValueError(
-            "targets must contain only "
-            "finite values"
-        )
-
-    if torch.any(
-        targets < 0.0
-    ):
-        raise ValueError(
-            "targets cannot contain "
-            "negative values"
-        )
-
-    targets = targets.to(
-        device=logits.device,
-        dtype=logits.dtype,
+    targets = belief_targets.to(
+        device=belief_logits.device,
+        dtype=belief_logits.dtype,
     )
+    alive_mask = observer_alive_mask.to(device=belief_logits.device)
+    target_mask = diagonal_target_mask.to(device=belief_logits.device)
+    expected_target_mask = ~torch.eye(
+        NUM_PLAYERS,
+        dtype=torch.bool,
+        device=belief_logits.device,
+    ).unsqueeze(0).expand_as(target_mask)
+    if not torch.equal(target_mask, expected_target_mask):
+        raise ValueError("diagonal_target_mask must exclude exactly the diagonal")
+    if torch.any(targets.masked_select(~target_mask) != 0.0):
+        raise ValueError("belief target diagonal must remain zero")
 
-    subject_mask = subject_mask.to(
-        device=logits.device,
-    )
-
-    row_sums = targets.sum(
-        dim=-1
-    )
-
-    valid_row_sums = row_sums[
-        subject_mask
-    ]
-
-    if valid_row_sums.numel() > 0:
-        expected_sums = torch.ones_like(
-            valid_row_sums
-        )
-
-        if not torch.allclose(
-            valid_row_sums,
-            expected_sums,
-            rtol=1e-5,
-            atol=1e-6,
-        ):
-            raise ValueError(
-                "every supervised target "
-                "row must sum to one"
-            )
-
-    invalid_rows = targets[
-        ~subject_mask
-    ]
-
-    if (
-        invalid_rows.numel() > 0
-        and torch.any(
-            invalid_rows != 0.0
-        )
+    row_sums = targets.sum(dim=-1)
+    if not torch.allclose(
+        row_sums[alive_mask],
+        torch.ones_like(row_sums[alive_mask]),
+        rtol=1e-5,
+        atol=1e-6,
     ):
-        raise ValueError(
-            "unsupervised target rows "
-            "must remain all zero"
-        )
-
-    return (
-        logits,
-        targets,
-        subject_mask,
-    )
+        raise ValueError("every alive observer target row must sum to one")
+    if torch.any(targets[~alive_mask] != 0.0):
+        raise ValueError("dead observer target rows must remain all zero")
+    return belief_logits, targets, alive_mask, target_mask
 
 
 __all__ = [
     "VALID_REDUCTIONS",
-    "masked_distribution_cross_entropy",
-    "masked_distribution_kl_divergence",
+    "masked_belief_distribution_loss",
+    "masked_belief_probabilities",
 ]

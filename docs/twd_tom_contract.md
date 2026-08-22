@@ -1,441 +1,50 @@
-# Classic7 pre-speech ToM contract
-
-> Historical pre-D contract: the referenced materialization, projection,
-> split, and online collection modules now live under `archive.legacy_tom`.
-> Current training data follows the canonical A/C0 -> C1 -> D mainline.
-
-## Research target
-
-The ToM subsystem collects observer-specific suspicion in fixed-role,
-seven-player Werewolf: two Werewolves, one Seer, one Witch, and three
-Villagers. First-order ToM predicts a distribution over the 21 canonical
-two-Werewolf pairs from public history plus the current observer's private
-knowledge. Second-order ToM predicts, from public history alone, each modeled
-observer's internal distribution over the same 21 two-Werewolf worlds. The
-two orders differ only in model input scope, not native belief space. Dead
-players remain valid identity candidates but do not produce reports. The
-three-way decision subsystem is outside this contract.
-
-## Time and information boundary
-
-Each public speech follows:
-
-`H_t -> B_t -> A_t -> H_{t+1}`
-
-`H_t` is the already committed prefix of the sole append-only
-`public_events` history (`classic7_public_event_sequence_v3`). It contains
-public phase changes, turn starts, complete public speeches, revealed
-voter-target results, exile results, and death announcements in publication
-order. Before the current speaker generates `A_t`, every alive observer
-reports from its own detached, legal observation. Reporting cannot mutate
-agent memory, enter the current speaker prompt, or alter game state. The
-current speech appears only in the next snapshot. System events do not
-independently trigger snapshots, but are present before the next `turn_start`.
-
-Each `public_speech` stores the final public `raw_text` and its exact
-`sp_actions`. The latter is a structured speech summary, not the complete
-`H_t`. The model projects every public event to structured tokens and does
-not encode `raw_text`. `public_event_digest` covers the full canonical event
-JSON including text; `structured_input_digest` covers exactly the raw-text-free
-pre-token projection. Model features contain only that structured projection.
-The v2 speech-action contract keeps the original seven action IDs and appends
-`check_as_good`, `check_as_werewolf`, `save`, `poison`, `guard`, and
-`vote_intent`, all in the same `[speaker, action, target_player]` form.
-Reports, roles, private observations,
-actual roles, teammate information, Seer checks, Witch knife targets, and all
-future events are supervision-side data only.
-
-### Speech action semantic modules and non-redundancy
-
-The 13 actions remain one flat discrete vocabulary. The semantic modules are
-prompt-only organization and do not enter events, features, embeddings, or
-checkpoints: `ROLE_ESTIMATE` contains the five `point_as_*` actions;
-`SOCIAL_STANCE` contains `support` and `oppose`; `CLAIMED_SKILL_REPORT`
-contains `check_as_good`, `check_as_werewolf`, `save`, `poison`, and `guard`;
-and `ACTION_INTENT` contains `vote_intent`. Under A1, extraction records only
-explicit atomic propositions, uses the most specific action without expanding
-it into broader correlated actions, and retains multiple actions only when the
-speech explicitly states multiple independent propositions in source order.
-
-## Hard knowledge
-
-For each alive observer the environment deterministically stores closed sets
-`known_werewolves` (`K+`) and `known_non_werewolves` (`K-`):
-
-- Villager: `K-` contains self.
-- Seer: `K-` contains self and good checks; wolf checks enter `K+`.
-- Witch: `K-` contains self and every knife target legally seen while the
-  antidote was unused. A saved target remains known good; after antidote use,
-  later knife targets are not visible. Poison conveys no identity.
-- Werewolf: `K+` is self plus teammate and `K-` is the other five players.
-- Death and exile reveal no identity.
-
-Let `Omega` be the single canonical ordering of the 21 unordered player
-pairs. `Omega_hard` contains pairs that include all of `K+` and none of
-`K-`. It must be nonempty. Exact-two-Werewolves closure adds to `K+` players
-present in every pair and to `K-` players absent from every pair. No speech-
-or probability-based inference is part of closure.
-
-## Online raw collection
-
-The current reporter collects a player-level suspicion set:
-
-```json
-{"suspected_werewolves":["player2","player5"]}
-```
-
-`suspected_werewolves` means the players this observer currently considers
-relatively more suspicious, using only the frozen public history and its own
-legal private information. It is not a complete two-Werewolf combination
-constraint. A set of size one does not confirm one wolf, size two does not
-assert the exact pair, and larger sets do not assert that both wolves are
-inside the set. Empty, single-player, and multi-player sets are structurally
-allowed.
-
-Every `K+` player must be present and every `K-` player must be absent. Input
-IDs are canonical and duplicate-free; validated output is stored in player
-order. Any set satisfying those constraints is structurally valid, including
-the full legal candidate set. Invalid JSON, fields, IDs, hard-knowledge
-conflicts, or duplicate IDs fail closed without retry, repair, fallback,
-truth injection, or reuse of an earlier report.
-
-The current raw schema is
-`classic7_pre_speech_player_suspicion_v2`; the prompt version remains
-`classic7_pre_speech_player_suspicion_prompt_v2`. The previous v3
-pair-support reporter remains only in Git history and has no runtime parser
-or fallback. Raw JSONL stores `suspected_werewolves` and does not create pair
-support, pair targets, or marginals.
-
-## Audit-only offline pair projection
-
-The sole current projected schema is
-`classic7_pre_speech_suspicion_pair_distribution_v2`, produced explicitly
-from the raw schema by projection version
-`classic7_player_suspicion_pair_projection_base2_v1`.
-
-For observer suspicion `S`, let `U = S \ K+`. For each pair `p` in
-`Omega_hard`, the unnormalized weight is:
-
-`w(p) = 2 ** |p intersect U|`
-
-Thus a pair containing zero, one, or two soft-suspected players receives
-weight `1`, `2`, or `4`. The version has no configurable beta. Suspicion
-changes relative weight but never creates a hard zero; only `K+` and `K-`
-exclude pairs. `K+` is removed from `U` because it is already enforced in
-every hard-legal pair and must not be counted again as soft evidence.
-
-Weights are normalized across `Omega_hard`. Empty suspicion beyond `K+`
-therefore gives a uniform hard-legal distribution. One suspect gives
-containing pairs twice the weight of other legal pairs. Two or more suspects
-use the same per-pair hit count; they do not assert an exact pair or a hard
-support. If every legal candidate is suspected, every legal pair has the
-same hit count and the normalized target is uniform. This is a valid result
-of the current raw and projection contracts. The projection formula and
-version are unchanged. Changing this formula requires a new projection
-version and does not require recollecting raw suspicion data.
-
-Projected JSONL retains the raw suspicion and audit metadata and adds
-`pair_targets`, projection metadata, and deterministic-encoding flags.
-Non-`ok` observers keep their status and error and receive a null target.
-Projection and split utilities continue to validate that stored targets match
-the declared projection. They are not the formal model-training input and do
-not define the second-order output space.
-
-V2.7 formal materialization uses
-`v27_valid_only_no_guess_supervision_v1`. A source `ok` report is retained
-unchanged. A semantic-error observer is retained only when that observer's
-current legal hard knowledge uniquely determines one of the 21 wolf pairs;
-otherwise the observer is unavailable supervision. There is no carry-forward,
-empty-suspicion fallback, uniform semantic repair, expert guess, model repair,
-or regeneration. An unavailable current speaker removes the ToM1 snapshot;
-an unavailable ToM2 observer is removed atomically from every observer-keyed
-mapping. The source raw file remains unchanged and supplies the audit record.
-
-The formal Dataset reads the current annotated split files directly. With
-`--tom-order 1` it requires one current speaker observer, exposes only that
-observer's two seven-player private-knowledge vectors, and projects the report
-to the canonical 21 pair classes. With `--tom-order 2` it may supervise
-multiple observers and exposes no private-knowledge model tensors. Each valid
-second-order observer's report is projected to the same canonical 21 pair
-classes using that observer's `known_werewolves` and
-`known_non_werewolves`. Those fields are supervision-side target-construction
-and audit data only: they do not appear in a second-order batch's model inputs,
-do not enter `forward`, and do not mask logits.
-
-The sole formal second-order supervision boundary is
-`post_completed_public_speech_pre_next_action_v1`. The final two public events
-must be one complete `public_speech`, including its stored `sp_actions`, and
-the next reasoning player's `turn_start`; that reasoning player is the
-sample's canonical `speaker_id`. Vote, phase, exile, death, and other
-system-only boundaries are excluded.
-
-The supervision scope is `all_valid_other_observers`: the effective mask is
-the existing label-valid `subject_mask` intersected with canonical observer
-IDs other than the reasoning player. The latest speech actor and nested
-speech-action subjects do not select the supervised rows. Snapshots whose
-effective mask is empty are excluded by the same deterministic Dataset indices
-in train, validation, and eval. Target rows remain unchanged, and first-order
-masking is unchanged.
-
-## Audit-only projected dataset split
-
-The splitter accepts one projected JSONL and partitions complete `game_id`
-groups into `train.jsonl`, `validation.jsonl`, and `test.jsonl`. The caller
-must provide positive train, validation, and test game counts whose sum
-exactly equals the number of distinct games. A local seeded shuffle assigns
-games deterministically; snapshots from one game never cross partitions, and
-their input-relative order is preserved. Fixed twelve-game and 8/2/2 rules
-are not built into the splitter; formal experiment counts must be supplied
-explicitly. These projected splits remain available for audit; the
-order-specific trainer does not consume them.
-
-`script/twd_tom/split_formal_dataset.py` implements this audit split. It is
-not the formal training-data splitter or a training entry point.
-
-## Formal training operations
-
-From V2.7 onward, directory responsibilities are fixed as follows: `data/`
-contains collection run-level raw data; `logs/` contains collection logs,
-game logs, call audit, manifests, and resolved configuration; `datasets/`
-contains identified dataset packages and all derived formal training data;
-`outputs/` contains experiment checkpoints and metrics; `models/` contains
-external model weights or caches; and `review/` contains data audits and human
-review artifacts. V2.7 training-ready data must remain under
-`datasets/<dataset-id>/` and must not be written back to `data/`.
-
-For a V2.7 dataset whose projected split has already been frozen, first
-materialize both formal orders from the unchanged raw source, then apply the
-existing projected `split_manifest.json` assignment to both orders:
-
-```bash
-python -m archive.legacy_tom.script.twd_tom.materialize_training_data \
-  --raw datasets/<dataset-id>/raw.jsonl \
-  --tom1-output datasets/<dataset-id>/raw_tom.jsonl \
-  --tom2-output datasets/<dataset-id>/raw_tom2.jsonl
-
-python -m archive.legacy_tom.script.twd_tom.split_training_data \
-  --tom1 datasets/<dataset-id>/raw_tom.jsonl \
-  --tom2 datasets/<dataset-id>/raw_tom2.jsonl \
-  --split-manifest datasets/<dataset-id>/projected_split/split_manifest.json \
-  --output-dir datasets/<dataset-id>/formal
-```
-
-This path does not shuffle games again. The manifest's `train`, `validation`,
-and `test` `game_ids` are the shared assignment for both ToM orders. Valid-only
-filtering may produce different order-specific row counts, including no row for
-one order in an otherwise assigned game. Any materialized row whose `game_id`
-is absent from the manifest fails before outputs are written. The CLI summary
-explicitly reports valid-only assigned games that have zero rows per order.
-
-Pre-V2.7 local Qwen2.5 and Qwen3.5 experiments retain their historical
-`data/qwen25/` and `data/qwen35/` layouts. Those artifacts are not migrated,
-renamed, or rebuilt by the V2.7 tools. The seed-based command below documents
-that legacy Formal300 layout only.
-
-Formal first- and second-order data reuse one in-memory, seed-42 game split.
-Generate the six order-specific files without overwriting existing outputs:
-
-```bash
-python -m archive.legacy_tom.script.twd_tom.split_training_data \
-  --tom1 data/qwen25/raw_tom.jsonl \
-  --tom2 data/qwen25/raw_tom2.jsonl \
-  --output-dir data/qwen25 \
-  --seed 42
-```
-
-The only formal split files are:
-
-- `data/qwen25/tom1/train.jsonl`
-- `data/qwen25/tom1/val.jsonl`
-- `data/qwen25/tom1/test.jsonl`
-- `data/qwen25/tom2/train.jsonl`
-- `data/qwen25/tom2/val.jsonl`
-- `data/qwen25/tom2/test.jsonl`
-
-Train the two orders independently. The selected output root must be inside
-the repository's logical path; its `tom_order_1/` or `tom_order_2/` run
-directory must be absent or empty:
-
-```bash
-python -m script.twd_tom.train \
-  --dataset data/qwen25/tom1/train.jsonl \
-  --validation-dataset data/qwen25/tom1/val.jsonl \
-  --tom-order 1 \
-  --output-dir outputs/tom/formal_tom1 \
-  --device auto \
-  --seed 42
-
-python -m script.twd_tom.train \
-  --dataset data/qwen25/tom2/train.jsonl \
-  --validation-dataset data/qwen25/tom2/val.jsonl \
-  --tom-order 2 \
-  --output-dir outputs/tom/formal_tom2 \
-  --device auto \
-  --seed 42
-```
-
-Training refuses a dirty Git worktree. `best.pt`, `last.pt`, `summary.json`,
-and `history.json` record one `run_provenance` containing the commit SHA,
-clean-worktree assertion, repository-relative train/validation paths and
-their SHA-256 digests, Python/PyTorch/Transformers/platform versions,
-requested and resolved devices, deterministic-algorithm status, and seed.
-Python, Torch, CUDA, the DataLoader generator, and cyclic rotation are seeded;
-supported Torch backends use deterministic algorithms and deterministic
-cuDNN settings. These controls aim to reproduce a run with the same commit,
-data, and environment. They do not promise bit-identical results across CPU,
-CUDA, and MPS hardware.
-
-Evaluate validation data against the exact hashed training data recorded by
-the checkpoint:
-
-```bash
-python -m script.twd_tom.eval \
-  --checkpoint outputs/tom/formal_tom1/tom_order_1/best.pt \
-  --dataset data/qwen25/tom1/val.jsonl \
-  --training-dataset data/qwen25/tom1/train.jsonl \
-  --output outputs/tom/formal_tom1/tom_order_1/val_metrics.json \
-  --device auto
-
-python -m script.twd_tom.eval \
-  --checkpoint outputs/tom/formal_tom2/tom_order_2/best.pt \
-  --dataset data/qwen25/tom2/val.jsonl \
-  --training-dataset data/qwen25/tom2/train.jsonl \
-  --output outputs/tom/formal_tom2/tom_order_2/val_metrics.json \
-  --device auto
-```
-
-After the model definition, hyperparameters, and checkpoint are frozen, run
-the corresponding test evaluation once by replacing `val.jsonl` with
-`test.jsonl` and `val_metrics.json` with `test_metrics.json`. Eval always
-checks that training and evaluation `game_id` sets are disjoint; there is no
-disable switch or legacy dataset-path fallback.
-
-Ordinary tests are self-contained and do not require formal data:
-
-```bash
-python -m pytest -q
-```
-
-Formal-data smoke tests are explicit and read-only:
-
-```bash
-RUN_TWD_TOM_REAL_DATA_TESTS=1 python -m pytest -q tests/twd_tom
-```
-
-Do not commit `data/`, `datasets/`, `outputs/`, or model checkpoints.
-
-## Explicit stage pipeline
-
-The standard user entry point is:
-
-```bash
-python -m archive.legacy_tom.script.twd_tom.pipeline \
-  --config configs/twd_tom_pipeline_debug.yaml \
-  --run-id debug4101 \
-  --stage collect \
-  --game-count 1 \
-  --seeds 4101
-```
-
-Supported stages are `validate`, `collect`, `project`, and `split`. Each stage
-must be invoked explicitly; the pipeline only validates configuration and
-calls the existing non-training stage function. Configuration stores stable
-runtime, budget, schema, and split parameters.
-The required CLI `run_id` identifies one explicit run; optional
-`--game-count` and `--seeds` jointly override only `validate` or `collect` for
-the current process. Repeated seeds are allowed and preserve their order.
-
-Artifacts for one `run_id` are derived without scanning for a latest run:
-game logs, call audit, manifest, and resolved config are under
-`logs/tom/<run_id>/`; raw, projected, and split data are under
-`data/tom/<run_id>/`. The `outputs/tom/<run_id>/` path remains reserved by the
-runtime path contract but the non-training pipeline does not write model
-artifacts there. The resolved config is written to the log directory and
-never back to `configs/`; no timestamp config is generated. Secrets remain in
-environment variables loaded from `.env`, never in YAML or stage summaries.
-Raw and projected artifacts remain distinct. The separate Qwen2 training
-entry selects one current annotated raw file by `tom_order` and writes
-checkpoints below a `tom_order_1/` or `tom_order_2/` output directory.
-Three-way decision is not implemented.
-
-Pipeline configuration fixes the public-event, raw, projected, and projection
-versions above. Earlier three-game artifacts remain audit-only and are not
-training input. Whether future models should encode `raw_text` is deferred to
-a later structured-input collision study.
-
-The model input is the structured `public_events` projection. The default
-backbone is a randomly initialized Hugging Face `Qwen2Model` receiving
-`inputs_embeds`; the training CLI also retains a direct stack of Hugging Face
-`GPT2Block` layers. Neither option loads pretrained weights or uses a
-tokenizer. The
-first-order readout adds the last non-padding event state to each observer
-embedding; rows also add one linear projection of that observer's private
-knowledge. The second-order readout instead conditions every event token on
-each modeled observer. For canonical zero-based observer seat `i` and
-referenced player seat `j`, the shared relation index is `(j - i) mod 7`; a
-separate index 7 is used when that token field has no player. Existing
-structured fields are routed exactly as encoded: `turn_start` and
-`public_speech` speakers, `speech_action` subjects and objects, vote voters and
-targets, and exile/death objects. Three shared embedding tables cover speaker,
-subject, and object/target relations, with shared self-relation flags. The
-resulting relative public states have shape `[B,7,L,256]`; batch and observer
-dimensions are flattened to `[B*7,L,256]`, and shared observer queries of shape
-`[B*7,1,256]` use one shared attention module before residual LayerNorm. It
-remains public-only. Both paths use the same shared 21-class output projection
-and masked soft-target categorical cross entropy.
-
-Only the second-order training Dataset applies deterministic cyclic player-ID
-rotation. For epoch `e`, sample index `n`, and training seed `s`, its shift is
-`(s + e + n) mod 7`; every structured player field and supervision mapping is
-rotated consistently before rebuilding the canonical pair target. Seven
-consecutive epochs cover all rotations for every sample. First-order data,
-validation, evaluation, and shadow inference retain their canonical IDs. New
-second-order checkpoints declare `observer_readout` as
-`public_event_query_attention_v1` and `train_player_augmentation` as
-`cyclic_rotation_v1`. They additionally declare `observer_event_conditioning`
-as `cyclic_relative_player_relations_v1` and
-`second_order_subject_supervision` as
-`post_completed_public_speech_pre_next_action_v1`. Formal second-order samples
-are limited to a complete `public_speech` immediately followed by the next
-reasoning player's `turn_start`. All label-valid observer rows at that shared
-cutoff are supervised except the reasoning player's own row. Vote, phase,
-death, exile, and other system-event boundaries are excluded. New
-checkpoints missing or mismatching that architecture and supervision contract
-are rejected rather than converted. The first-order checkpoint contract is
-unchanged.
-
-For pair probabilities `q[i, omega]`, the sole player-level projection is
-
-`m[i,j] = sum_{omega containing player j} q[i,omega]`.
-
-The resulting marginal matrix has shape `[7,7]`; each value is the probability
-that the corresponding player belongs to the two-Werewolf pair, so every row
-sums to two. It is not a seven-class softmax, is not divided by two, and its
-diagonal is not masked. A diagonal entry means that the modeled observer's
-predicted pair belief includes that observer as a Werewolf; it is not a
-separate notion of self-suspicion. The joint pair distribution cannot in
-general be recovered from these marginals. Three-way decision remains outside
-this contract.
-
-## Online second-order shadow inference
-
-`run_random.py` can load one explicit second-order checkpoint and write an
-independent JSONL prediction log. The three shadow arguments—checkpoint,
-device, and output path—must be supplied together. The output path must be new
-and its parent directory must already exist. The optional `--random_seed`
-exposes the runtime's existing deterministic role/profile assignment control;
-shadow mode never changes it implicitly.
-
-At each `speech` or `speech_pk` turn, inference runs after the matching
-`turn_start` has entered `public_events` and before the acting agent generates
-its speech. The model receives only the canonical structured public-event
-prefix. It produces a `[7,21]` pair-probability matrix whose rows sum to one;
-the fixed incidence projection above produces a `[7,7]` wolf-marginal matrix
-whose rows sum to two. Both are logged without logits, roles, private
-knowledge, or labels. No legacy `suspicion_matrix` alias is written. The result
-is not added to observations, prompts, actions, votes, environment state, or
-the original game log. Each record also contains `supervision_boundary` and
-`observer_supervision_mask [7]`, calculated from the same completed-speech and
-other-player contract used by formal supervision. Predictions remain present
-for all seven observers; rows outside the formal supervision mask are logged
-but are not described as supervised.
+# tom-v2 belief snapshot 契约
+
+## 时间边界
+
+每个 raw sample 在 `speech` 或 `speech_pk` 动作生成前创建。冻结的 `public_events` 必须截止于与当前 speaker 对应的 `turn_start`，且 `label_cutoff_step_idx == step_idx`。
+
+## 观察者
+
+采集对象是当前公开存活玩家。对每个 `observer_id`：
+
+1. Environment 提供该玩家在当前边界合法可见的 observation；
+2. Environment 提供该玩家的确定性 hard knowledge；
+3. 调用该 playing agent 的 `report_suspected_werewolves_readonly()`；
+4. query 前后 agent-owned state 必须完全相同。
+
+不得向 collector 注入全局真实角色、其他玩家私有信息或未来事件。
+
+## 原始标签
+
+成功报告的原始标签是按 canonical player 顺序保存的 `suspected_werewolves` 集合。失败报告保存明确 status/error，并将该观察者的 suspicion 记为 `null`；不进行修复、重试、fallback、补猜或概率化。
+
+raw sample 保存 public history 的两个 digest、观察者集合、每个观察者的 self-report、hard knowledge、状态与 backend provenance。它不保存 raw model response、私有 observation、pair target 或概率矩阵。
+
+## Dataset 契约
+
+tom-v2 只有一个 Dataset。输入是同一时间边界的结构化公开历史和存活观察者集合；raw label 直接读取 playing-agent self-report 中的 `suspected_werewolves`，不经过 external annotation、public-only reporter、ToM1/ToM2 materialization 或旧 lineage adapter。
+
+Dataset 将每个观察者的怀疑集合确定性转换为长度 7 的稀疏 belief row：非空集合只在被列入的玩家上均分概率，其他玩家为 0；空集合对应六个非自身玩家的均匀分布。观察者自身不能出现在怀疑集合中且对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
+
+Dataset 输出：
+
+- `belief_targets`：`[7, 7]` 浮点张量；
+- `observer_alive_mask`：`[7]` 布尔张量，只表示该时间点公开存活的 observer；
+- `diagonal_target_mask`：`[7, 7]` 布尔张量，只排除 observer 自身列。
+
+死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。raw sample 中的 hard knowledge 只保留为 provenance，并用于合法性审计与泄漏检查；它不约束、补充或删除 self-report 内容，也不进入模型特征或 Dataset 输出。训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜、不生成额外有效性 mask。
+
+## Canonical materialization
+
+`script/twd_tom/materialize_canonical_belief_dataset.py` 扫描 `canonical_root/games/*/belief_snapshots.jsonl`，按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+
+## 唯一来源
+
+`label_source = playing_agent_readonly_self_report`。public-only reporter、external offline annotation 和 PBM 不是合法训练标签来源。
+
+## 模型与目标函数
+
+模型输入只有结构化 `public_history <= t`，并对七个 canonical observer query 共享参数。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`。
+
+对每个存活 observer，在六个非自身 target 上计算 soft-target cross entropy；batch loss 是所有存活 observer 行的算术平均。死亡 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。checkpoint、metrics、train 和 eval 均使用这一单一目标，不保存旧任务阶数或组合类别字段。

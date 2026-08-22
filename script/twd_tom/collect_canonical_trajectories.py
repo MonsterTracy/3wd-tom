@@ -16,12 +16,26 @@ from typing import Any
 
 import yaml
 
-from run_random import build_runtime, eval as run_game
+from run_random import (
+    build_runtime,
+    build_twd_tom_sample_collector,
+    eval as run_game,
+)
 from werewolf.backends import load_named_backends
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
     public_event_digest,
+    public_speech_actions,
+    structured_input_digest,
+)
+from werewolf.models.twd_tom.samples import (
+    SAMPLE_FIELDS,
+    SAMPLE_SCHEMA_VERSION,
+)
+from werewolf.models.twd_tom.schema import (
+    LABEL_PROMPT_VERSION,
+    LABEL_PROVENANCE,
 )
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.trajectory import (
@@ -46,6 +60,7 @@ BACKEND_MAX_RETRIES = 0
 STOP_ON_FIRST_FAILURE = True
 RERUN_ON_FAILURE = False
 REPLACEMENT_SEED_ON_FAILURE = False
+BELIEF_SNAPSHOTS_FILENAME = "belief_snapshots.jsonl"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -116,6 +131,18 @@ _BOUNDARY_FIELDS = frozenset(
 _OBSERVER_VIEW_FIELDS = frozenset(
     {"observer_id", "observation", "observation_digest"}
 )
+_FORBIDDEN_BELIEF_ARTIFACT_KEYS = frozenset(
+    {
+        "observation",
+        "private_observation",
+        "delivered_observation",
+        "role",
+        "roles",
+        "true_role",
+        "true_roles",
+        "winner",
+    }
+)
 
 
 def _positive_integer(value: Any, *, field_name: str) -> int:
@@ -149,6 +176,37 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"JSON artifact must be an object: {path}")
     return value
+
+
+def _load_jsonl_objects(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"required JSONL artifact not found: {path}")
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not line.strip():
+            raise ValueError(f"blank JSONL line at {path}:{line_number}")
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise TypeError(f"JSONL record must be an object: {path}:{line_number}")
+        records.append(value)
+    return records
+
+
+def _reject_private_belief_artifact_keys(value: Any) -> None:
+    if isinstance(value, Mapping):
+        forbidden = _FORBIDDEN_BELIEF_ARTIFACT_KEYS & set(value)
+        if forbidden:
+            raise ValueError(
+                "belief snapshot artifact contains forbidden private/truth fields: "
+                f"{sorted(forbidden)}"
+            )
+        for item in value.values():
+            _reject_private_belief_artifact_keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_private_belief_artifact_keys(item)
 
 
 def _write_json_new(path: Path, value: Mapping[str, Any]) -> None:
@@ -610,6 +668,106 @@ def validate_complete_game_artifacts(
     }
 
 
+def validate_belief_snapshot_artifact(
+    belief_snapshots_path: str | Path,
+    observer_views_path: str | Path,
+    *,
+    expected_game_id: str,
+) -> dict[str, Any]:
+    """Validate raw self-reports against the canonical PRE-speech cutoffs."""
+
+    belief_snapshots_path = Path(belief_snapshots_path)
+    provenance = _load_json_object(Path(observer_views_path))
+    records = _load_jsonl_objects(belief_snapshots_path)
+    pre_boundaries = {
+        boundary["step_idx"]: boundary
+        for boundary in provenance.get("boundaries", [])
+        if isinstance(boundary, Mapping)
+        and boundary.get("boundary_type") == PRE_PUBLIC_SPEECH
+    }
+    if len(records) != len(pre_boundaries):
+        raise ValueError(
+            "belief snapshot count must equal PRE_PUBLIC_SPEECH boundary count"
+        )
+
+    seen_steps: set[int] = set()
+    for record in records:
+        _reject_private_belief_artifact_keys(record)
+        if set(record) != SAMPLE_FIELDS:
+            raise ValueError("belief snapshot fields do not match raw sample contract")
+        if record["schema_version"] != SAMPLE_SCHEMA_VERSION:
+            raise ValueError("belief snapshot schema version mismatch")
+        if record["game_id"] != expected_game_id:
+            raise ValueError("belief snapshot game_id mismatch")
+        if record["label_prompt_version"] != LABEL_PROMPT_VERSION:
+            raise ValueError("belief snapshot label prompt version mismatch")
+        if record["label_provenance"] != LABEL_PROVENANCE:
+            raise ValueError("belief snapshot label provenance mismatch")
+        if record["public_event_schema_version"] != PUBLIC_EVENT_SCHEMA_VERSION:
+            raise ValueError("belief snapshot public-event schema mismatch")
+
+        step_idx = record["step_idx"]
+        if isinstance(step_idx, bool) or not isinstance(step_idx, int):
+            raise TypeError("belief snapshot step_idx must be an integer")
+        if step_idx in seen_steps:
+            raise ValueError("duplicate belief snapshot step_idx")
+        seen_steps.add(step_idx)
+        if record["label_cutoff_step_idx"] != step_idx:
+            raise ValueError("belief snapshot cutoff must equal its PRE-speech step")
+        boundary = pre_boundaries.get(step_idx)
+        if boundary is None:
+            raise ValueError("belief snapshot has no matching PRE-speech boundary")
+
+        expected_trigger = {
+            "speech": "pre_public_speech",
+            "speech_pk": "pre_public_speech_pk",
+        }.get(boundary["speech_kind"])
+        if record["report_trigger"] != expected_trigger:
+            raise ValueError("belief snapshot report trigger mismatch")
+        if record["speaker_id"] != boundary["speaker_id"]:
+            raise ValueError("belief snapshot speaker mismatch")
+        boundary_views = boundary["observer_views"]
+        expected_observer_ids = [view["observer_id"] for view in boundary_views]
+        if record["observer_ids"] != expected_observer_ids:
+            raise ValueError("belief snapshot observer identities mismatch")
+        expected_subjects = {f"player{player_id}" for player_id in expected_observer_ids}
+        for field_name in (
+            "suspected_werewolves",
+            "known_werewolves",
+            "known_non_werewolves",
+            "belief_status",
+            "belief_errors",
+            "agent_backend_ids",
+        ):
+            value = record[field_name]
+            if not isinstance(value, Mapping) or set(value) != expected_subjects:
+                raise ValueError(f"belief snapshot {field_name} observer set mismatch")
+
+        phases = {view["observation"].get("phase") for view in boundary_views}
+        if phases != {record["phase"]}:
+            raise ValueError("belief snapshot phase differs from PRE observer views")
+        public_events = normalize_public_events(record["public_events"])
+        if len(public_events) != boundary["public_event_count_at_materialization"]:
+            raise ValueError("belief snapshot public cutoff count mismatch")
+        if record["public_event_digest"] != public_event_digest(public_events):
+            raise ValueError("belief snapshot public event digest mismatch")
+        if record["public_event_digest"] != (
+            boundary["public_event_digest_at_materialization"]
+        ):
+            raise ValueError("belief snapshot public cutoff differs from PRE boundary")
+        if record["structured_input_digest"] != structured_input_digest(public_events):
+            raise ValueError("belief snapshot structured input digest mismatch")
+        if record["public_action_count"] != len(public_speech_actions(public_events)):
+            raise ValueError("belief snapshot public action count mismatch")
+
+    if seen_steps != set(pre_boundaries):
+        raise ValueError("belief snapshots do not cover every PRE-speech boundary")
+    return {
+        "belief_snapshot_count": len(records),
+        "belief_snapshots_sha256": _sha256(belief_snapshots_path),
+    }
+
+
 def _game_summary(
     validation: Mapping[str, Any], *, summary_path: Path
 ) -> dict[str, Any]:
@@ -646,7 +804,7 @@ def _batch_plan(
         "planned_game_count": len(seeds),
         "canonical_runtime_builder": "run_random.build_runtime",
         "canonical_game_driver": "run_random.eval",
-        "collectors_enabled": False,
+        "collectors_enabled": True,
         "backend_max_retries": BACKEND_MAX_RETRIES,
         "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
         "rerun_on_failure": RERUN_ON_FAILURE,
@@ -755,6 +913,7 @@ def collect_canonical_trajectory_batch(
             log_dir.mkdir()
             trajectory_path = game_dir / "trajectory.json"
             observer_views_path = game_dir / "observer_views.json"
+            belief_snapshots_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
             summary_path = game_dir / "summary.json"
             stage = "build_runtime"
             try:
@@ -780,13 +939,23 @@ def collect_canonical_trajectory_batch(
                     runtime_config=normalized,
                     players=players,
                 )
-                stage = "gameplay"
-                result = run_game(
-                    env,
-                    agents,
-                    roles,
-                    trajectory_recorder=recorder,
+                stage = "belief_collector_init"
+                belief_collector = build_twd_tom_sample_collector(
+                    agent_list=agents,
+                    output_path=str(belief_snapshots_path),
+                    game_id=game_id,
                 )
+                try:
+                    stage = "gameplay"
+                    result = run_game(
+                        env,
+                        agents,
+                        roles,
+                        sample_collector=belief_collector,
+                        trajectory_recorder=recorder,
+                    )
+                finally:
+                    belief_collector.close()
                 stage = "artifact_validation"
                 validation = validate_complete_game_artifacts(
                     trajectory_path,
@@ -795,6 +964,13 @@ def collect_canonical_trajectory_batch(
                     expected_run_id=run_id,
                     expected_seed=seed,
                     expected_source_commit=provenance["batch_code_commit"],
+                )
+                validation.update(
+                    validate_belief_snapshot_artifact(
+                        belief_snapshots_path,
+                        observer_views_path,
+                        expected_game_id=game_id,
+                    )
                 )
                 if validation["runtime_config_digest"] != normalized_digest:
                     raise ValueError(
@@ -849,6 +1025,9 @@ def collect_canonical_trajectory_batch(
             ),
             "total_observer_view_count": sum(
                 game["observer_view_count"] for game in completed_games
+            ),
+            "total_belief_snapshot_count": sum(
+                game["belief_snapshot_count"] for game in completed_games
             ),
             "backend_max_retries": BACKEND_MAX_RETRIES,
             "stop_on_first_failure": True,

@@ -1,4 +1,4 @@
-"""Selectable causal backbones for subjective Werewolf belief prediction.
+"""Causal backbone for observer-conditioned Werewolf belief prediction.
 
 The model consumes one structured public-event token sequence. It reuses the
 existing player/action/object embeddings and adds only event-type, public
@@ -16,16 +16,13 @@ Hugging Face ``Qwen2Model`` and a direct stack of Hugging Face ``GPT2Block``
 modules. Both consume the same structured action embeddings. No pretrained
 weights or tokenizer are used.
 
-First-order readout combines the final valid hidden state with one observer
-embedding per player and may additionally provide the current observer's two
-seven-player hard-knowledge vectors. Second-order readout adds shared cyclic
-observer-relative speaker, subject, and object/target relation embeddings to
-the public hidden sequence before using the observer embeddings as shared
-attention queries. Both orders use the same sole 21-class pair output
-projection; only first-order inference consumes private knowledge.
+The readout adds cyclic observer-relative speaker, subject, and object/target
+relation embeddings to the public hidden sequence, then uses one shared query
+per observer. Each query directly predicts a distribution over the seven
+canonical target seats.
 
 This module does not consume raw public text, true roles, truth-derived
-labels, observer IDs, alive masks, or private event fields.
+labels, alive masks, or private event fields.
 """
 
 from __future__ import annotations
@@ -41,7 +38,6 @@ from transformers.pytorch_utils import Conv1D
 
 from werewolf.models.twd_tom.schema import (
     ACTION_TO_ID,
-    NUM_WOLF_PAIR_CLASSES,
     NUM_PLAYERS,
     NONE_TOKEN,
     PLAYER_TO_ID,
@@ -49,9 +45,6 @@ from werewolf.models.twd_tom.schema import (
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
     STRUCTURED_TOKEN_TO_ID,
-)
-from werewolf.models.twd_tom.belief_labels import (
-    pair_probabilities_to_belief_marginals,
 )
 
 QWEN2_BACKBONE_NAME = "qwen2_model"
@@ -216,7 +209,6 @@ class ToMBeliefBackboneConfig:
     """Configuration for the subjective belief backbone."""
 
     num_players: int = NUM_PLAYERS
-    pair_class_count: int = NUM_WOLF_PAIR_CLASSES
     max_seq_len: int = 256
 
     def __post_init__(self) -> None:
@@ -228,16 +220,6 @@ class ToMBeliefBackboneConfig:
             raise ValueError(f"num_players must equal {NUM_PLAYERS}")
 
         if (
-            isinstance(self.pair_class_count, bool)
-            or not isinstance(self.pair_class_count, int)
-            or self.pair_class_count != NUM_WOLF_PAIR_CLASSES
-        ):
-            raise ValueError(
-                "pair_class_count must equal "
-                f"{NUM_WOLF_PAIR_CLASSES}"
-            )
-
-        if (
             isinstance(self.max_seq_len, bool)
             or not isinstance(self.max_seq_len, int)
             or self.max_seq_len <= 0
@@ -246,24 +228,15 @@ class ToMBeliefBackboneConfig:
 
 
 class ToMBeliefBackbone(nn.Module):
-    """Predict observer-specific 21-class Werewolf-pair distributions."""
+    """Predict one seven-player belief distribution for every observer."""
 
     def __init__(
         self,
         config: ToMBeliefBackboneConfig | None = None,
         *,
-        tom_order: int = 1,
         backbone_name: str = QWEN2_BACKBONE_NAME,
     ):
         super().__init__()
-
-        if (
-            isinstance(tom_order, bool)
-            or not isinstance(tom_order, int)
-            or tom_order not in (1, 2)
-        ):
-            raise ValueError("tom_order must be 1 or 2")
-        self.tom_order = tom_order
         if backbone_name not in SUPPORTED_BACKBONE_NAMES:
             raise ValueError(
                 "backbone_name must be one of "
@@ -313,11 +286,6 @@ class ToMBeliefBackbone(nn.Module):
             bias=False,
         )
 
-        # Used only when the public action history is empty.
-        self.empty_history_embedding = nn.Parameter(
-            torch.zeros(HIDDEN_SIZE)
-        )
-
         if self.backbone_name == QWEN2_BACKBONE_NAME:
             self.transformer = Qwen2Model(
                 Qwen2Config(
@@ -346,44 +314,36 @@ class ToMBeliefBackbone(nn.Module):
             self.config.num_players,
             HIDDEN_SIZE,
         )
-        self.private_knowledge_projection = nn.Linear(
-            2 * self.config.num_players,
+        self.speaker_relative_embedding = nn.Embedding(
+            NUM_PLAYERS + 1,
+            HIDDEN_SIZE,
+            padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+        )
+        self.target_relative_embedding = nn.Embedding(
+            NUM_PLAYERS + 1,
+            HIDDEN_SIZE,
+            padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+        )
+        self.object_relative_embedding = nn.Embedding(
+            NUM_PLAYERS + 1,
+            HIDDEN_SIZE,
+            padding_idx=NONE_RELATIVE_PLAYER_INDEX,
+        )
+        self.relation_flag_projection = nn.Linear(
+            3,
             HIDDEN_SIZE,
             bias=False,
         )
-        if self.tom_order == 2:
-            self.second_order_speaker_relative_embedding = nn.Embedding(
-                NUM_PLAYERS + 1,
-                HIDDEN_SIZE,
-                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
-            )
-            self.second_order_subject_relative_embedding = nn.Embedding(
-                NUM_PLAYERS + 1,
-                HIDDEN_SIZE,
-                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
-            )
-            self.second_order_object_relative_embedding = nn.Embedding(
-                NUM_PLAYERS + 1,
-                HIDDEN_SIZE,
-                padding_idx=NONE_RELATIVE_PLAYER_INDEX,
-            )
-            self.second_order_relation_flag_projection = nn.Linear(
-                3,
-                HIDDEN_SIZE,
-                bias=False,
-            )
-            self.second_order_observer_query_attention = nn.MultiheadAttention(
-                embed_dim=HIDDEN_SIZE,
-                num_heads=NUM_ATTENTION_HEADS,
-                batch_first=True,
-            )
-            self.second_order_observer_query_layer_norm = nn.LayerNorm(
-                HIDDEN_SIZE
-            )
+        self.observer_query_attention = nn.MultiheadAttention(
+            embed_dim=HIDDEN_SIZE,
+            num_heads=NUM_ATTENTION_HEADS,
+            batch_first=True,
+        )
+        self.observer_query_layer_norm = nn.LayerNorm(HIDDEN_SIZE)
 
         self.output_projection = nn.Linear(
             HIDDEN_SIZE,
-            self.config.pair_class_count,
+            self.config.num_players,
         )
 
         self._reset_parameters()
@@ -405,20 +365,19 @@ class ToMBeliefBackbone(nn.Module):
                 std=0.02,
             )
 
-        if self.tom_order == 2:
-            for embedding in (
-                self.second_order_speaker_relative_embedding,
-                self.second_order_subject_relative_embedding,
-                self.second_order_object_relative_embedding,
-            ):
-                nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
-                with torch.no_grad():
-                    embedding.weight[NONE_RELATIVE_PLAYER_INDEX].zero_()
-            nn.init.normal_(
-                self.second_order_relation_flag_projection.weight,
-                mean=0.0,
-                std=0.02,
-            )
+        for embedding in (
+            self.speaker_relative_embedding,
+            self.target_relative_embedding,
+            self.object_relative_embedding,
+        ):
+            nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+            with torch.no_grad():
+                embedding.weight[NONE_RELATIVE_PLAYER_INDEX].zero_()
+        nn.init.normal_(
+            self.relation_flag_projection.weight,
+            mean=0.0,
+            std=0.02,
+        )
 
         # Padding IDs must remain neutral.
         with torch.no_grad():
@@ -428,17 +387,6 @@ class ToMBeliefBackbone(nn.Module):
             self.event_type_embedding.weight[0].zero_()
             self.phase_embedding.weight[0].zero_()
         nn.init.normal_(self.day_projection.weight, mean=0.0, std=0.02)
-        nn.init.normal_(
-            self.private_knowledge_projection.weight,
-            mean=0.0,
-            std=0.02,
-        )
-
-        nn.init.normal_(
-            self.empty_history_embedding,
-            mean=0.0,
-            std=0.02,
-        )
         nn.init.normal_(
             self.output_projection.weight,
             mean=0.0,
@@ -455,10 +403,8 @@ class ToMBeliefBackbone(nn.Module):
         event_type_ids: torch.Tensor | None = None,
         phase_ids: torch.Tensor | None = None,
         day_values: torch.Tensor | None = None,
-        known_werewolves: torch.Tensor | None = None,
-        known_non_werewolves: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Encode actions and predict observer pair distributions.
+        """Encode public actions and predict observer belief logits.
 
         Args:
             subject_ids: Integer tensor with shape ``[B, T]``.
@@ -470,9 +416,8 @@ class ToMBeliefBackbone(nn.Module):
 
         Returns:
             A dictionary with ``hidden_states`` (``[B, T, 256]``),
-            ``pooled_hidden_state`` (``[B, 256]``), observer pair logits and
-            probabilities with shape ``[B, 7, 21]``, and the derived player
-            marginals with shape ``[B, 7, 7]``.
+            ``pooled_hidden_state`` (``[B, 256]``), and ``belief_logits``
+            with shape ``[B, 7, 7]``.
         """
 
         (
@@ -511,16 +456,10 @@ class ToMBeliefBackbone(nn.Module):
         safe_attention_mask = attention_mask.clone()
         empty_rows = safe_attention_mask.sum(dim=1) == 0
 
-        if self.tom_order == 2 and empty_rows.any():
-            raise ValueError(
-                "second-order observer query attention requires a non-empty "
-                "public history"
-            )
-
         if empty_rows.any():
-            safe_attention_mask[empty_rows, 0] = True
-            hidden_states = hidden_states.clone()
-            hidden_states[empty_rows, 0] = self.empty_history_embedding
+            raise ValueError(
+                "observer query attention requires a non-empty public history"
+            )
 
         if self.backbone_name == QWEN2_BACKBONE_NAME:
             hidden_states = self.transformer(
@@ -567,165 +506,84 @@ class ToMBeliefBackbone(nn.Module):
             .unsqueeze(0)
             .expand(batch_size, -1, -1)
         )
-        if self.tom_order == 2 and (
-            known_werewolves is not None or known_non_werewolves is not None
-        ):
-            raise ValueError("second-order ToM does not accept private knowledge")
-        private_knowledge = self._validate_private_knowledge(
-            known_werewolves=known_werewolves,
-            known_non_werewolves=known_non_werewolves,
-            batch_size=batch_size,
-            device=subject_ids.device,
+        speaker_token_mask = (
+            (event_type_ids == STRUCTURED_TOKEN_TO_ID["turn_start"])
+            | (event_type_ids == STRUCTURED_TOKEN_TO_ID["public_speech"])
         )
-        if self.tom_order == 2:
-            speaker_token_mask = (
-                (event_type_ids == STRUCTURED_TOKEN_TO_ID["turn_start"])
-                | (event_type_ids == STRUCTURED_TOKEN_TO_ID["public_speech"])
+        target_token_mask = (
+            (event_type_ids == STRUCTURED_TOKEN_TO_ID["speech_action"])
+            | (event_type_ids == STRUCTURED_TOKEN_TO_ID["vote"])
+        )
+        no_player = torch.zeros_like(subject_ids)
+        speaker_relative = relative_player_indices(
+            torch.where(speaker_token_mask, subject_ids, no_player)
+        )
+        target_relative = relative_player_indices(
+            torch.where(target_token_mask, subject_ids, no_player)
+        )
+        object_relative = relative_player_indices(object_ids)
+        relation_flags = torch.stack(
+            (
+                speaker_relative == 0,
+                target_relative == 0,
+                object_relative == 0,
+            ),
+            dim=-1,
+        ).to(dtype=hidden_states.dtype)
+        relative_public_hidden_states = (
+            hidden_states.unsqueeze(1)
+            + self.speaker_relative_embedding(speaker_relative)
+            + self.target_relative_embedding(target_relative)
+            + self.object_relative_embedding(object_relative)
+            + self.relation_flag_projection(relation_flags)
+        )
+        relative_public_hidden_states = (
+            relative_public_hidden_states
+            * safe_attention_mask[:, None, :, None].to(
+                dtype=hidden_states.dtype
             )
-            subject_token_mask = (
-                (event_type_ids == STRUCTURED_TOKEN_TO_ID["speech_action"])
-                | (event_type_ids == STRUCTURED_TOKEN_TO_ID["vote"])
-            )
-            no_player = torch.zeros_like(subject_ids)
-            speaker_relative = relative_player_indices(
-                torch.where(speaker_token_mask, subject_ids, no_player)
-            )
-            subject_relative = relative_player_indices(
-                torch.where(subject_token_mask, subject_ids, no_player)
-            )
-            object_relative = relative_player_indices(object_ids)
-            relation_flags = torch.stack(
-                (
-                    speaker_relative == 0,
-                    subject_relative == 0,
-                    object_relative == 0,
-                ),
-                dim=-1,
-            ).to(dtype=hidden_states.dtype)
-            relative_public_hidden_states = (
-                hidden_states.unsqueeze(1)
-                + self.second_order_speaker_relative_embedding(
-                    speaker_relative
-                )
-                + self.second_order_subject_relative_embedding(
-                    subject_relative
-                )
-                + self.second_order_object_relative_embedding(
-                    object_relative
-                )
-                + self.second_order_relation_flag_projection(relation_flags)
-            )
-            relative_public_hidden_states = (
-                relative_public_hidden_states
-                * safe_attention_mask[:, None, :, None].to(
-                    dtype=hidden_states.dtype
-                )
-            )
-            sequence_length = hidden_states.shape[1]
-            flattened_relative_hidden = relative_public_hidden_states.reshape(
-                batch_size * self.config.num_players,
-                sequence_length,
-                HIDDEN_SIZE,
-            )
-            flattened_queries = observer_queries.reshape(
-                batch_size * self.config.num_players,
-                1,
-                HIDDEN_SIZE,
-            )
-            flattened_padding_mask = (
-                (~safe_attention_mask)
-                .unsqueeze(1)
-                .expand(-1, self.config.num_players, -1)
-                .reshape(batch_size * self.config.num_players, sequence_length)
-            )
-            observer_context, _ = self.second_order_observer_query_attention(
-                query=flattened_queries,
-                key=flattened_relative_hidden,
-                value=flattened_relative_hidden,
-                key_padding_mask=flattened_padding_mask,
-                need_weights=False,
-            )
-            observer_context = observer_context.reshape(
-                batch_size,
-                self.config.num_players,
-                HIDDEN_SIZE,
-            )
-            observer_hidden_states = self.second_order_observer_query_layer_norm(
-                observer_queries + observer_context
-            )
-        else:
-            observer_hidden_states = (
-                pooled_hidden_state.unsqueeze(1) + observer_queries
-            )
-        if private_knowledge is not None:
-            observer_hidden_states = (
-                observer_hidden_states
-                + self.private_knowledge_projection(private_knowledge)
-            )
+        )
+        sequence_length = hidden_states.shape[1]
+        flattened_relative_hidden = relative_public_hidden_states.reshape(
+            batch_size * self.config.num_players,
+            sequence_length,
+            HIDDEN_SIZE,
+        )
+        flattened_queries = observer_queries.reshape(
+            batch_size * self.config.num_players,
+            1,
+            HIDDEN_SIZE,
+        )
+        flattened_padding_mask = (
+            (~safe_attention_mask)
+            .unsqueeze(1)
+            .expand(-1, self.config.num_players, -1)
+            .reshape(batch_size * self.config.num_players, sequence_length)
+        )
+        observer_context, _ = self.observer_query_attention(
+            query=flattened_queries,
+            key=flattened_relative_hidden,
+            value=flattened_relative_hidden,
+            key_padding_mask=flattened_padding_mask,
+            need_weights=False,
+        )
+        observer_context = observer_context.reshape(
+            batch_size,
+            self.config.num_players,
+            HIDDEN_SIZE,
+        )
+        observer_hidden_states = self.observer_query_layer_norm(
+            observer_queries + observer_context
+        )
 
-        logits = self.output_projection(observer_hidden_states)
-        probabilities = torch.softmax(logits, dim=-1)
-        result = {
+        belief_logits = self.output_projection(observer_hidden_states)
+        return {
             "hidden_states": hidden_states,
             "pooled_hidden_state": pooled_hidden_state,
             "observer_hidden_states": observer_hidden_states,
-            "observer_pair_logits": logits,
-            "pair_probabilities": probabilities,
-            "wolf_marginals": pair_probabilities_to_belief_marginals(
-                probabilities
-            ),
+            "relative_public_hidden_states": relative_public_hidden_states,
+            "belief_logits": belief_logits,
         }
-        if self.tom_order == 2:
-            result["relative_public_hidden_states"] = (
-                relative_public_hidden_states
-            )
-        return result
-
-    def _validate_private_knowledge(
-        self,
-        *,
-        known_werewolves: torch.Tensor | None,
-        known_non_werewolves: torch.Tensor | None,
-        batch_size: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        """Validate and concatenate optional first-order private features."""
-
-        if (known_werewolves is None) != (known_non_werewolves is None):
-            raise ValueError(
-                "known_werewolves and known_non_werewolves must be provided together"
-            )
-        if known_werewolves is None:
-            return None
-
-        expected_shape = (
-            batch_size,
-            self.config.num_players,
-            self.config.num_players,
-        )
-        normalized = []
-        for field_name, tensor in (
-            ("known_werewolves", known_werewolves),
-            ("known_non_werewolves", known_non_werewolves),
-        ):
-            if not isinstance(tensor, torch.Tensor):
-                raise TypeError(f"{field_name} must be a tensor")
-            if tuple(tensor.shape) != expected_shape:
-                raise ValueError(
-                    f"{field_name} must have shape [B, 7, 7]"
-                )
-            tensor = tensor.to(device=device, dtype=torch.float32)
-            if not torch.isfinite(tensor).all() or (
-                (tensor != 0) & (tensor != 1)
-            ).any():
-                raise ValueError(f"{field_name} must contain only 0 or 1")
-            normalized.append(tensor)
-
-        if (normalized[0] * normalized[1]).any():
-            raise ValueError(
-                "known_werewolves and known_non_werewolves must be disjoint"
-            )
-        return torch.cat(normalized, dim=-1)
 
     def _validate_inputs(
         self,

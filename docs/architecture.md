@@ -1,105 +1,49 @@
-# Architecture
+# tom-v2 架构
 
-This document maps the current implementation without introducing components
-that are not present in the repository. Collection V2.7 runtime paths are
-frozen; the diagrams describe them but do not redefine their behavior.
+## 研究定义
 
-## Gameplay flow
+tom-v2 预测目标玩家在时间 `t` 的主观狼人怀疑：
+
+```text
+输入：public_history <= t + observer_id
+输出：B_t(observer, target_player)
+```
+
+标签只能由被建模的 playing agent 自己报告，不能由外部模型根据公开信息推断。
+
+## 当前数据主线
 
 ```mermaid
 flowchart LR
-    E["WerewolfTextEnvV0"] --> O["Player observation"]
-    O --> A["Configured agent"]
-    A --> C["Canonical valid action"]
-    C --> S["env.step(action)"]
-    S --> E
-    S --> GL["Game log"]
-    S --> PE["Append-only public_events"]
+    E[Classic-7 Environment] --> C[发言前冻结公开历史]
+    C --> O[按 observer 取得合法私有 observation]
+    O --> Q[playing-agent readonly belief query]
+    Q --> R[suspected_werewolves 符号集合]
+    R --> J[raw belief snapshot JSONL]
+    J --> M[按 game 进行 canonical materialization]
+    M --> D[稀疏集合到 belief row 转换]
+    D --> T[7×7 observer-conditioned target]
 ```
 
-`werewolf/envs/werewolf_text_env_v0.py` owns phases, legal actions, state
-transitions, observations, game logs, and public-event publication. Agent
-construction and backend routing are performed by `run_battle.py` or
-`run_random.py`; the environment does not resolve API credentials or model
-names.
+同一冻结边界用于所有观察者。collector 只选择公开存活玩家，不接收真实角色标签；每次 query 前后比较 playing agent 状态，任何状态变化都直接失败。
 
-## Public speech flow
+## 不属于主线的路径
 
-```mermaid
-flowchart LR
-    PC["Legal private context"] --> B["Transient belief"]
-    PS["Authoritative public state"] --> B
-    B --> SP["Direct public speech"]
-    SP --> P["SpeechPerceiver"]
-    P --> SA["Structured sp_actions"]
-    SP --> EV["public_speech event"]
-    SA --> EV
-```
+- public-only belief reporter；
+- external offline reporter / offline annotation；
+- Public Belief Matrix；
+- ToM1/ToM2 双任务；
+- pair classification 与 21 类狼人组合标签；
+- online shadow inference；
+- tom-v1 formal reporter 与 pilot pipeline。
 
-The strict speech path is orchestrated by `GPTAgent`. A fresh transient belief
-is generated from the legally filtered observation, then a second model call
-produces natural-language public speech directly. Prompt construction lives in
-`prompt_template_v0.py`. The online `SpeechPerceiver.parse()` remains tolerant
-and runs only after speech generation, so parser failure does not stop a game;
-strict parsing is reserved for offline audit tools.
+Dataset 只以结构化公开事件作为模型特征。非空怀疑集合只在集合成员上均分，空集合在六个非自身玩家上均分；`observer_alive_mask` 控制有效行，`diagonal_target_mask` 只排除自身列。死亡玩家仍保留为 target。raw hard knowledge 只做 provenance、合法性与泄漏审计，不约束 self-report，也不进入模型特征。
 
-## Canonical trajectory and supervision flow
+## 模型目标
 
-```mermaid
-flowchart LR
-    G["Simulator"] --> A["A canonical trajectory"]
-    G --> C0["C0 observer-view provenance"]
-    A --> C1["Offline annotation C1"]
-    C0 --> C1
-    A --> D["Offline materialization D"]
-    C0 --> D
-    C1 --> D
-    D --> S["Deterministic game-level split"]
-    S --> DS["TWDToMDataset"]
-```
+模型通过结构化公开事件的因果编码和共享 observer query，直接输出
+`belief_logits[B, 7, 7]`。第二维对应 observer，第三维对应 target player。
+训练损失仅聚合 `observer_alive_mask` 选中的行，并在每行 softmax 前用
+`diagonal_target_mask` 排除自身列。不存在 21 类组合空间、pair 投影或私有知识输入。
 
-`CanonicalGameInteractionTrajectoryRecorder` is the only current-mainline
-gameplay collector. It records A transitions and C0 PRE/POST observer views;
-it does not call a label reporter. `werewolf.offline_annotation` derives C1
-private-conditioned and public-only suspicion annotations from frozen A/C0.
-`werewolf.offline_materialization` validates those sources and emits D ToM1
-and ToM2 records. Deterministic observer hard knowledge is owned by
-`werewolf/observer_knowledge.py`. The reproducible filesystem entry point for
-these offline stages is `script/twd_tom/materialize_canonical_dataset.py`.
-
-The historical online belief collectors and the earlier formal-ToM pilot are
-preserved under `archive/legacy_tom`; they are not sources for canonical D.
-
-## Training flow
-
-```mermaid
-flowchart LR
-    D["Validated D ToM1 / ToM2 JSONL"] --> ST["Game-level hash split"]
-    ST --> DS["TWDToMDataset"]
-    DS --> F["Structured event features"]
-    F --> B["Selected ToM backbone"]
-    B --> H["Shared 21-class head"]
-    H --> L["Masked soft-target cross entropy"]
-    L --> C["best.pt / last.pt"]
-    C --> E["Explicit validation or test evaluation"]
-```
-
-`script/twd_tom/train.py` and `script/twd_tom/eval.py` are the formal model
-entry points. Training and validation datasets are explicit and game-disjoint.
-The default backbone is a randomly initialized `Qwen2Model` receiving
-`inputs_embeds`; the CLI also retains a direct `GPT2Block` stack. Neither path
-downloads pretrained weights or tokenizes raw speech.
-
-## Source locations
-
-| Concern | Location |
-|---|---|
-| Environment | `werewolf/envs/` |
-| Agent and speech-plan contracts | `werewolf/agents/` |
-| Backend abstraction | `werewolf/backends/` |
-| Speech perception and belief reporting | `werewolf/speech/` |
-| Canonical trajectory and offline labels | `werewolf/trajectory.py`, `werewolf/offline_annotation.py`, `werewolf/offline_materialization.py` |
-| ToM schemas, Dataset, model, loss, metrics | `werewolf/models/twd_tom/` |
-| Collection and processing CLIs | `script/twd_tom/` |
-| Historical ToM implementations | `archive/legacy_tom/` |
-| Deterministic regressions | `tests/` |
+训练时可应用通用座位循环旋转：同一置换同时作用于 observer、target、公开事件中的玩家引用、belief target 的行列以及 mask；验证和 evaluation 不旋转。

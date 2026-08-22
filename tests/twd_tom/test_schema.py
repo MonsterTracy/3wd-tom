@@ -7,7 +7,6 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_TO_ID,
     SpeechAction,
     parse_speech_action,
-    validate_player_suspicion,
 )
 
 
@@ -132,77 +131,3 @@ def test_targeted_actions_reject_none_object():
 def test_guard_predicates_are_not_active(action_name):
     with pytest.raises(ValueError, match="unsupported speech action"):
         parse_speech_action(["player1", action_name, "player2"])
-
-
-@pytest.mark.parametrize(
-    ("suspected", "known_wolves", "known_non_wolves", "expected"),
-    [
-        ([], [], ["player1"], []),
-        (["player3"], ["player3"], ["player1"], ["player3"]),
-        (
-            ["player2", "player6"],
-            ["player2", "player6"],
-            ["player1", "player3", "player4", "player5", "player7"],
-            ["player2", "player6"],
-        ),
-        (["player2"], [], ["player1"], ["player2"]),
-        (
-            ["player2", "player4"],
-            [],
-            ["player1"],
-            ["player2", "player4"],
-        ),
-        (
-            ["player3", "player5"],
-            ["player3"],
-            ["player2", "player6", "player7"],
-            ["player3", "player5"],
-        ),
-        (
-            ["player2", "player3", "player4", "player5", "player6", "player7"],
-            [],
-            ["player1"],
-            ["player2", "player3", "player4", "player5", "player6", "player7"],
-        ),
-        (
-            ["player1", "player3", "player4", "player5"],
-            ["player3"],
-            ["player2", "player6", "player7"],
-            ["player1", "player3", "player4", "player5"],
-        ),
-    ],
-)
-def test_player_suspicion_canonical_no_extra_forms_are_valid(
-    suspected,
-    known_wolves,
-    known_non_wolves,
-    expected,
-):
-    assert validate_player_suspicion(
-        suspected,
-        known_wolves,
-        known_non_wolves,
-    ) == expected
-
-
-@pytest.mark.parametrize(
-    ("suspected", "known_wolves", "known_non_wolves", "match"),
-    [
-        ([], ["player3"], ["player1"], "contain all known"),
-        (["player1"], [], ["player1"], "known_non_werewolves"),
-        (["player2", "player2"], [], ["player1"], "duplicate"),
-        (["player8"], [], ["player1"], "canonical"),
-    ],
-)
-def test_player_suspicion_invalid_forms_fail_closed(
-    suspected,
-    known_wolves,
-    known_non_wolves,
-    match,
-):
-    with pytest.raises((TypeError, ValueError), match=match):
-        validate_player_suspicion(
-            suspected,
-            known_wolves,
-            known_non_wolves,
-        )

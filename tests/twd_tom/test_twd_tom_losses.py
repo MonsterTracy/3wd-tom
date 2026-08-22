@@ -1,83 +1,65 @@
-"""Tests for masked soft-target distribution cross entropy."""
-
 import math
 
 import pytest
 import torch
 
-from werewolf.models.twd_tom.losses import masked_distribution_cross_entropy
+from werewolf.models.twd_tom.losses import (
+    masked_belief_distribution_loss,
+    masked_belief_probabilities,
+)
 
 
-def tensors():
-    logits = torch.zeros((1, 7, 21), requires_grad=True)
-    targets = torch.zeros_like(logits)
-    targets[0, 2, 4] = 1
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    mask[0, 2] = True
-    return logits, targets, mask
+def make_contract():
+    logits = torch.zeros((1, 7, 7), requires_grad=True)
+    targets = torch.zeros((1, 7, 7))
+    alive = torch.tensor([[True, True, False, False, False, False, False]])
+    diagonal = (~torch.eye(7, dtype=torch.bool)).unsqueeze(0)
+    targets[0, 0, 1:] = 1 / 6
+    targets[0, 1, [0, 2, 3, 4, 5, 6]] = 1 / 6
+    return logits, targets, alive, diagonal
 
 
-def test_soft_target_cross_entropy_matches_manual_formula():
-    logits, targets, mask = tensors()
-    targets[0, 2].zero_()
-    targets[0, 2, 4] = 0.25
-    targets[0, 2, 8] = 0.75
-    expected = -(targets[0, 2] * logits[0, 2].log_softmax(-1)).sum()
-    torch.testing.assert_close(
-        masked_distribution_cross_entropy(logits, targets, mask), expected
-    )
-
-
-def test_uniform_logits_one_hot_target_equals_log_twenty_one():
-    logits, targets, mask = tensors()
-    assert masked_distribution_cross_entropy(logits, targets, mask).item() == pytest.approx(
-        math.log(21)
-    )
-
-
-def test_masked_rows_receive_no_gradient():
-    logits, targets, mask = tensors()
-    masked_distribution_cross_entropy(logits, targets, mask).backward()
-    assert logits.grad[0, 2].count_nonzero().item() > 0
-    assert logits.grad[0, ~mask[0]].count_nonzero().item() == 0
-
-
-def test_no_valid_observer_fails_instead_of_returning_zero():
-    logits = torch.zeros((1, 7, 21))
-    targets = torch.zeros_like(logits)
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    with pytest.raises(ValueError, match="at least one valid observer"):
-        masked_distribution_cross_entropy(logits, targets, mask)
-
-
-def test_shapes_targets_and_mask_are_strict():
-    logits, targets, mask = tensors()
-    targets[0, 0, 0] = 1
-    with pytest.raises(ValueError, match="unsupervised"):
-        masked_distribution_cross_entropy(logits, targets, mask)
-    with pytest.raises(ValueError, match="shape"):
-        masked_distribution_cross_entropy(logits[:, 0], targets, mask)
-    with pytest.raises(TypeError, match="torch.bool"):
-        masked_distribution_cross_entropy(logits, targets.zero_(), mask.long())
-
-
-@pytest.mark.parametrize("tom_order", [1, 2])
-def test_same_pair_cross_entropy_supports_both_orders(tom_order):
-    logits = torch.zeros((1, 7, 21), requires_grad=True)
-    targets = torch.zeros_like(logits)
-    targets[0, 4].fill_(1.0 / 21)
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    mask[0, 4] = True
-    loss = masked_distribution_cross_entropy(logits, targets, mask)
-    assert loss.item() == pytest.approx(math.log(21))
+def test_masked_belief_loss_is_cross_entropy_over_alive_rows():
+    logits, targets, alive, diagonal = make_contract()
+    loss = masked_belief_distribution_loss(logits, targets, alive, diagonal)
+    assert loss.item() == pytest.approx(math.log(6))
     loss.backward()
+    assert torch.isfinite(logits.grad).all()
+    assert torch.count_nonzero(logits.grad[0, 2:]) == 0
 
 
-def test_seven_class_distribution_is_not_a_formal_loss_space():
-    logits = torch.zeros((1, 7, 7))
-    targets = torch.zeros_like(logits)
-    targets[0, 0, 0] = 1.0
-    mask = torch.zeros((1, 7), dtype=torch.bool)
-    mask[0, 0] = True
-    with pytest.raises(ValueError, match="21 pair classes"):
-        masked_distribution_cross_entropy(logits, targets, mask)
+def test_masked_probabilities_have_zero_diagonal_and_normalized_rows():
+    logits, _, _, diagonal = make_contract()
+    probabilities = masked_belief_probabilities(logits, diagonal)
+    assert torch.equal(probabilities.diagonal(dim1=-2, dim2=-1), torch.zeros((1, 7)))
+    torch.testing.assert_close(probabilities.sum(dim=-1), torch.ones((1, 7)))
+
+
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_supported_reductions(reduction):
+    logits, targets, alive, diagonal = make_contract()
+    result = masked_belief_distribution_loss(
+        logits, targets, alive, diagonal, reduction=reduction
+    )
+    assert result.shape == ((1, 7) if reduction == "none" else ())
+
+
+def test_invalid_shape_mask_and_dead_targets_fail_closed():
+    logits, targets, alive, diagonal = make_contract()
+    with pytest.raises(ValueError, match=r"\[B, 7, 7\]"):
+        masked_belief_distribution_loss(logits[..., :6], targets, alive, diagonal)
+    broken_diagonal = diagonal.clone()
+    broken_diagonal[0, 0, 0] = True
+    with pytest.raises(ValueError, match="exclude exactly the diagonal"):
+        masked_belief_distribution_loss(logits, targets, alive, broken_diagonal)
+    targets[0, 2, 0] = 1.0
+    with pytest.raises(ValueError, match="dead observer"):
+        masked_belief_distribution_loss(logits, targets, alive, diagonal)
+
+
+def test_no_alive_observer_is_rejected():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    alive.zero_()
+    with pytest.raises(ValueError, match="at least one observer"):
+        masked_belief_distribution_loss(logits, targets, alive, diagonal)
