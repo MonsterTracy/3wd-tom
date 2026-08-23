@@ -98,8 +98,7 @@ class GameplayPromptTest(unittest.TestCase):
             "如果最高票再次平票",
             "没有任何PK候选人获得有效票数",
             "不再有任何存活狼人",
-            "没有任何普通村民存活",
-            "预言家和女巫都已经出局",
+            "存活狼人数达到或超过其他存活玩家总数",
         )
         for rule in required_rules:
             with self.subTest(rule=rule):
@@ -438,7 +437,7 @@ Villager: {3}""".format(*counts)
             day_prompt,
         )
         self.assertIn(
-            'check_as_good(playerX): speaker publicly claims a Seer-style '
+            'check_as_non_werewolf(playerX): speaker publicly claims a Seer-style '
             'check on playerX returned "not Werewolf"; not necessarily Villager',
             day_prompt,
         )
@@ -558,12 +557,17 @@ Villager: {3}""".format(*counts)
     def test_deterministic_renderer_covers_all_discussion_act_meanings(self):
         cases = (
             ("point_as_werewolf", 2, "我认为 player2 是狼人。"),
+            (
+                "point_as_non_werewolf",
+                2,
+                "我认为 player2 不是狼人，属于好人阵营。",
+            ),
             ("point_as_villager", 2, "我认为 player2 是普通村民。"),
             ("point_as_seer", 2, "我认为 player2 是预言家。"),
             ("point_as_witch", 2, "我认为 player2 是女巫。"),
             ("support", 2, "我支持 player2。"),
             ("oppose", 2, "我质疑 player2。"),
-            ("check_as_good", 2, "我查验过 player2，结果不是狼人。"),
+            ("check_as_non_werewolf", 2, "我查验过 player2，结果不是狼人。"),
             ("check_as_werewolf", 2, "我查验过 player2，结果是狼人。"),
             ("save", 2, "我用解药救了 player2。"),
             ("poison", 2, "我对 player2 使用了毒药。"),
@@ -587,8 +591,9 @@ Villager: {3}""".format(*counts)
                     expected,
                 )
 
-        self.assertNotIn("好人", cases[1][2])
-        self.assertNotIn("普通村民", cases[6][2])
+        realized = {action: text for action, _target, text in cases}
+        self.assertNotIn("好人", realized["point_as_villager"])
+        self.assertNotIn("普通村民", realized["check_as_non_werewolf"])
 
     def test_deterministic_renderer_naturalizes_self_role_claims(self):
         cases = (
@@ -670,12 +675,13 @@ Villager: {3}""".format(*counts)
             DISCUSSION_ACTIONS,
             (
                 "point_as_werewolf",
+                "point_as_non_werewolf",
                 "point_as_villager",
                 "point_as_seer",
                 "point_as_witch",
                 "support",
                 "oppose",
-                "check_as_good",
+                "check_as_non_werewolf",
                 "check_as_werewolf",
                 "save",
                 "poison",
@@ -698,7 +704,7 @@ Villager: {3}""".format(*counts)
         self.assertEqual(vote_targets, (1, 2, 5, 6, 7))
         self.assertNotIn(DiscussionAct("vote_intent", 3), snapshot)
         self.assertNotIn(DiscussionAct("vote_intent", 4), snapshot)
-        for action in ("check_as_good", "check_as_werewolf", "save", "poison"):
+        for action in ("check_as_non_werewolf", "check_as_werewolf", "save", "poison"):
             self.assertNotIn(DiscussionAct(action, 3), snapshot)
         self.assertNotIn(DiscussionAct("point_as_werewolf", 3), snapshot)
         self.assertIn(DiscussionAct("point_as_werewolf", 7), snapshot)

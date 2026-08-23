@@ -20,12 +20,12 @@ from werewolf.agents.prompt_template_v0 import (
     STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
     build_belief_prompt,
     build_day_cognition_prompt,
+    build_public_speech_realization_prompt,
     build_public_claim_catalog,
     build_vote_prompt,
     compile_discussion_intent_v2,
     derive_belief_constraints,
     freeze_discussion_candidates,
-    render_deterministic_public_speech,
 )
 from werewolf.backends import BackendError
 from werewolf.models.twd_tom.schema import normalize_player
@@ -106,7 +106,7 @@ class GPTAgent(LLMAgent):
         temperature, max_tokens = self._request_limits()
 
         if is_speech and is_strict:
-            day_cognition, candidate_snapshot, _claim_catalog = (
+            day_cognition, candidate_snapshot, claim_catalog = (
                 self._generate_day_cognition(
                     observation,
                     pre_speech_belief=pre_speech_belief,
@@ -123,32 +123,14 @@ class GPTAgent(LLMAgent):
                     day_cognition.public_vote_stance_index
                 ),
             )
-            speaker = normalize_player(
-                observation.get("current_act_idx")
-            )
-            raw_text = render_deterministic_public_speech(
-                observation.get("current_act_idx"),
+            raw_text = self._generate_public_speech(
+                observation,
                 discussion_acts=discussion_acts,
+                claim_catalog=claim_catalog,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
-            sp_actions = [
-                [
-                    speaker,
-                    discussion_act.action,
-                    (
-                        None
-                        if discussion_act.target is None
-                        else normalize_player(discussion_act.target)
-                    ),
-                ]
-                for discussion_act in discussion_acts
-            ]
-            return (
-                speech_kind,
-                {
-                    "raw_text": raw_text,
-                    "sp_actions": sp_actions,
-                },
-            )
+            return speech_kind, raw_text
 
         if is_vote and is_strict:
             belief = self._generate_belief(
@@ -313,6 +295,42 @@ class GPTAgent(LLMAgent):
             # The raw response is already retained by the existing call audit.
             pass
         return report, candidate_snapshot, claim_catalog
+
+    def _generate_public_speech(
+        self,
+        observation,
+        *,
+        discussion_acts,
+        claim_catalog,
+        temperature,
+        max_tokens,
+    ):
+        """Generate public natural language from a frozen communication intent."""
+
+        phase = observation.get("phase")
+        player_id = observation.get("current_act_idx")
+        prompt = build_public_speech_realization_prompt(
+            observation,
+            discussion_acts=discussion_acts,
+            claim_catalog=claim_catalog,
+        )
+        content, metadata = self._chat_with_metadata(
+            [{"role": "user", "content": prompt}],
+            player_log_context={
+                "stage": "speech_realization",
+                "observation": observation,
+            },
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        validate_gameplay_public_speech(
+            content,
+            finish_reason=metadata["finish_reason"],
+            player_id=player_id,
+            phase=phase,
+        )
+        return content.strip()
 
     def _generate_vote(
         self,

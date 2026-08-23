@@ -180,10 +180,20 @@ def eval(
         if trajectory_recorder is not None:
             trajectory_recorder.after_agent_act(action)
 
-        try:
-            obs, _, done, info = env.step(
-                action
+        env_audit_context = (
+            call_audit.gameplay_context(
+                acting_player_id=current_act_idx,
+                observation=obs,
+                public_events=env.public_events,
             )
+            if call_audit is not None
+            else nullcontext()
+        )
+        try:
+            with env_audit_context:
+                obs, _, done, info = env.step(
+                    action
+                )
         except Exception as exc:
             if trajectory_recorder is not None:
                 trajectory_recorder.fail(
@@ -620,6 +630,7 @@ def build_runtime(
         speech_perceiver=(
             speech_perceiver
         ),
+        random_seed=random_seed,
     )
 
     if env_config.get(

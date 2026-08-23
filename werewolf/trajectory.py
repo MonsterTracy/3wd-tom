@@ -18,12 +18,12 @@ from werewolf.models.twd_tom.public_events import (
 )
 
 
-TRAJECTORY_SCHEMA_VERSION = "classic7_game_interaction_trajectory_v1"
-OBSERVATION_SCHEMA_VERSION = "classic7_agent_observation_v1"
+TRAJECTORY_SCHEMA_VERSION = "classic7_game_interaction_trajectory_v2"
+OBSERVATION_SCHEMA_VERSION = "classic7_agent_observation_v2"
 OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION = (
-    "classic7_observer_view_provenance_v1"
+    "classic7_observer_view_provenance_v2"
 )
-SIMULATOR_BASELINE = "classic7-simulator-stable-v1"
+SIMULATOR_BASELINE = "classic7-witch-parity-v1"
 
 PRE_PUBLIC_SPEECH = "PRE_PUBLIC_SPEECH"
 POST_PUBLIC_SPEECH = "POST_PUBLIC_SPEECH"
@@ -522,8 +522,6 @@ class CanonicalGameInteractionTrajectoryRecorder:
                 raise ValueError("strict speech action fields do not match contract")
             if content["raw_text"] != speech["raw_text"]:
                 raise ValueError("submitted and committed speech raw_text differ")
-            if content["sp_actions"] != speech["sp_actions"]:
-                raise ValueError("submitted and committed speech sp_actions differ")
         elif isinstance(content, str):
             if content != speech["raw_text"]:
                 raise ValueError("submitted and committed speech raw_text differ")

@@ -12,11 +12,14 @@ from typing import Any
 from werewolf.models.twd_tom.schema import (
     PLAYER_NAMES,
     PLAYER_TO_ID,
-    parse_speech_action,
+)
+from werewolf.models.twd_tom.speech_annotations import (
+    normalize_speech_annotations,
+    speech_annotation_actions,
 )
 
 
-PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v3"
+PUBLIC_EVENT_SCHEMA_VERSION = "classic7_public_event_sequence_v4"
 PUBLIC_EVENT_TYPES = frozenset(
     {
         "phase_change",
@@ -64,7 +67,7 @@ _EVENT_FIELDS = {
     "phase_change": frozenset({"event_idx", "event_type", "phase"}),
     "turn_start": frozenset({"event_idx", "event_type", "speaker"}),
     "public_speech": frozenset(
-        {"event_idx", "event_type", "speaker", "raw_text", "sp_actions"}
+        {"event_idx", "event_type", "speaker", "raw_text"}
     ),
     "vote_result": frozenset({"event_idx", "event_type", "votes"}),
     "exile_result": frozenset(
@@ -182,17 +185,6 @@ def normalize_public_event(
         if not isinstance(raw_text, str):
             raise TypeError("public_speech.raw_text must be text")
         normalized["raw_text"] = raw_text
-        sp_actions = []
-        for action in _sequence(
-            event.get("sp_actions"), field_name="public_speech.sp_actions"
-        ):
-            parsed_action = parse_speech_action(action)
-            if parsed_action.subject != speaker:
-                raise ValueError(
-                    "public_speech action subject must equal event speaker"
-                )
-            sp_actions.append(parsed_action.to_list())
-        normalized["sp_actions"] = sp_actions
     elif event_type == "vote_result":
         votes = []
         previous_voter_id = 0
@@ -233,15 +225,19 @@ def normalize_public_events(events: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-def public_speech_actions(events: Any) -> list[list[str | None]]:
-    """Flatten exact speech actions for prompt/audit metadata only."""
+def public_speech_actions(
+    events: Any,
+    speech_annotations: Any,
+) -> list[list[str | None]]:
+    """Flatten versioned annotations bound to one public-event prefix."""
 
-    return [
-        list(action)
-        for event in normalize_public_events(events)
-        if event["event_type"] == "public_speech"
-        for action in event["sp_actions"]
-    ]
+    normalized_events = normalize_public_events(events)
+    normalized_annotations = normalize_speech_annotations(
+        speech_annotations,
+        public_events=normalized_events,
+        require_complete=True,
+    )
+    return speech_annotation_actions(normalized_annotations)
 
 
 def is_post_completed_public_speech_pre_next_action(
@@ -271,7 +267,10 @@ def is_post_completed_public_speech_pre_next_action(
     return normalized[-2]["event_type"] == "public_speech"
 
 
-def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
+def structured_event_tokens(
+    events: Any,
+    speech_annotations: Any = (),
+) -> list[dict[str, Any]]:
     """Project public events into the exact raw-text-free model token content."""
 
     tokens: list[dict[str, Any]] = []
@@ -296,7 +295,17 @@ def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
             }
         )
 
-    for event in normalize_public_events(events):
+    normalized_events = normalize_public_events(events)
+    normalized_annotations = normalize_speech_annotations(
+        speech_annotations,
+        public_events=normalized_events,
+        require_complete=True,
+    )
+    annotations_by_event = {
+        annotation["event_idx"]: annotation
+        for annotation in normalized_annotations
+    }
+    for event in normalized_events:
         event_type = event["event_type"]
         if event_type == "phase_change":
             day, phase = parse_public_phase(event["phase"])
@@ -305,7 +314,8 @@ def structured_event_tokens(events: Any) -> list[dict[str, Any]]:
             append(event_type, subject=event["speaker"])
         elif event_type == "public_speech":
             append(event_type, subject=event["speaker"])
-            for subject, action, object_ in event["sp_actions"]:
+            annotation = annotations_by_event[event["event_idx"]]
+            for subject, action, object_ in annotation["actions"]:
                 append(
                     "speech_action",
                     subject=subject,
@@ -347,9 +357,14 @@ def public_event_digest(events: Any) -> str:
     ).hexdigest()
 
 
-def structured_input_digest(events: Any) -> str:
+def structured_input_digest(
+    events: Any,
+    speech_annotations: Any = (),
+) -> str:
     return hashlib.sha256(
-        _canonical_json(structured_event_tokens(events)).encode("utf-8")
+        _canonical_json(
+            structured_event_tokens(events, speech_annotations)
+        ).encode("utf-8")
     ).hexdigest()
 
 

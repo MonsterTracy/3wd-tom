@@ -25,6 +25,9 @@ from script.twd_tom.collection_budget import (
     GameCallBudgetAudit,
     audited_backends,
 )
+from script.twd_tom.replay_canonical_trajectory import (
+    replay_canonical_trajectory,
+)
 from werewolf.backends import load_named_backends
 from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
 from werewolf.models.twd_tom.public_events import (
@@ -37,6 +40,14 @@ from werewolf.models.twd_tom.public_events import (
 from werewolf.models.twd_tom.samples import (
     SAMPLE_FIELDS,
     SAMPLE_SCHEMA_VERSION,
+)
+from werewolf.models.twd_tom.speech_annotations import (
+    SPEECH_ACTION_ONTOLOGY_VERSION,
+    SPEECH_ANNOTATION_SCHEMA_VERSION,
+    SPEECH_PARSER_PROMPT_VERSION,
+    STATUS_ERROR,
+    normalize_speech_annotations,
+    speech_annotation_digest,
 )
 from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
@@ -56,9 +67,9 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v2"
-GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v2"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v2"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v4"
+GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v4"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v4"
 BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v1"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
@@ -67,6 +78,7 @@ STOP_ON_FIRST_FAILURE = True
 RERUN_ON_FAILURE = False
 REPLACEMENT_SEED_ON_FAILURE = False
 BELIEF_SNAPSHOTS_FILENAME = "belief_snapshots.jsonl"
+SPEECH_ANNOTATIONS_FILENAME = "speech_annotations.jsonl"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
@@ -239,6 +251,31 @@ def _write_json_new(path: Path, value: Mapping[str, Any]) -> None:
         raise
 
 
+def _write_jsonl_new(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+    """Atomically publish ordered canonical JSONL records without overwrite."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FileExistsError(f"output already exists: {path}")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            for record in records:
+                handle.write(canonical_json(record) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            raise FileExistsError(f"output already exists: {path}")
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary.exists():
+            temporary.unlink()
+        raise
+
+
 def _read_code_provenance(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     root = Path(repo_root).resolve()
     try:
@@ -316,6 +353,9 @@ def _pipeline_collection_contract(
         raise TypeError("runtime config pipeline must be a mapping")
     expected_versions = {
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
+        "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+        "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+        "speech_parser_prompt_version": SPEECH_PARSER_PROMPT_VERSION,
         "raw_schema_version": SAMPLE_SCHEMA_VERSION,
         "projected_schema_version": PROJECTED_SCHEMA_VERSION,
         "projection_version": TARGET_CONVERSION,
@@ -442,11 +482,11 @@ def _expected_winner(
     alive_roles = [
         player["role"] for player in players if player["player_id"] in alive
     ]
-    if "Werewolf" not in alive_roles:
+    wolf_count = sum(role == "Werewolf" for role in alive_roles)
+    non_wolf_count = len(alive_roles) - wolf_count
+    if wolf_count == 0:
         return "Villager"
-    if "Villager" not in alive_roles:
-        return "Werewolf"
-    if "Seer" not in alive_roles and "Witch" not in alive_roles:
+    if wolf_count >= non_wolf_count:
         return "Werewolf"
     return None
 
@@ -566,8 +606,6 @@ def validate_complete_game_artifacts(
                     raise ValueError("strict speech action fields do not match contract")
                 if content["raw_text"] != speech.get("raw_text"):
                     raise ValueError("submitted and committed speech raw_text differ")
-                if content["sp_actions"] != speech.get("sp_actions"):
-                    raise ValueError("submitted and committed speech sp_actions differ")
             elif isinstance(content, str):
                 if content != speech.get("raw_text"):
                     raise ValueError("submitted and committed speech raw_text differ")
@@ -767,6 +805,59 @@ def validate_complete_game_artifacts(
     }
 
 
+def validate_speech_annotation_artifact(
+    speech_annotations_path: str | Path,
+    trajectory_path: str | Path,
+) -> dict[str, Any]:
+    """Bind every parser annotation to the immutable canonical speech text."""
+
+    speech_annotations_path = Path(speech_annotations_path)
+    trajectory = _load_json_object(Path(trajectory_path))
+    public_events = list(trajectory["initial_public_events"])
+    for transition in trajectory["transitions"]:
+        public_events.extend(transition["public_events_appended"])
+    public_events = normalize_public_events(public_events)
+    annotations = normalize_speech_annotations(
+        _load_jsonl_objects(speech_annotations_path),
+        public_events=public_events,
+        require_complete=True,
+    )
+    failed = [
+        annotation["event_idx"]
+        for annotation in annotations
+        if annotation["status"] == STATUS_ERROR
+    ]
+    if failed:
+        raise ValueError(
+            "canonical speech annotations require successful parsing; "
+            f"error_event_indices={failed}"
+        )
+    non_parser = [
+        annotation["event_idx"]
+        for annotation in annotations
+        if annotation["annotation_source"] != "llm_parser"
+    ]
+    if non_parser:
+        raise ValueError(
+            "canonical collection forbids generator-contract annotations; "
+            f"event_indices={non_parser}"
+        )
+    return {
+        "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+        "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+        "speech_parser_prompt_version": SPEECH_PARSER_PROMPT_VERSION,
+        "speech_annotation_count": len(annotations),
+        "speech_annotation_action_count": sum(
+            len(annotation["actions"]) for annotation in annotations
+        ),
+        "speech_no_action_count": sum(
+            annotation["status"] == "no_action" for annotation in annotations
+        ),
+        "speech_annotation_digest": speech_annotation_digest(annotations),
+        "speech_annotations_sha256": _sha256(speech_annotations_path),
+    }
+
+
 def validate_belief_snapshot_artifact(
     belief_snapshots_path: str | Path,
     observer_views_path: str | Path,
@@ -804,6 +895,16 @@ def validate_belief_snapshot_artifact(
             raise ValueError("belief snapshot label provenance mismatch")
         if record["public_event_schema_version"] != PUBLIC_EVENT_SCHEMA_VERSION:
             raise ValueError("belief snapshot public-event schema mismatch")
+        if (
+            record["speech_annotation_schema_version"]
+            != SPEECH_ANNOTATION_SCHEMA_VERSION
+        ):
+            raise ValueError("belief snapshot speech-annotation schema mismatch")
+        if (
+            record["speech_action_ontology_version"]
+            != SPEECH_ACTION_ONTOLOGY_VERSION
+        ):
+            raise ValueError("belief snapshot speech-action ontology mismatch")
 
         step_idx = record["step_idx"]
         if isinstance(step_idx, bool) or not isinstance(step_idx, int):
@@ -870,6 +971,11 @@ def validate_belief_snapshot_artifact(
         if phases != {record["phase"]}:
             raise ValueError("belief snapshot phase differs from PRE observer views")
         public_events = normalize_public_events(record["public_events"])
+        speech_annotations = normalize_speech_annotations(
+            record["speech_annotations"],
+            public_events=public_events,
+            require_complete=True,
+        )
         if len(public_events) != boundary["public_event_count_at_materialization"]:
             raise ValueError("belief snapshot public cutoff count mismatch")
         if record["public_event_digest"] != public_event_digest(public_events):
@@ -878,9 +984,18 @@ def validate_belief_snapshot_artifact(
             boundary["public_event_digest_at_materialization"]
         ):
             raise ValueError("belief snapshot public cutoff differs from PRE boundary")
-        if record["structured_input_digest"] != structured_input_digest(public_events):
+        if record["speech_annotation_digest"] != speech_annotation_digest(
+            speech_annotations
+        ):
+            raise ValueError("belief snapshot speech annotation digest mismatch")
+        if record["structured_input_digest"] != structured_input_digest(
+            public_events,
+            speech_annotations,
+        ):
             raise ValueError("belief snapshot structured input digest mismatch")
-        if record["public_action_count"] != len(public_speech_actions(public_events)):
+        if record["public_action_count"] != len(
+            public_speech_actions(public_events, speech_annotations)
+        ):
             raise ValueError("belief snapshot public action count mismatch")
 
     if seen_steps != set(pre_boundaries):
@@ -926,12 +1041,20 @@ def _batch_plan(
         "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
         "observer_view_schema_version": OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION,
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
+        "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+        "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+        "speech_parser_prompt_version": SPEECH_PARSER_PROMPT_VERSION,
         "config_sha256": config_sha256,
         "normalized_runtime_config_digest": normalized_runtime_config_digest,
         "seeds": list(seeds),
         "planned_game_count": len(seeds),
         "canonical_runtime_builder": "run_random.build_runtime",
         "canonical_game_driver": "run_random.eval",
+        "canonical_replay_validator": (
+            "script.twd_tom.replay_canonical_trajectory."
+            "replay_canonical_trajectory"
+        ),
+        "deterministic_replay_required": True,
         "collectors_enabled": True,
         "collection_contract": dict(collection_contract),
         "backend_max_retries": BACKEND_MAX_RETRIES,
@@ -1048,6 +1171,7 @@ def collect_canonical_trajectory_batch(
             trajectory_path = game_dir / "trajectory.json"
             observer_views_path = game_dir / "observer_views.json"
             belief_snapshots_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
+            speech_annotations_path = game_dir / SPEECH_ANNOTATIONS_FILENAME
             call_audit_path = game_dir / "call_audit.json"
             summary_path = game_dir / "summary.json"
             call_audit = GameCallBudgetAudit(
@@ -1109,6 +1233,15 @@ def collect_canonical_trajectory_batch(
                     call_audit.assert_wall_budget()
                 finally:
                     belief_collector.close()
+                normalized_annotations = normalize_speech_annotations(
+                    env.speech_annotations,
+                    public_events=env.public_events,
+                    require_complete=True,
+                )
+                _write_jsonl_new(
+                    speech_annotations_path,
+                    normalized_annotations,
+                )
                 call_audit_record = call_audit.snapshot()
                 if not call_audit_record["within_budget"]:
                     raise RuntimeError("game call audit finished outside its budget")
@@ -1121,6 +1254,12 @@ def collect_canonical_trajectory_batch(
                     expected_run_id=run_id,
                     expected_seed=seed,
                     expected_source_commit=provenance["batch_code_commit"],
+                )
+                validation.update(
+                    validate_speech_annotation_artifact(
+                        speech_annotations_path,
+                        trajectory_path,
+                    )
                 )
                 validation.update(
                     validate_belief_snapshot_artifact(
@@ -1136,6 +1275,11 @@ def collect_canonical_trajectory_batch(
                 expected_result = f"{validation['winner']} win"
                 if result != expected_result:
                     raise ValueError("run_random result disagrees with trajectory winner")
+                stage = "deterministic_replay"
+                validation["deterministic_replay"] = replay_canonical_trajectory(
+                    trajectory_path,
+                    observer_views_path,
+                )
                 validation["run_random_result"] = result
                 validation["call_audit"] = call_audit_record
                 game_summary = _game_summary(validation, summary_path=summary_path)
@@ -1186,11 +1330,21 @@ def collect_canonical_trajectory_batch(
             "total_observer_view_count": sum(
                 game["observer_view_count"] for game in completed_games
             ),
+            "deterministic_replay_match_count": sum(
+                game["deterministic_replay"]["status"] == "MATCH"
+                for game in completed_games
+            ),
             "total_belief_snapshot_count": sum(
                 game["belief_snapshot_count"] for game in completed_games
             ),
             "total_belief_report_count": sum(
                 game["belief_report_count"] for game in completed_games
+            ),
+            "total_speech_annotation_count": sum(
+                game["speech_annotation_count"] for game in completed_games
+            ),
+            "total_speech_annotation_action_count": sum(
+                game["speech_annotation_action_count"] for game in completed_games
             ),
             "total_gameplay_call_count": sum(
                 game["call_audit"]["gameplay_call_count"]

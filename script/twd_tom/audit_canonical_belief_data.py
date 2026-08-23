@@ -177,7 +177,12 @@ def audit_canonical_belief_data(
         for record in records_by_game[game_id]
     ]
     raw_token_counts = [
-        len(structured_event_tokens(record.get("public_events")))
+        len(
+            structured_event_tokens(
+                record.get("public_events"),
+                record.get("speech_annotations"),
+            )
+        )
         for record in all_records
     ]
     feature_builder = PublicEventFeatureBuilder(max_seq_len=max_seq_len)

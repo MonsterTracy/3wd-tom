@@ -25,6 +25,7 @@ from werewolf.models.twd_tom.public_events import (
     structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import PLAYER_TO_ID
+from werewolf.models.twd_tom.speech_annotations import speech_annotation_digest
 
 
 def test_dataset_consumes_raw_self_report_and_emits_fixed_belief_contract(
@@ -143,7 +144,9 @@ def test_generic_rotation_moves_observers_targets_public_references_and_masks(
         if event["event_type"] == "public_speech"
     )
     assert speech["speaker"] == "player4"
-    assert speech["sp_actions"] == [["player4", "point_as_werewolf", "player2"]]
+    assert rotated_raw["speech_annotations"][0]["actions"] == [
+        ["player4", "point_as_werewolf", "player2"]
+    ]
 
     rotated = TWDToMDataset([rotated_raw])[0]
     torch.testing.assert_close(
@@ -181,26 +184,23 @@ def test_rotation_preserves_targetless_public_action_object(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory()
-    speech = next(
-        event for event in sample["public_events"]
-        if event["event_type"] == "public_speech"
-    )
-    speech["sp_actions"] = [
+    annotation = sample["speech_annotations"][0]
+    annotation["actions"] = [
         ["player2", "oppose", "player5"],
         ["player2", "abstain_intent", None],
         ["player2", "no_commitment", None],
     ]
+    annotation["status"] = "ok"
     sample["public_action_count"] = 3
     sample["public_event_digest"] = public_event_digest(sample["public_events"])
+    sample["speech_annotation_digest"] = speech_annotation_digest(
+        sample["speech_annotations"]
+    )
     sample["structured_input_digest"] = structured_input_digest(
-        sample["public_events"]
+        sample["public_events"], sample["speech_annotations"]
     )
     rotated = cyclically_rotate_belief_sample(sample, shift=3)
-    rotated_speech = next(
-        event for event in rotated["public_events"]
-        if event["event_type"] == "public_speech"
-    )
-    assert rotated_speech["sp_actions"] == [
+    assert rotated["speech_annotations"][0]["actions"] == [
         ["player5", "oppose", "player1"],
         ["player5", "abstain_intent", None],
         ["player5", "no_commitment", None],
@@ -284,7 +284,7 @@ def test_public_cutoff_and_digest_validation_remain_strict(
     broken["public_events"][-1]["speaker"] = "player3"
     broken["public_event_digest"] = public_event_digest(broken["public_events"])
     broken["structured_input_digest"] = structured_input_digest(
-        broken["public_events"]
+        broken["public_events"], broken["speech_annotations"]
     )
     with pytest.raises(ValueError, match="matching turn_start"):
         TWDToMDataset([broken])

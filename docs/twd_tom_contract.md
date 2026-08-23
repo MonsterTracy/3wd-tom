@@ -6,11 +6,14 @@
 
 当前冻结版本：
 
-- raw sample：`classic7_pre_speech_player_suspicion_v3`；
+- raw sample：`classic7_pre_speech_player_suspicion_v4`；
 - label prompt：`classic7_pre_speech_player_suspicion_prompt_v4`；
 - label provenance：`alive_observer_readonly_pre_speech_report_v2`；
 - target conversion：`hard_knowledge_consistent_sparse_suspicion_uniform_support_v2`；
-- public event：`classic7_public_event_sequence_v3`。
+- public event：`classic7_public_event_sequence_v4`；
+- speech annotation：`classic7_speech_annotation_v1`；
+- speech action ontology：`classic7_speech_action_v1`；
+- speech parser prompt：`classic7_speech_parser_v1`。
 
 旧版本不做兼容读取或隐式迁移；需要重新采集。
 
@@ -62,7 +65,9 @@ collector 返回 sample 后，从该 sample 中提取当前 speaker 的同一行
 
 speaker report 非 `ok`、边界不匹配、agent 不支持专用入口或非 strict gameplay 时，必须在公开发言生成前失败。非 speaker 的报告不进入其行动上下文。
 
-公开发言继续只使用既有 action vocabulary 和确定性 renderer。候选 prompt 鼓励用现有 `support` / `oppose` 表达当前桌面判断；不增加 action 或监督标签。所有身份都禁止 `point_as_werewolf(observer)`，candidate builder 与 renderer 双重拒绝。
+day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过独立的自然语言 realization 调用生成 1–4 句中文公开原文。该原文进入 immutable `public_speech`；随后 speech parser 只接收公开原文、speaker、day 和 phase，解析到独立的 `speech_annotations.jsonl`。生成器 intent 不能直接成为 canonical annotation 或模型输入。所有身份都禁止 cognition 候选生成 `point_as_werewolf(observer)`；公开原文若明确自称狼人，parser 仍应忠实记录，因为 parser 不做真值过滤。
+
+模型侧使用 14 类冻结 ontology，其中 `point_as_non_werewolf` 表示泛化的非狼/好人判断，`point_as_villager` 只表示具体村民身份判断，查验非狼使用 `check_as_non_werewolf`。`abstain_intent` 与 `no_commitment` 使用空 target。完整事件、annotation、失败和重解析契约见 `public_speech_event_contract.md`。
 
 ## Canonical materialization
 
@@ -76,7 +81,7 @@ speaker report 非 `ok`、边界不匹配、agent 不支持专用入口或非 st
 
 ## 模型与目标函数
 
-模型输入只有结构化 `public_history <= t`，并对七个 canonical observer query 共享参数。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`。
+模型输入只有由 public event 与对应 speech annotation 投影出的结构化 `public_history <= t`，不编码自然语言 `raw_text`，并对七个 canonical observer query 共享参数。原文仍无损保存在 canonical artifact 中，以支持审计和未来重标注。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`。
 
 对每个存活 observer，在六个非自身 target 位置上计算 soft-target cross entropy；其中 hard knowledge 不允许的列已有 target 概率为 0。batch loss 是所有存活 observer 行的算术平均。死亡 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。checkpoint、metrics、train 和 eval 均使用这一单一目标，不保存旧任务阶数或组合类别字段。
 

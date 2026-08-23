@@ -152,7 +152,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             prompt,
         )
         for action_name in (
-            "check_as_good",
+            "check_as_non_werewolf",
             "check_as_werewolf",
             "save",
             "poison",
@@ -189,7 +189,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             prompt,
         )
 
-    def test_prompt_freezes_formal_core_thirteen_semantics(
+    def test_prompt_freezes_formal_core_fourteen_semantics(
         self,
     ):
         perceiver = SpeechPerceiver(
@@ -202,12 +202,13 @@ class SpeechPerceiverTest(unittest.TestCase):
 
         for action_name in (
             "point_as_werewolf",
+            "point_as_non_werewolf",
             "point_as_villager",
             "point_as_seer",
             "point_as_witch",
             "support",
             "oppose",
-            "check_as_good",
+            "check_as_non_werewolf",
             "check_as_werewolf",
             "save",
             "poison",
@@ -220,7 +221,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertNotIn("- guard", prompt)
         self.assertIn("好人阵营", prompt)
         self.assertIn("可信", prompt)
-        self.assertIn("都不能产生该动作", prompt)
+        self.assertIn("不能产生point_as_villager", prompt)
         self.assertIn("most-specific-source", prompt)
         self.assertIn("不得读取真实角色或环境技能记录", prompt)
         self.assertIn("vote_intent不等于环境实际vote", prompt)
@@ -299,12 +300,12 @@ class SpeechPerceiverTest(unittest.TestCase):
         self,
     ):
         actions = SpeechPerceiver._normalize(
-            parsed=[["player2", "check_as_good", "player3"]],
+            parsed=[["player2", "check_as_non_werewolf", "player3"]],
             speaker=2,
         )
         self.assertEqual(
             actions,
-            [["player2", "check_as_good", "player3"]],
+            [["player2", "check_as_non_werewolf", "player3"]],
         )
 
     def test_parse_keeps_most_specific_check_provenance(
@@ -313,7 +314,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         backend = FakeBackend(
             "\n".join(
                 [
-                    "player2 | check_as_good | player3",
+                    "player2 | check_as_non_werewolf | player3",
                     "player2 | check_as_werewolf | player4",
                 ]
             )
@@ -334,7 +335,7 @@ class SpeechPerceiverTest(unittest.TestCase):
                 phase="speech",
             ),
             [
-                ["player2", "check_as_good", "player3"],
+                ["player2", "check_as_non_werewolf", "player3"],
                 ["player2", "check_as_werewolf", "player4"],
             ],
         )
@@ -463,7 +464,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         backend = FakeBackend(
             "\n".join(
                 [
-                    "player1 | check_as_good | player1",
+                    "player1 | check_as_non_werewolf | player1",
                     "player1 | point_as_villager | player1",
                 ]
             )
@@ -482,7 +483,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ),
             [
                 ["player1", "point_as_villager", "player1"],
-                ["player1", "check_as_good", "player1"],
+                ["player1", "check_as_non_werewolf", "player1"],
             ],
         )
 
@@ -546,7 +547,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             ],
         )
 
-    def test_backend_failure_does_not_drop_literal_self_claim(
+    def test_backend_failure_does_not_promote_protected_claim_to_annotation(
         self,
     ):
         backend = FakeBackend(
@@ -566,16 +567,7 @@ class SpeechPerceiverTest(unittest.TestCase):
             phase="speech",
         )
 
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player6",
-                    "point_as_villager",
-                    "player6",
-                ]
-            ],
-        )
+        self.assertEqual(actions, [])
 
     def test_does_not_protect_non_specific_or_conditional_claims(
         self,
@@ -679,7 +671,7 @@ class SpeechPerceiverTest(unittest.TestCase):
         self,
     ):
         expected = [
-            ["player1", "check_as_good", "player2"],
+            ["player1", "check_as_non_werewolf", "player2"],
             ["player1", "check_as_werewolf", "player3"],
             ["player1", "save", "player4"],
             ["player1", "poison", "player5"],
@@ -714,6 +706,24 @@ class SpeechPerceiverTest(unittest.TestCase):
         ]
         perceiver = SpeechPerceiver(
             backend=FakeBackend(json.dumps(expected)),
+            model_name="test-model",
+        )
+
+        self.assertEqual(
+            perceiver.parse_strict(1, "公开发言", 1, "speech"),
+            expected,
+        )
+
+    def test_strict_accepts_targetless_pipe_actions_with_none_object(self):
+        expected = [
+            ["player1", "abstain_intent", None],
+            ["player1", "no_commitment", None],
+        ]
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(
+                "player1 | abstain_intent | NONE\n"
+                "player1 | no_commitment | null"
+            ),
             model_name="test-model",
         )
 

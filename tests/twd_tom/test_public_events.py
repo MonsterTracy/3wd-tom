@@ -9,10 +9,11 @@ from werewolf.models.twd_tom.public_events import (
     structured_event_tokens,
     structured_input_digest,
 )
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 
 
 def test_public_event_schema_identifies_extended_speech_actions():
-    assert PUBLIC_EVENT_SCHEMA_VERSION == "classic7_public_event_sequence_v3"
+    assert PUBLIC_EVENT_SCHEMA_VERSION == "classic7_public_event_sequence_v4"
 
 
 def _events():
@@ -32,7 +33,6 @@ def _events():
             "event_type": "public_speech",
             "speaker": "player1",
             "raw_text": "",
-            "sp_actions": [],
         },
         {
             "event_idx": 3,
@@ -57,9 +57,10 @@ def _events():
 
 def test_public_event_schema_accepts_all_canonical_event_types():
     assert normalize_public_events(_events()) == _events()
+    annotations = make_speech_annotations(_events())
     token_types = [
         token["token_type"]
-        for token in structured_event_tokens(_events())
+        for token in structured_event_tokens(_events(), annotations)
     ]
     assert token_types == [
         "phase_change",
@@ -106,41 +107,48 @@ def test_public_event_schema_rejects_noncanonical_or_private_payloads(mutate):
 
 def test_digests_separate_public_text_from_structured_model_input():
     first = _events()
+    first_annotations = make_speech_annotations(first)
     second = deepcopy(first)
     second[2]["raw_text"] = "same parsed structure, different public words"
+    second_annotations = make_speech_annotations(second)
     assert public_event_digest(first) != public_event_digest(second)
-    assert structured_input_digest(first) == structured_input_digest(second)
+    assert structured_input_digest(first, first_annotations) == (
+        structured_input_digest(second, second_annotations)
+    )
 
-    second[2]["sp_actions"] = [
-        ["player1", "point_as_werewolf", "player2"]
-    ]
+    second_annotations = make_speech_annotations(
+        second,
+        [["player1", "point_as_werewolf", "player2"]],
+    )
     assert public_event_digest(first) != public_event_digest(second)
-    assert structured_input_digest(first) != structured_input_digest(second)
+    assert structured_input_digest(first, first_annotations) != (
+        structured_input_digest(second, second_annotations)
+    )
     assert public_event_digest(first) == public_event_digest(deepcopy(first))
-    assert structured_input_digest(first) == structured_input_digest(
-        deepcopy(first)
+    assert structured_input_digest(first, first_annotations) == structured_input_digest(
+        deepcopy(first), deepcopy(first_annotations)
     )
 
 
 def test_public_speech_preserves_targetless_null_and_requires_speaker_subject():
     events = _events()
-    events[2]["sp_actions"] = [
+    annotations = make_speech_annotations(events, [
         ["player1", "abstain_intent", None],
         ["player1", "no_commitment", None],
-    ]
-    assert normalize_public_events(events)[2]["sp_actions"] == [
+    ])
+    assert annotations[0]["actions"] == [
         ["player1", "abstain_intent", None],
         ["player1", "no_commitment", None],
     ]
 
-    events[2]["sp_actions"] = [["player2", "oppose", "player3"]]
-    with pytest.raises(ValueError, match="subject must equal event speaker"):
-        normalize_public_events(events)
+    with pytest.raises(ValueError, match="subject must equal annotation speaker"):
+        make_speech_annotations(events, [["player2", "oppose", "player3"]])
 
 
 @pytest.mark.parametrize("event_index", [0, 3, 4, 5])
 def test_structured_digest_changes_for_public_system_facts(event_index):
     first = _events()
+    first_annotations = make_speech_annotations(first)
     second = deepcopy(first)
     event = second[event_index]
     if event["event_type"] == "phase_change":
@@ -151,4 +159,7 @@ def test_structured_digest_changes_for_public_system_facts(event_index):
         event["exiled_players"] = ["player2"]
     else:
         event["dead_players"] = []
-    assert structured_input_digest(first) != structured_input_digest(second)
+    second_annotations = make_speech_annotations(second)
+    assert structured_input_digest(first, first_annotations) != (
+        structured_input_digest(second, second_annotations)
+    )

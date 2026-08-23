@@ -14,6 +14,10 @@ from werewolf.models.twd_tom.public_events import (
     public_event_digest,
     structured_input_digest,
 )
+from werewolf.models.twd_tom.speech_annotations import (
+    make_speech_annotation,
+    speech_annotation_digest,
+)
 
 
 def _later_snapshot(sample):
@@ -28,7 +32,6 @@ def _later_snapshot(sample):
                 "event_type": "public_speech",
                 "speaker": speaker,
                 "raw_text": "later synthetic speech",
-                "sp_actions": [[speaker, "support", "player4"]],
             },
             {
                 "event_idx": len(later["public_events"]) + 1,
@@ -37,10 +40,29 @@ def _later_snapshot(sample):
             },
         ]
     )
+    speech_event = later["public_events"][-2]
+    later["speech_annotations"].append(
+        make_speech_annotation(
+            event_idx=speech_event["event_idx"],
+            speaker=speaker,
+            raw_text=speech_event["raw_text"],
+            parser_model_id="synthetic_parser",
+            parser_call_id=f"synthetic_{speech_event['event_idx']:06d}",
+            annotation_source="generator_contract",
+            status="ok",
+            actions=[[speaker, "support", "player4"]],
+            raw_response=None,
+            error_type=None,
+            error_message=None,
+        )
+    )
     later["speaker_id"] = 3
     later["public_event_digest"] = public_event_digest(later["public_events"])
+    later["speech_annotation_digest"] = speech_annotation_digest(
+        later["speech_annotations"]
+    )
     later["structured_input_digest"] = structured_input_digest(
-        later["public_events"]
+        later["public_events"], later["speech_annotations"]
     )
     later["public_action_count"] += 1
     return later

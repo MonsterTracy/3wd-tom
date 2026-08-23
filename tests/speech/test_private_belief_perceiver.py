@@ -8,6 +8,7 @@ from werewolf.helper.log_utils import Log
 from werewolf.models.twd_tom.public_events import copy_public_events
 from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_JSON_SCHEMA,
     PRIVATE_BELIEF_MAX_TOKENS,
@@ -31,6 +32,29 @@ class CapturingBackend:
 
 
 def _snapshot():
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "turn_start",
+            "speaker": "player2",
+        },
+        {
+            "event_idx": 2,
+            "event_type": "public_speech",
+            "speaker": "player2",
+            "raw_text": "earlier public speech",
+        },
+        {
+            "event_idx": 3,
+            "event_type": "turn_start",
+            "speaker": "player3",
+        },
+    ]
     return freeze_public_snapshot(
         game_id="game_001",
         step_idx=2,
@@ -38,32 +62,11 @@ def _snapshot():
         speaker_id=3,
         report_trigger="pre_public_speech",
         observer_ids=[1, 2, 3],
-        public_events=[
-            {
-                "event_idx": 0,
-                "event_type": "phase_change",
-                "phase": "1_day_speech",
-            },
-            {
-                "event_idx": 1,
-                "event_type": "turn_start",
-                "speaker": "player2",
-            },
-            {
-                "event_idx": 2,
-                "event_type": "public_speech",
-                "speaker": "player2",
-                "raw_text": "earlier public speech",
-                "sp_actions": [
-                    ["player2", "point_as_werewolf", "player6"]
-                ],
-            },
-            {
-                "event_idx": 3,
-                "event_type": "turn_start",
-                "speaker": "player3",
-            },
-        ],
+        public_events=events,
+        speech_annotations=make_speech_annotations(
+            events,
+            [["player2", "point_as_werewolf", "player6"]],
+        ),
     )
 
 
@@ -134,12 +137,12 @@ def test_prompt_defines_hard_knowledge_consistent_player_suspicion():
         "Your observer identity is exactly: player3",
         "player1, player2, player3, player4, player5, player6, player7",
         '"raw_text":"earlier public speech"',
-        '"sp_actions":[["player2","point_as_werewolf","player6"]]',
         "Canonical pre-speech public_events:",
         '{"suspected_werewolves":[...]}',
         f"prompt_version: {LABEL_PROMPT_VERSION}",
     ):
         assert required in prompt
+    assert "sp_actions" not in prompt
     for forbidden in (
         "belief_mode",
         "no_extra_narrowing",

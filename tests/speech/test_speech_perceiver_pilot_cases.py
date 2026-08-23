@@ -349,11 +349,11 @@ class SpeechPerceiverPilotCasesTest(
                 1,
                 "我验3号金水，也同意他的逻辑。",
                 (
-                    "player1 | check_as_good | player3\n"
+                    "player1 | check_as_non_werewolf | player3\n"
                     "player1 | support | player3"
                 ),
                 [
-                    ["player1", "check_as_good", "player3"],
+                    ["player1", "check_as_non_werewolf", "player3"],
                     ["player1", "support", "player3"],
                 ],
             ),
@@ -407,11 +407,11 @@ class SpeechPerceiverPilotCasesTest(
                 "我认为 player1 是村民。查验 player5 的结果是好人。",
                 (
                     "player6 | point_as_villager | player1\n"
-                    "player6 | check_as_good | player5"
+                    "player6 | check_as_non_werewolf | player5"
                 ),
                 [
                     ["player6", "point_as_villager", "player1"],
-                    ["player6", "check_as_good", "player5"],
+                    ["player6", "check_as_non_werewolf", "player5"],
                 ],
             ),
             (
@@ -435,11 +435,11 @@ class SpeechPerceiverPilotCasesTest(
                 "经过查验，player4 是预言家，而查验 player2 的结果为好人。",
                 (
                     "player7 | point_as_seer | player4\n"
-                    "player7 | check_as_good | player2"
+                    "player7 | check_as_non_werewolf | player2"
                 ),
                 [
                     ["player7", "point_as_seer", "player4"],
-                    ["player7", "check_as_good", "player2"],
+                    ["player7", "check_as_non_werewolf", "player2"],
                 ],
             ),
         )

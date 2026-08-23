@@ -14,6 +14,12 @@ from werewolf.speech.speech_perceiver import (
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.models.twd_tom.public_events import normalize_public_event
 from werewolf.models.twd_tom.schema import normalize_player
+from werewolf.models.twd_tom.speech_annotations import (
+    STATUS_ERROR,
+    STATUS_NO_ACTION,
+    STATUS_OK,
+    make_speech_annotation,
+)
 
 
 class WerewolfTextEnvV0(gym.Env):
@@ -40,6 +46,15 @@ class WerewolfTextEnvV0(gym.Env):
         self.village_reward = kwargs.get('village_reward', 1)
         self.game_log = []
         self.public_events = []
+        self.speech_annotations = []
+
+        random_seed = kwargs.get('random_seed')
+        if random_seed is not None and (
+            isinstance(random_seed, bool) or not isinstance(random_seed, int)
+        ):
+            raise TypeError("random_seed must be an integer or None")
+        self.random_seed = random_seed
+        self._rng = random.Random(random_seed)
 
         self.log_save_path = kwargs.get('log_save_path', os.path.join(os.getcwd(), 'tmp_logs'))
         speech_perceiver = kwargs.get('speech_perceiver')
@@ -105,8 +120,9 @@ class WerewolfTextEnvV0(gym.Env):
         if 'roles' in kwargs:
             self.roles = list(kwargs['roles'])
         else:
-            random.shuffle(self.roles)
+            self._rng.shuffle(self.roles)
         self._validate_roles()
+        self.speech_annotations = []
 
         self.WOLF_IDX = [idx for idx, role in enumerate(self.roles) if role == 'Werewolf']
         self.SEER_IDX = self.roles.index('Seer')
@@ -338,6 +354,8 @@ class WerewolfTextEnvV0(gym.Env):
             reward, done, info = self.end_night()
         elif self.phase == 'speech' or self.phase == 'speech_pk':
             assert action_type == 'speech' or action_type == 'speech_pk'
+            event_idx = len(self.public_events)
+            speaker = normalize_player(self.current_act_idx + 1)
             if isinstance(action_content, Mapping):
                 expected_fields = {"raw_text", "sp_actions"}
                 if set(action_content) != expected_fields:
@@ -349,23 +367,79 @@ class WerewolfTextEnvV0(gym.Env):
                     )
                 raw_text = action_content["raw_text"]
                 sp_actions = action_content["sp_actions"]
+                status = STATUS_OK if sp_actions else STATUS_NO_ACTION
+                annotation = make_speech_annotation(
+                    event_idx=event_idx,
+                    speaker=speaker,
+                    raw_text=raw_text,
+                    parser_model_id="generator_contract",
+                    parser_call_id=f"speech_generator_event_{event_idx:06d}",
+                    annotation_source="generator_contract",
+                    status=status,
+                    actions=sp_actions,
+                    raw_response=None,
+                    error_type=None,
+                    error_message=None,
+                )
             elif isinstance(action_content, str):
                 raw_text = action_content
-                sp_actions = self.speech_perceiver.parse(
-                    speaker=self.current_act_idx + 1,
-                    speech=raw_text,
-                    day=self.day,
-                    phase=self.phase,
+                parse_with_audit = getattr(
+                    self.speech_perceiver, "parse_with_audit", None
+                )
+                if callable(parse_with_audit):
+                    audit = parse_with_audit(
+                        speaker=self.current_act_idx + 1,
+                        speech=raw_text,
+                        day=self.day,
+                        phase=self.phase,
+                    )
+                    if audit.parse_status == "ok":
+                        sp_actions = audit.normalized_actions
+                        status = STATUS_OK if sp_actions else STATUS_NO_ACTION
+                        error_type = None
+                        error_message = None
+                    else:
+                        sp_actions = []
+                        status = STATUS_ERROR
+                        error_type = audit.error_type or "SpeechParserError"
+                        error_message = audit.error_message or "speech parser failed"
+                    raw_response = audit.raw_response
+                else:
+                    sp_actions = self.speech_perceiver.parse(
+                        speaker=self.current_act_idx + 1,
+                        speech=raw_text,
+                        day=self.day,
+                        phase=self.phase,
+                    )
+                    status = STATUS_OK if sp_actions else STATUS_NO_ACTION
+                    raw_response = None
+                    error_type = None
+                    error_message = None
+                annotation = make_speech_annotation(
+                    event_idx=event_idx,
+                    speaker=speaker,
+                    raw_text=raw_text,
+                    parser_model_id=(
+                        getattr(self.speech_perceiver, "model_name", None)
+                        or type(self.speech_perceiver).__name__
+                    ),
+                    parser_call_id=f"speech_parser_event_{event_idx:06d}",
+                    annotation_source="llm_parser",
+                    status=status,
+                    actions=sp_actions,
+                    raw_response=raw_response,
+                    error_type=error_type,
+                    error_message=error_message,
                 )
             else:
                 raise TypeError("speech content must be text or a mapping")
 
             speech_event = self._append_public_event(
                 "public_speech",
-                speaker=normalize_player(self.current_act_idx + 1),
+                speaker=speaker,
                 raw_text=raw_text,
-                sp_actions=sp_actions,
             )
+            self.speech_annotations.append(annotation)
 
             self.game_log.append(
                 Log(
@@ -374,7 +448,6 @@ class WerewolfTextEnvV0(gym.Env):
                     target=[i for i in range(self.n_player)],
                     content={
                         'speech_content': speech_event["raw_text"],
-                        'sp_actions': deepcopy(speech_event["sp_actions"]),
                     },
                     day=self.day,
                     time=self.get_time(),
@@ -455,12 +528,12 @@ class WerewolfTextEnvV0(gym.Env):
         if witch_poison_idx != -1:
             dead_idx.add(witch_poison_idx)
 
-        for dead in list(dead_idx):
+        for dead in sorted(dead_idx):
             self.alive[dead] = 0.
 
         self.game_log.append(
-            Log(viewer=[i for i in range(self.n_player)], source=-1, target=list(dead_idx),
-                content={'dead_list': list(dead_idx)}, day=self.day,
+            Log(viewer=[i for i in range(self.n_player)], source=-1, target=sorted(dead_idx),
+                content={'dead_list': sorted(dead_idx)}, day=self.day,
                 time=self.get_time(), event='end_night'))
         self._append_public_event(
             "death_announcement",
@@ -480,7 +553,7 @@ class WerewolfTextEnvV0(gym.Env):
         self.phase = 'speech'
         tmp_speech_queue = [idx for idx, live in enumerate(self.alive) if live == 1]
         assert len(tmp_speech_queue) > 0
-        speak_n = random.randint(0, len(tmp_speech_queue))
+        speak_n = self._rng.randint(0, len(tmp_speech_queue))
         self.speech_queue = tmp_speech_queue[speak_n:] + tmp_speech_queue[:speak_n]
         self.current_act_idx = self.speech_queue.pop(0)
         self._append_public_phase()
@@ -518,7 +591,7 @@ class WerewolfTextEnvV0(gym.Env):
                             tmp_speech_queue.append(player_idx)
                     assert len(tmp_speech_queue) > 1
                     tmp_speech_queue.sort()
-                    speak_n = random.randint(0, len(tmp_speech_queue))
+                    speak_n = self._rng.randint(0, len(tmp_speech_queue))
                     self.speech_queue = tmp_speech_queue[speak_n:] + tmp_speech_queue[:speak_n]
 
                     self.vote_queue = [
@@ -607,21 +680,18 @@ class WerewolfTextEnvV0(gym.Env):
 
     def is_done(self):
         wolf_count = 0
-        villager_count = 0
-        god_count = 0
+        non_wolf_count = 0
         for idx, role in enumerate(self.roles):
             if self.alive[idx] == 1.:
                 if role == 'Werewolf':
                     wolf_count += 1
-                elif role == 'Villager':
-                    villager_count += 1
                 else:
-                    god_count += 1
+                    non_wolf_count += 1
         if wolf_count == 0:
             done = True
             reward = [-self.werewolf_reward if role == 'Werewolf' else self.village_reward for role in self.roles]
             info = {'Werewolf': -1}
-        elif villager_count == 0 or god_count == 0:
+        elif wolf_count >= non_wolf_count:
             done = True
             reward = [self.werewolf_reward if role == 'Werewolf' else -self.village_reward for role in self.roles]
             info = {'Werewolf': 1}

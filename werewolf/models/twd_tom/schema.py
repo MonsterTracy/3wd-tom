@@ -55,12 +55,13 @@ CANONICAL_PLAYER_ORDERING = PLAYER_NAMES
 # PAD_TOKEN is not a raw action. It is reserved for tensor padding.
 ACTION_NAMES: tuple[str, ...] = (
     "point_as_werewolf",
+    "point_as_non_werewolf",
     "point_as_villager",
     "point_as_seer",
     "point_as_witch",
     "support",
     "oppose",
-    "check_as_good",
+    "check_as_non_werewolf",
     "check_as_werewolf",
     "save",
     "poison",

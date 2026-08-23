@@ -28,8 +28,9 @@
 4. 使用 `configs/twd_tom_server_qwen35_9b.yaml`；CLI 的 seed 范围和 game count 必须与其中 `pipeline.collection` 完全相同。
 5. 为每次尝试选择全新的 `run_id` 和不存在的输出目录，例如 `/data/yuxiao/3wd-tom/canonical_data/<run_id>`。
 6. 运行 `python -m script.twd_tom.collect_canonical_trajectories ...`。不启用自动重试、replacement seed 或 provider fallback。
-7. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；只有 audit `status=PASS` 才能物化数据集。
-8. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
+7. 逐局确认存在 `speech_annotations.jsonl`；每条公开发言都必须是 `annotation_source=llm_parser` 且不能是 `status=error`。生成器 intent 不能替代独立 parser 标注。
+8. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；只有 audit `status=PASS` 才能物化数据集。
+9. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
 
 ## 数据物化、训练与评估
 

@@ -66,11 +66,11 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
         "event_type": "public_speech",
         "speaker": speaker,
         "raw_text": "final public text",
-        "sp_actions": [
-            [speaker, "support", "player2"],
-            [speaker, "oppose", "player3"],
-        ],
     }
+    assert env.speech_annotations[-1]["actions"] == [
+        [speaker, "support", "player2"],
+        [speaker, "oppose", "player3"],
+    ]
     assert len(
         [
             event
@@ -106,10 +106,9 @@ def test_structured_speech_bypasses_parser_and_commits_exact_semantics():
         log for log in env.game_log if log.event == "speech"
     )
     assert public_speech["raw_text"] == payload["raw_text"]
-    assert public_speech["sp_actions"] == payload["sp_actions"]
+    assert env.speech_annotations[-1]["actions"] == payload["sp_actions"]
     assert speech_log.content == {
         "speech_content": payload["raw_text"],
-        "sp_actions": public_speech["sp_actions"],
     }
 
 
@@ -122,7 +121,7 @@ def test_structured_targetless_speech_commits_null(action_name):
         "raw_text": "targetless",
         "sp_actions": [[speaker, action_name, None]],
     }))
-    assert env.public_events[-2]["sp_actions"] == [
+    assert env.speech_annotations[-1]["actions"] == [
         [speaker, action_name, None]
     ]
 
@@ -134,7 +133,7 @@ def test_structured_speech_rejects_wrong_subject_and_extra_fields():
     speaker = f"player{env.current_act_idx + 1}"
     wrong_speaker = "player1" if speaker != "player1" else "player2"
 
-    with pytest.raises(ValueError, match="subject must equal event speaker"):
+    with pytest.raises(ValueError, match="subject must equal annotation speaker"):
         env.step(("speech", {
             "raw_text": "x",
             "sp_actions": [[wrong_speaker, "oppose", "player2"]],
@@ -169,7 +168,8 @@ def test_empty_death_and_empty_speech_remain_explicit_events():
         if event["event_type"] == "public_speech"
     )
     assert speech["raw_text"] == ""
-    assert speech["sp_actions"] == []
+    assert env.speech_annotations[-1]["actions"] == []
+    assert env.speech_annotations[-1]["status"] == "no_action"
 
 
 def test_public_vote_records_canonical_ballots_exile_and_night_transition():

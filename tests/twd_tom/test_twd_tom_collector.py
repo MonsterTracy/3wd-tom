@@ -7,6 +7,7 @@ from werewolf.models.twd_tom.collector import TWDToMSampleCollector
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION
 from werewolf.models.twd_tom.samples import PublicSnapshot, SAMPLE_SCHEMA_VERSION
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 
 
 class Env:
@@ -22,9 +23,6 @@ class Env:
                 "event_type": "public_speech",
                 "speaker": "player1",
                 "raw_text": "earlier",
-                "sp_actions": [
-                    ["player1", "point_as_werewolf", "player7"]
-                ],
             },
             {
                 "event_idx": 2,
@@ -32,6 +30,10 @@ class Env:
                 "speaker": "player3",
             },
         ]
+        self.speech_annotations = make_speech_annotations(
+            self.public_events,
+            [["player1", "point_as_werewolf", "player7"]],
+        )
 
 
 class SnapshotCollector:
@@ -58,7 +60,7 @@ def test_collector_freezes_then_writes_player_suspicion_jsonl(tmp_path):
     record = json.loads(path.read_text(encoding="utf-8"))
     assert record == sample
     assert record["schema_version"] == SAMPLE_SCHEMA_VERSION
-    assert record["schema_version"] == "classic7_pre_speech_player_suspicion_v3"
+    assert record["schema_version"] == "classic7_pre_speech_player_suspicion_v4"
     assert record["label_prompt_version"] == LABEL_PROMPT_VERSION
     assert record["label_prompt_version"] == (
         "classic7_pre_speech_player_suspicion_prompt_v4"
@@ -70,7 +72,9 @@ def test_collector_freezes_then_writes_player_suspicion_jsonl(tmp_path):
     assert "pair_targets" not in record
     assert record["label_cutoff_step_idx"] == record["step_idx"] == 2
     assert record["public_action_count"] == len(
-        public_speech_actions(record["public_events"])
+        public_speech_actions(
+            record["public_events"], record["speech_annotations"]
+        )
     )
     assert len(snapshot_collector.snapshots) == 1
     assert not {
@@ -93,7 +97,6 @@ def test_collector_uses_exact_pre_speech_history(tmp_path):
             "event_type": "public_speech",
             "speaker": "player3",
             "raw_text": "current speech",
-            "sp_actions": [["player3", "oppose", "player4"]],
         }
         env.public_events.append(
             {

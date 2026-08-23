@@ -38,6 +38,12 @@ from werewolf.models.twd_tom.schema import (
     normalize_player,
     validate_player_suspicion,
 )
+from werewolf.models.twd_tom.speech_annotations import (
+    SPEECH_ACTION_ONTOLOGY_VERSION,
+    SPEECH_ANNOTATION_SCHEMA_VERSION,
+    normalize_speech_annotations,
+    speech_annotation_digest,
+)
 from werewolf.speech.private_belief_perceiver import STATUS_OK
 
 
@@ -141,8 +147,11 @@ def cyclically_rotate_belief_sample(
         event_type = event.get("event_type")
         if event_type in {"turn_start", "public_speech"}:
             event["speaker"] = _rotate_player_name(event["speaker"], shift=shift)
-        if event_type == "public_speech":
-            event["sp_actions"] = [
+    for annotation in rotated["speech_annotations"]:
+        annotation["speaker"] = _rotate_player_name(
+            annotation["speaker"], shift=shift
+        )
+        annotation["actions"] = [
                 [
                     _rotate_player_name(action[0], shift=shift),
                     action[1],
@@ -150,9 +159,11 @@ def cyclically_rotate_belief_sample(
                     if action[2] is None
                     else _rotate_player_name(action[2], shift=shift),
                 ]
-                for action in event["sp_actions"]
+                for action in annotation["actions"]
             ]
-        elif event_type == "vote_result":
+    for event in rotated["public_events"]:
+        event_type = event.get("event_type")
+        if event_type == "vote_result":
             event["votes"] = sorted(
                 (
                     {
@@ -175,8 +186,12 @@ def cyclically_rotate_belief_sample(
             )
 
     rotated["public_event_digest"] = public_event_digest(rotated["public_events"])
+    rotated["speech_annotation_digest"] = speech_annotation_digest(
+        rotated["speech_annotations"]
+    )
     rotated["structured_input_digest"] = structured_input_digest(
-        rotated["public_events"]
+        rotated["public_events"],
+        rotated["speech_annotations"],
     )
     return rotated
 
@@ -338,16 +353,39 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         raise ValueError("unsupported report_trigger")
     if sample.get("public_event_schema_version") != PUBLIC_EVENT_SCHEMA_VERSION:
         raise ValueError("unsupported public_event_schema_version")
-    if sample.get("public_action_count") != len(public_speech_actions(public_events)):
+    if sample.get("speech_annotation_schema_version") != (
+        SPEECH_ANNOTATION_SCHEMA_VERSION
+    ):
+        raise ValueError("unsupported speech_annotation_schema_version")
+    if sample.get("speech_action_ontology_version") != (
+        SPEECH_ACTION_ONTOLOGY_VERSION
+    ):
+        raise ValueError("unsupported speech_action_ontology_version")
+    speech_annotations = normalize_speech_annotations(
+        sample.get("speech_annotations"),
+        public_events=public_events,
+        require_complete=True,
+    )
+    if sample.get("speech_annotation_digest") != speech_annotation_digest(
+        speech_annotations
+    ):
+        raise ValueError("speech_annotation_digest does not match annotations")
+    if sample.get("public_action_count") != len(
+        public_speech_actions(public_events, speech_annotations)
+    ):
         raise ValueError("public_action_count must equal the public speech-action count")
     if sample.get("public_event_digest") != public_event_digest(public_events):
         raise ValueError("public_event_digest does not match public_events")
-    if sample.get("structured_input_digest") != structured_input_digest(public_events):
+    if sample.get("structured_input_digest") != structured_input_digest(
+        public_events,
+        speech_annotations,
+    ):
         raise ValueError("structured_input_digest does not match public_events")
 
     normalized = deepcopy(dict(sample))
     normalized["observer_ids"] = observer_ids
     normalized["public_events"] = public_events
+    normalized["speech_annotations"] = speech_annotations
     for field_name, value in mappings.items():
         normalized[field_name] = value
     normalized["_belief_targets"] = targets
@@ -461,7 +499,10 @@ class TWDToMDataset(Dataset):
                     shift=shift,
                 )
             )
-        features = self.feature_builder.encode_events(sample["public_events"])
+        features = self.feature_builder.encode_events(
+            sample["public_events"],
+            sample["speech_annotations"],
+        )
         belief_targets = torch.zeros(
             (NUM_PLAYERS, NUM_PLAYERS),
             dtype=self.target_dtype,

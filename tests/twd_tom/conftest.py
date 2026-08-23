@@ -3,17 +3,12 @@ import os
 
 import pytest
 
-from werewolf.models.twd_tom.public_events import (
-    PUBLIC_EVENT_SCHEMA_VERSION,
-    public_event_digest,
-    structured_input_digest,
-)
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import (
     LABEL_PROVENANCE,
     LABEL_PROMPT_VERSION,
 )
-from tests.twd_tom.public_event_fixtures import make_public_events
+from tests.twd_tom.public_event_fixtures import public_history_fields
 from tests.twd_tom.public_event_fixtures import make_training_sample
 
 
@@ -28,7 +23,7 @@ def suspicion_sample_factory():
         failed_observer=None,
     ):
         actions = [["player2", "point_as_werewolf", "player7"]]
-        public_events = make_public_events(actions, speaker_id=2)
+        public_history = public_history_fields(actions, speaker_id=2)
         suspicions = {}
         statuses = {}
         errors = {}
@@ -62,10 +57,7 @@ def suspicion_sample_factory():
             "phase": "1_day_speech",
             "speaker_id": 2,
             "observer_ids": list(observers),
-            "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
-            "public_events": deepcopy(public_events),
-            "public_event_digest": public_event_digest(public_events),
-            "structured_input_digest": structured_input_digest(public_events),
+            **deepcopy(public_history),
             "suspected_werewolves": suspicions,
             "known_werewolves": known_werewolves,
             "known_non_werewolves": known_non_werewolves,

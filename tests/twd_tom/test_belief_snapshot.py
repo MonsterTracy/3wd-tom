@@ -7,6 +7,7 @@ from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
 )
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
 )
@@ -66,6 +67,24 @@ class FakeReporter:
 
 
 def _snapshot(observers=(1, 3, 7)):
+    events = [
+        {
+            "event_idx": 0,
+            "event_type": "phase_change",
+            "phase": "1_day_speech_pk",
+        },
+        {
+            "event_idx": 1,
+            "event_type": "public_speech",
+            "speaker": "player7",
+            "raw_text": "earlier speech",
+        },
+        {
+            "event_idx": 2,
+            "event_type": "turn_start",
+            "speaker": "player3",
+        },
+    ]
     return freeze_public_snapshot(
         game_id="game_001",
         step_idx=4,
@@ -73,25 +92,11 @@ def _snapshot(observers=(1, 3, 7)):
         speaker_id=3,
         report_trigger="pre_public_speech_pk",
         observer_ids=observers,
-        public_events=[
-            {
-                "event_idx": 0,
-                "event_type": "phase_change",
-                "phase": "1_day_speech_pk",
-            },
-            {
-                "event_idx": 1,
-                "event_type": "public_speech",
-                "speaker": "player7",
-                "raw_text": "earlier speech",
-                "sp_actions": [["player7", "oppose", "player3"]],
-            },
-            {
-                "event_idx": 2,
-                "event_type": "turn_start",
-                "speaker": "player3",
-            },
-        ],
+        public_events=events,
+        speech_annotations=make_speech_annotations(
+            events,
+            [["player7", "oppose", "player3"]],
+        ),
     )
 
 

@@ -105,6 +105,10 @@ class TWDToMSampleCollector:
             raise TypeError(
                 "environment must provide public_events"
             )
+        if not hasattr(env, "speech_annotations"):
+            raise TypeError(
+                "environment must provide speech_annotations"
+            )
 
         if isinstance(step_idx, bool) or not isinstance(step_idx, int):
             raise TypeError("step_idx is required")
@@ -121,6 +125,7 @@ class TWDToMSampleCollector:
             report_trigger=report_trigger,
             observer_ids=normalized_observers,
             public_events=env.public_events,
+            speech_annotations=env.speech_annotations,
         )
 
         reports = self.snapshot_collector.collect(

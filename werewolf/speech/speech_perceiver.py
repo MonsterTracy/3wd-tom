@@ -18,7 +18,7 @@ _PIPE_TRIPLET_PATTERN = re.compile(
     r"(?P<action>[a-zA-Z_]+)"
     r"\s*[|｜]\s*"
     r"(?P<object>(?:player\s*[1-7]\s*至\s*player\s*[1-7]|"
-    r"(?:player\s*)?[1-7]))"
+    r"(?:player\s*)?[1-7]|NONE|null|<none>))"
     r"\s*[\"'`]?\s*[,;，；。.！!]?\s*$",
     flags=re.IGNORECASE,
 )
@@ -110,10 +110,10 @@ class SpeechActionValidationError(ValueError):
 class SpeechParseAuditResult:
     """One online parse result with the actual backend response."""
 
-    normalized_actions: list[list[str]]
+    normalized_actions: list[list[str | None]]
     raw_response: str | None
     parse_status: str
-    protected_self_claim_actions: list[list[str]]
+    protected_self_claim_actions: list[list[str | None]]
     error_type: str | None
     error_message: str | None
 
@@ -149,7 +149,7 @@ class SpeechPerceiver:
         day: int,
         phase: str,
         context: dict | None = None,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Parse one speech turn without interrupting the game on failure."""
 
         del context
@@ -215,7 +215,7 @@ class SpeechPerceiver:
             if not isinstance(raw_response, str):
                 raw_response = None
             return SpeechParseAuditResult(
-                normalized_actions=protected_actions,
+                normalized_actions=[],
                 raw_response=raw_response,
                 parse_status="parser_error",
                 protected_self_claim_actions=protected_actions,
@@ -229,7 +229,7 @@ class SpeechPerceiver:
         speech: str,
         day: int,
         phase: str,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Parse one speech while exposing configuration and parser errors.
 
         This entry point is for offline audits and reparsing only. The online
@@ -253,7 +253,7 @@ class SpeechPerceiver:
         speech: str,
         day: int,
         phase: str,
-    ) -> tuple[list[list[str]], str]:
+    ) -> tuple[list[list[str | None]], str]:
         """Strictly parse once and return actions plus unchanged response."""
 
         if self.backend is None or not self.model_name:
@@ -300,7 +300,7 @@ class SpeechPerceiver:
             Sequence[str]
         ],
         strict: bool = False,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         actions, _raw_response = (
             self._parse_configured_with_response(
                 speaker=speaker,
@@ -324,7 +324,7 @@ class SpeechPerceiver:
             Sequence[str]
         ],
         strict: bool = False,
-    ) -> tuple[list[list[str]], str]:
+    ) -> tuple[list[list[str | None]], str]:
         prompt = self._build_prompt(
             speaker=speaker,
             speech=speech,
@@ -410,22 +410,25 @@ class SpeechPerceiver:
 subject | action | object
 
 subject 必须是当前发言者 player{speaker}。
-object 必须是 player1 到 player7。
+带目标动作的 object 必须是 player1 到 player7；无目标动作的 object 必须是 NONE。
 允许的 action 只有：
 {allowed_actions}
 
 动作语义：
 1. point_as_werewolf：明确声称或判断目标是狼人；如果狼人结论来自speaker自己的查验声明，改用check_as_werewolf。
-2. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。“好人”“非狼”“好人阵营”“可信”都不能产生该动作。
-3. point_as_seer：明确判断目标是预言家。
-4. point_as_witch：明确判断目标是女巫。
-5. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验好人自动推导。
-6. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
-7. check_as_good：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
-8. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
-9. save：speaker明确公开声称自己救了目标。
-10. poison：speaker明确公开声称自己毒了目标。
-11. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
+2. point_as_non_werewolf：明确判断目标不是狼人、是泛化“好人”或属于好人阵营，但没有断言其具体角色。
+3. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。
+4. point_as_seer：明确判断目标是预言家。
+5. point_as_witch：明确判断目标是女巫。
+6. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验非狼自动推导。
+7. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
+8. check_as_non_werewolf：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
+9. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
+10. save：speaker明确公开声称自己救了目标。
+11. poison：speaker明确公开声称自己毒了目标。
+12. vote_intent：speaker明确表达自己当前准备、打算或决定把票投给目标；实际环境vote是另一类独立public event。
+13. abstain_intent：speaker明确表示当前轮次准备弃票；使用 object=NONE。
+14. no_commitment：speaker明确表示本轮暂不作身份、查验、技能或投票表态；使用 object=NONE。
 
 抽取规则：
 - 只抽取发言直接表达的命题，不得根据常识或其他动作推导。
@@ -436,8 +439,10 @@ object 必须是 player1 到 player7。
 - 穷尽抽取所有明确属于上述可表示类别的命题，多个不同命题按原文语义顺序输出；即使命题彼此冲突、是谎言、不符合speaker真实角色或策略上荒谬，也不得truth-filter或静默漏掉。
 - 第一人称明确自报具体身份必须抽取。
 - “质疑”“可疑”“狼面大”“需要关注”只支持 oppose，不得自动升级为 point_as_werewolf。
+- 对明确目标说“可信”只支持support，不得自动升级为point_as_non_werewolf或具体角色判断。
 - most-specific-source：同一个semantic claim只使用最具体predicate，不得从一个specific claim自动派生generic actions。
-- 查验来源的好人/非狼只产生check_as_good，不自动产生point_as_villager或support；查验来源的狼人只产生check_as_werewolf，不自动产生point_as_werewolf、oppose或vote_intent。
+- 泛化“好人”“非狼”“好人阵营”产生point_as_non_werewolf，不得具体化为point_as_villager、point_as_seer或point_as_witch。
+- 查验来源的好人/非狼只产生check_as_non_werewolf，不自动产生point_as_non_werewolf、point_as_villager或support；查验来源的狼人只产生check_as_werewolf，不自动产生point_as_werewolf、oppose或vote_intent。
 - 只有原文另外、独立地明确表达第二个formal proposition时，才允许为同一目标输出第二个action。
 - save、poison只表示speaker公开声称的技能动作，不自动产生任何身份判断；不得读取真实角色或环境技能记录进行truth validation。
 - vote_intent不等于环境实际vote，也不自动产生oppose；“大家应该关注3号”不构成speaker自己的投票意图。
@@ -445,7 +450,7 @@ object 必须是 player1 到 player7。
 - 查验结果为“好人”不得产生 point_as_villager、point_as_seer 或 point_as_witch；只有另外明确说出具体角色判断时才抽取对应 point_as_*。
 - “player4 是预言家”等明确具体角色判断必须抽取；parser只忠实表示原文，不判断游戏机制是否合理。
 - 转述别人的身份声明或立场，不视为当前发言者自己的立场。
-- “我是好人”和“我不是狼人”都不能产生 point_as_villager。
+- “我是好人”和“我不是狼人”产生针对speaker自己的point_as_non_werewolf，不能产生point_as_villager。
 - 连续玩家范围必须按原文顺序展开成多个原子三元组。
 - 删除完全重复的动作，不输出真实角色、guesses、置信度或解释。
 
@@ -466,7 +471,7 @@ player{speaker} | support | player4
 
 输入：昨晚我查验2号是好人，救了3号，今天投4号。
 输出：
-player{speaker} | check_as_good | player2
+player{speaker} | check_as_non_werewolf | player2
 player{speaker} | save | player3
 player{speaker} | vote_intent | player4
 
@@ -481,7 +486,7 @@ player{speaker} | poison | player5
 
 输入：3号是好人。
 输出：
-NONE
+player{speaker} | point_as_non_werewolf | player3
 
 输入：我反对 player2 至 player4 的发言。
 输出：
@@ -501,6 +506,14 @@ NONE
 输出：
 player{speaker} | vote_intent | player4
 
+输入：这一轮我选择弃票。
+输出：
+player{speaker} | abstain_intent | NONE
+
+输入：这一轮我暂不作明确表态。
+输出：
+player{speaker} | no_commitment | NONE
+
 输出协议：
 - 每个动作单独一行，格式严格为：subject | action | object
 - 穷尽输出所有明确动作，不要重复动作。
@@ -516,7 +529,7 @@ player{speaker}: {speech}"""
         *,
         speaker: int,
         speech: str,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Protect literal first-person public role declarations.
 
         This is deliberately narrow. It only preserves an identity that the
@@ -528,9 +541,9 @@ player{speaker}: {speech}"""
             _load_tom_schema()
         )
 
-        actions: list[list[str]] = []
+        actions: list[list[str | None]] = []
         seen: set[
-            tuple[str, str, str]
+            tuple[str | None, str | None, str | None]
         ] = set()
 
         for match in (
@@ -572,14 +585,14 @@ player{speaker}: {speech}"""
     @staticmethod
     def _merge_actions(
         *action_groups: Sequence[
-            Sequence[str]
+            Sequence[str | None]
         ],
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Merge action groups while retaining distinct action triplets."""
 
-        merged: list[list[str]] = []
+        merged: list[list[str | None]] = []
         seen: set[
-            tuple[str, str, str]
+            tuple[str | None, str | None, str | None]
         ] = set()
 
         for action_group in action_groups:
@@ -758,7 +771,7 @@ player{speaker}: {speech}"""
         response_text: str,
         *,
         preserve_invalid: bool = False,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Extract strict ONUW-style pipe triplets from separate lines."""
 
         if preserve_invalid:
@@ -774,7 +787,7 @@ player{speaker}: {speech}"""
                 "",
             )
 
-        actions: list[list[str]] = []
+        actions: list[list[str | None]] = []
         failures: list[dict[str, Any]] = []
         lines: list[tuple[str, str]] = []
 
@@ -907,7 +920,7 @@ player{speaker}: {speech}"""
         speaker: int,
         *,
         strict: bool = False,
-    ) -> list[list[str]]:
+    ) -> list[list[str | None]]:
         """Validate actions and force the subject to the real speaker."""
 
         _, speech_action_type = (
@@ -920,10 +933,10 @@ player{speaker}: {speech}"""
         ):
             return []
 
-        actions: list[list[str]] = []
+        actions: list[list[str | None]] = []
         failures: list[dict[str, Any]] = []
         seen: set[
-            tuple[str, str, str]
+            tuple[str | None, str | None, str | None]
         ] = set()
 
         for item in parsed:
@@ -975,11 +988,15 @@ player{speaker}: {speech}"""
             for atomic_object in object_players:
                 try:
                     if strict:
-                        speech_action_type.from_values(
+                        strict_action = speech_action_type.from_values(
                             subject=raw_subject,
                             action=action_name,
                             object_=atomic_object,
                         )
+                        if strict_action.subject != f"player{speaker}":
+                            raise ValueError(
+                                "speech action subject must equal current speaker"
+                            )
 
                     action = (
                         speech_action_type
@@ -1031,6 +1048,8 @@ player{speaker}: {speech}"""
 
         if not isinstance(object_player, str):
             return [object_player]
+        if object_player.strip().lower() in {"none", "null", "<none>"}:
+            return [None]
         match = _EXPLICIT_PLAYER_RANGE_PATTERN.fullmatch(
             object_player.strip()
         )

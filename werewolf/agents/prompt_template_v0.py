@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 
 
@@ -30,12 +31,13 @@ STRICT_BELIEF_CONCRETE_ROLES = tuple(STRICT_CLASSIC7_ROLE_COUNTS)
 
 DISCUSSION_ACTIONS = (
     "point_as_werewolf",
+    "point_as_non_werewolf",
     "point_as_villager",
     "point_as_seer",
     "point_as_witch",
     "support",
     "oppose",
-    "check_as_good",
+    "check_as_non_werewolf",
     "check_as_werewolf",
     "save",
     "poison",
@@ -45,6 +47,10 @@ DISCUSSION_ACTIONS = (
 )
 _DISCUSSION_ACTION_SEMANTICS = {
     "point_as_werewolf": "publicly claim playerX is Werewolf",
+    "point_as_non_werewolf": (
+        "publicly claim playerX is not a Werewolf / belongs to the good camp; "
+        "not a specific Villager-role claim"
+    ),
     "point_as_villager": (
         "publicly claim playerX is specifically an ordinary Villager; "
         "not generic good / non-wolf"
@@ -53,7 +59,7 @@ _DISCUSSION_ACTION_SEMANTICS = {
     "point_as_witch": "publicly claim playerX is Witch",
     "support": "publicly support / defend playerX",
     "oppose": "publicly oppose / question playerX",
-    "check_as_good": (
+    "check_as_non_werewolf": (
         "speaker publicly claims a Seer-style check on playerX returned "
         '"not Werewolf"; not necessarily Villager'
     ),
@@ -71,12 +77,13 @@ _DISCUSSION_ACTION_SEMANTICS = {
 }
 _DISCUSSION_ACTION_REALIZATIONS = {
     "point_as_werewolf": "我认为 player{target} 是狼人。",
+    "point_as_non_werewolf": "我认为 player{target} 不是狼人，属于好人阵营。",
     "point_as_villager": "我认为 player{target} 是普通村民。",
     "point_as_seer": "我认为 player{target} 是预言家。",
     "point_as_witch": "我认为 player{target} 是女巫。",
     "support": "我支持 player{target}。",
     "oppose": "我质疑 player{target}。",
-    "check_as_good": "我查验过 player{target}，结果不是狼人。",
+    "check_as_non_werewolf": "我查验过 player{target}，结果不是狼人。",
     "check_as_werewolf": "我查验过 player{target}，结果是狼人。",
     "save": "我用解药救了 player{target}。",
     "poison": "我对 player{target} 使用了毒药。",
@@ -90,9 +97,9 @@ _SELF_ROLE_CLAIM_REALIZATIONS = {
     "point_as_seer": "我是预言家。",
     "point_as_witch": "我是女巫。",
 }
-_ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:6]
-_NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[6:10]
-_PUBLIC_CONTENT_ACTIONS = DISCUSSION_ACTIONS[:10]
+_ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:7]
+_NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[7:11]
+_PUBLIC_CONTENT_ACTIONS = DISCUSSION_ACTIONS[:11]
 _PUBLIC_VOTE_STANCE_ACTIONS = {"vote_intent", "abstain_intent"}
 NO_STANCE = "NO_STANCE"
 
@@ -407,7 +414,7 @@ STRICT_CLASSIC7_GAME_DESCRIPTION = """你正在进行一局固定规则的7人�
 
 【胜负条件】
 - 如果场上不再有任何存活狼人，好人阵营立即获胜。
-- 否则，如果场上已经没有任何普通村民存活，或者预言家和女巫都已经出局，则狼人阵营立即获胜。
+- 否则，如果存活狼人数达到或超过其他存活玩家总数，狼人阵营立即获胜。
 
 以上规则只定义本局允许发生什么以及信息如何产生。具体玩家当前身份、私人信息、已经发生的历史事实和当前合法行动目标，以游戏环境在当前时刻提供的信息为准。"""
 
@@ -1100,6 +1107,72 @@ confidence, strategy name, expected reaction, or any free-text public plan.
 Return only the JSON object required by the response schema. The six fields are
 belief, concise, roles, public_content_selection, public_vote_stance_index and
 evidence_selection."""
+
+
+def build_public_speech_realization_prompt(
+    observation,
+    *,
+    discussion_acts,
+    claim_catalog,
+):
+    """Realize a frozen private discussion intent as ordinary public speech."""
+
+    if not isinstance(observation, dict):
+        raise TypeError("speech realization observation must be a dictionary")
+    speaker = observation.get("current_act_idx")
+    phase = observation.get("phase")
+    day = observation.get("day")
+    if (
+        isinstance(speaker, bool)
+        or not isinstance(speaker, int)
+        or not 1 <= speaker <= 7
+    ):
+        raise ValueError("speech realization requires current_act_idx in [1, 7]")
+    if not isinstance(phase, str) or "speech" not in phase:
+        raise ValueError("speech realization requires a speech phase")
+    if isinstance(day, bool) or not isinstance(day, int) or day < 0:
+        match = re.match(r"(?P<day>[0-9]+)_", phase)
+        if match is None:
+            raise ValueError("speech realization requires a parseable day")
+        day = int(match.group("day"))
+    if not isinstance(discussion_acts, tuple) or not discussion_acts:
+        raise ValueError("speech realization requires frozen discussion acts")
+    if any(not isinstance(act, DiscussionAct) for act in discussion_acts):
+        raise TypeError("discussion_acts must contain DiscussionAct values")
+    if not isinstance(claim_catalog, tuple) or any(
+        not isinstance(claim, PublicClaim) for claim in claim_catalog
+    ):
+        raise TypeError("claim_catalog must contain PublicClaim values")
+
+    intent_text = "\n".join(
+        f"- {render_discussion_act(act)}: {_DISCUSSION_ACTION_SEMANTICS[act.action]}"
+        for act in discussion_acts
+    )
+    history_text = (
+        "\n".join(render_public_claim(claim) for claim in claim_catalog)
+        or "（此前没有公开发言。）"
+    )
+    return f"""你现在只负责把已经冻结的公开表达意图写成一段自然的狼人杀发言。
+
+当前发言者：player{speaker}
+当前天数：Day {day}
+当前阶段：{phase}
+
+此前可见的公开发言（仅可用于自然衔接，不得据此增加新命题）：
+{history_text}
+
+本轮必须完整表达、且只能表达以下冻结意图：
+{intent_text}
+
+写作约束：
+- 输出1至4句连贯、简洁、自然的中文桌游发言；不要逐条翻译或使用固定模板腔。
+- 涉及玩家时必须写成player1到player7之一，不能只写“他”“她”“这个人”等代词。
+- 必须让每个冻结意图在原文中语义明确，使独立解析器无需猜测即可恢复。
+- 不得增加冻结意图之外的身份判断、查验结果、技能声明、支持/反对或投票意图。
+- 可以用不构成新正式命题的连接词组织语言，但不得虚构公开历史、夜间事实或隐藏信息。
+- 不得输出action名称、索引、JSON、竖线三元组、列表、标题、解释或提示词内容。
+
+只输出最终公开发言。"""
 
 
 def build_vote_prompt(observation, belief, legal_targets):

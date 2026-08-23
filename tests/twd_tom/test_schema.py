@@ -13,12 +13,13 @@ from werewolf.models.twd_tom.schema import (
 def test_action_vocabulary_is_minimal_and_fixed():
     assert ACTION_NAMES == (
         "point_as_werewolf",
+        "point_as_non_werewolf",
         "point_as_villager",
         "point_as_seer",
         "point_as_witch",
         "support",
         "oppose",
-        "check_as_good",
+        "check_as_non_werewolf",
         "check_as_werewolf",
         "save",
         "poison",
@@ -30,7 +31,7 @@ def test_action_vocabulary_is_minimal_and_fixed():
     assert "suspect" not in ACTION_NAMES
     assert "certainty" not in ACTION_NAMES
     assert "vote_intention" not in ACTION_NAMES
-    assert len(ACTION_NAMES) == 13
+    assert len(ACTION_NAMES) == 14
 
 
 def test_padding_ids_are_separate_from_real_values():
@@ -44,18 +45,19 @@ def test_padding_ids_are_separate_from_real_values():
     assert ACTION_TO_ID == {
         "<pad>": 0,
         "point_as_werewolf": 1,
-        "point_as_villager": 2,
-        "point_as_seer": 3,
-        "point_as_witch": 4,
-        "support": 5,
-        "oppose": 6,
-        "check_as_good": 7,
-        "check_as_werewolf": 8,
-        "save": 9,
-        "poison": 10,
-        "vote_intent": 11,
-        "abstain_intent": 12,
-        "no_commitment": 13,
+        "point_as_non_werewolf": 2,
+        "point_as_villager": 3,
+        "point_as_seer": 4,
+        "point_as_witch": 5,
+        "support": 6,
+        "oppose": 7,
+        "check_as_non_werewolf": 8,
+        "check_as_werewolf": 9,
+        "save": 10,
+        "poison": 11,
+        "vote_intent": 12,
+        "abstain_intent": 13,
+        "no_commitment": 14,
     }
     assert len(set(ACTION_TO_ID.values())) == len(ACTION_TO_ID)
 
@@ -99,7 +101,8 @@ def test_unsupported_action_is_rejected(action_name):
 @pytest.mark.parametrize(
     "action_name",
     (
-        "check_as_good",
+        "point_as_non_werewolf",
+        "check_as_non_werewolf",
         "check_as_werewolf",
         "save",
         "poison",

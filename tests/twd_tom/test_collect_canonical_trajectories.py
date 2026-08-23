@@ -13,6 +13,12 @@ from werewolf.models.twd_tom.public_events import (
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION, LABEL_PROVENANCE
+from werewolf.models.twd_tom.speech_annotations import (
+    SPEECH_ACTION_ONTOLOGY_VERSION,
+    SPEECH_ANNOTATION_SCHEMA_VERSION,
+    make_speech_annotation,
+    speech_annotation_digest,
+)
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
@@ -68,6 +74,9 @@ def runtime_config():
         },
         "pipeline": {
             "public_event_schema_version": batch_module.PUBLIC_EVENT_SCHEMA_VERSION,
+            "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+            "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+            "speech_parser_prompt_version": batch_module.SPEECH_PARSER_PROMPT_VERSION,
             "raw_schema_version": batch_module.SAMPLE_SCHEMA_VERSION,
             "projected_schema_version": batch_module.PROJECTED_SCHEMA_VERSION,
             "projection_version": batch_module.TARGET_CONVERSION,
@@ -117,7 +126,6 @@ def _complete_artifacts(recorder, *, winner="Villager"):
         "event_type": "public_speech",
         "speaker": "player2",
         "raw_text": "synthetic speech",
-        "sp_actions": [],
     }
     all_events = initial_events + [speech]
     if winner == "Villager":
@@ -244,6 +252,7 @@ def _belief_snapshot(game_id):
         },
     ]
     subjects = [f"player{player_id}" for player_id in range(1, 8)]
+    speech_annotations = []
     return {
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "game_id": game_id,
@@ -254,7 +263,13 @@ def _belief_snapshot(game_id):
         "public_event_schema_version": batch_module.PUBLIC_EVENT_SCHEMA_VERSION,
         "public_events": public_events,
         "public_event_digest": public_event_digest(public_events),
-        "structured_input_digest": structured_input_digest(public_events),
+        "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+        "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+        "speech_annotations": speech_annotations,
+        "speech_annotation_digest": speech_annotation_digest(speech_annotations),
+        "structured_input_digest": structured_input_digest(
+            public_events, speech_annotations
+        ),
         "observer_ids": list(range(1, 8)),
         "suspected_werewolves": {subject: [] for subject in subjects},
         "known_werewolves": {subject: [] for subject in subjects},
@@ -308,7 +323,8 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
             )
             for index in range(1, 8)
         ]
-        return object(), agents, list(ROLES), list(PROFILES)
+        env = SimpleNamespace(public_events=[], speech_annotations=[])
+        return env, agents, list(ROLES), list(PROFILES)
 
     def fake_run_game(
         env,
@@ -327,12 +343,47 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
         winner = "Villager" if seed % 2 else "Werewolf"
         sample_collector.write(_belief_snapshot(trajectory_recorder._base["game_id"]))
         _complete_artifacts(trajectory_recorder, winner=winner)
+        trajectory = json.loads(
+            trajectory_recorder.trajectory_output_path.read_text(encoding="utf-8")
+        )
+        env.public_events = list(trajectory["initial_public_events"])
+        for transition in trajectory["transitions"]:
+            env.public_events.extend(transition["public_events_appended"])
+        speech_event = next(
+            event
+            for event in env.public_events
+            if event["event_type"] == "public_speech"
+        )
+        env.speech_annotations = [
+            make_speech_annotation(
+                event_idx=speech_event["event_idx"],
+                speaker=speech_event["speaker"],
+                raw_text=speech_event["raw_text"],
+                parser_model_id="synthetic-parser",
+                parser_call_id="synthetic-parser-call-000001",
+                annotation_source="llm_parser",
+                status="no_action",
+                actions=[],
+                raw_response="NONE",
+                error_type=None,
+                error_message=None,
+            )
+        ]
         return f"{winner} win"
 
     monkeypatch.setattr(batch_module, "_read_code_provenance", fake_provenance)
     monkeypatch.setattr(batch_module, "load_named_backends", fake_load_backends)
     monkeypatch.setattr(batch_module, "build_runtime", fake_build_runtime)
     monkeypatch.setattr(batch_module, "run_game", fake_run_game)
+    monkeypatch.setattr(
+        batch_module,
+        "replay_canonical_trajectory",
+        lambda trajectory_path, observer_views_path: {
+            "status": "MATCH",
+            "trajectory_path": str(trajectory_path),
+            "observer_views_path": str(observer_views_path),
+        },
+    )
     return calls
 
 
@@ -368,6 +419,10 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["stop_on_first_failure"] is True
     assert plan["rerun_on_failure"] is False
     assert plan["replacement_seed_on_failure"] is False
+    assert plan["deterministic_replay_required"] is True
+    assert plan["canonical_replay_validator"].endswith(
+        ".replay_canonical_trajectory"
+    )
     payload = deepcopy(plan)
     digest = payload.pop("plan_digest")
     assert digest == canonical_digest(payload)
@@ -375,6 +430,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert summary["schema_version"] == batch_module.BATCH_SUMMARY_SCHEMA_VERSION
     assert summary["completed_game_count"] == 3
     assert summary["total_belief_snapshot_count"] == 3
+    assert summary["deterministic_replay_match_count"] == 3
     assert summary["game_ids"] == [
         "canonical-pilot-001_game_0001_seed_1001",
         "canonical-pilot-001_game_0002_seed_1002",
@@ -390,7 +446,9 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert (game_dir / "trajectory.json").is_file()
         assert (game_dir / "observer_views.json").is_file()
         belief_path = game_dir / batch_module.BELIEF_SNAPSHOTS_FILENAME
+        annotation_path = game_dir / batch_module.SPEECH_ANNOTATIONS_FILENAME
         assert belief_path.is_file()
+        assert annotation_path.is_file()
         belief_record = json.loads(belief_path.read_text())
         assert belief_record["label_provenance"] == LABEL_PROVENANCE
         assert belief_record["label_cutoff_step_idx"] == 0
@@ -403,6 +461,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert game_summary["environment_seed"] == seed
         assert game_summary["completion_status"] == "COMPLETE"
         assert game_summary["belief_snapshot_count"] == 1
+        assert game_summary["speech_annotation_count"] == 1
         assert game_summary["call_audit"]["within_budget"] is True
         assert (game_dir / "call_audit.json").is_file()
         assert game_summary["belief_snapshots_sha256"] == batch_module._sha256(
@@ -689,4 +748,71 @@ def test_belief_artifact_rejects_any_failed_alive_observer(tmp_path):
             belief_path,
             tmp_path / "observer_views.json",
             expected_game_id="game_001",
+        )
+
+
+@pytest.mark.parametrize(
+    ("annotation_source", "status", "expected_error"),
+    [
+        ("llm_parser", "error", "successful parsing"),
+        ("generator_contract", "no_action", "generator-contract"),
+    ],
+)
+def test_canonical_speech_annotation_artifact_fails_closed(
+    tmp_path,
+    annotation_source,
+    status,
+    expected_error,
+):
+    players = [
+        {
+            "player_id": index,
+            "role": ROLES[index - 1],
+            "profile_name": PROFILES[index - 1],
+            "backend_id": f"backend-{index}",
+            "model_name": f"model-{index}",
+        }
+        for index in range(1, 8)
+    ]
+    recorder = batch_module.CanonicalGameInteractionTrajectoryRecorder(
+        tmp_path / "trajectory.json",
+        tmp_path / "observer_views.json",
+        game_id="game_001",
+        run_id="run-001",
+        source_commit=COMMIT,
+        environment_seed=11,
+        runtime_config={"x": 1},
+        players=players,
+    )
+    _complete_artifacts(recorder)
+    trajectory = json.loads((tmp_path / "trajectory.json").read_text())
+    speech = next(
+        event
+        for transition in trajectory["transitions"]
+        for event in transition["public_events_appended"]
+        if event["event_type"] == "public_speech"
+    )
+    annotation = make_speech_annotation(
+        event_idx=speech["event_idx"],
+        speaker=speech["speaker"],
+        raw_text=speech["raw_text"],
+        parser_model_id="synthetic-parser",
+        parser_call_id="synthetic-parser-call-000001",
+        annotation_source=annotation_source,
+        status=status,
+        actions=[],
+        raw_response="NONE" if status != "error" else "malformed",
+        error_type="SyntheticParserError" if status == "error" else None,
+        error_message="synthetic failure" if status == "error" else None,
+    )
+    annotation_path = tmp_path / "speech_annotations.jsonl"
+    annotation_path.write_text(
+        json.dumps(annotation, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=expected_error):
+        batch_module.validate_speech_annotation_artifact(
+            annotation_path,
+            tmp_path / "trajectory.json",
         )

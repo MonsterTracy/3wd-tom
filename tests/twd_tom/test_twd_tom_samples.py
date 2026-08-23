@@ -11,6 +11,7 @@ from werewolf.models.twd_tom.samples import (
     freeze_public_snapshot,
     make_twd_tom_sample,
 )
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 
 
 def _events(speaker="player2", actions=None):
@@ -25,7 +26,6 @@ def _events(speaker="player2", actions=None):
             "event_type": "public_speech",
             "speaker": "player1",
             "raw_text": "earlier speech",
-            "sp_actions": [] if actions is None else actions,
         },
         {
             "event_idx": 2,
@@ -38,16 +38,20 @@ def _events(speaker="player2", actions=None):
 def test_frozen_snapshot_has_exact_time_alignment_and_digest():
     actions = [["player1", "point_as_werewolf", "player7"]]
     events = _events(actions=actions)
+    annotations = make_speech_annotations(events, actions)
     snapshot = freeze_public_snapshot(
         game_id="game_001", step_idx=8, phase="1_day_speech",
         speaker_id=2, report_trigger="pre_public_speech",
         observer_ids=[1, 2], public_events=events,
+        speech_annotations=annotations,
     )
     assert isinstance(snapshot, PublicSnapshot)
     assert snapshot.label_cutoff_step_idx == snapshot.step_idx == 8
     assert snapshot.public_action_count == len(snapshot.sp_actions) == 1
     assert snapshot.public_event_digest == public_event_digest(events)
-    assert snapshot.structured_input_digest == structured_input_digest(events)
+    assert snapshot.structured_input_digest == structured_input_digest(
+        events, annotations
+    )
     actions.append(["player3", "oppose", "player2"])
     assert len(snapshot.sp_actions) == 1
     events[1]["raw_text"] = "mutated"
@@ -57,6 +61,7 @@ def test_frozen_snapshot_has_exact_time_alignment_and_digest():
 
 
 def test_frozen_snapshot_preserves_targetless_action_null():
+    events = _events(actions=[["player1", "abstain_intent", None]])
     snapshot = freeze_public_snapshot(
         game_id="game_001",
         step_idx=1,
@@ -64,8 +69,10 @@ def test_frozen_snapshot_preserves_targetless_action_null():
         speaker_id=2,
         report_trigger="pre_public_speech",
         observer_ids=[1, 2],
-        public_events=_events(
-            actions=[["player1", "abstain_intent", None]]
+        public_events=events,
+        speech_annotations=make_speech_annotations(
+            events,
+            [["player1", "abstain_intent", None]],
         ),
     )
     assert snapshot.sp_actions == (
@@ -74,10 +81,12 @@ def test_frozen_snapshot_preserves_targetless_action_null():
 
 
 def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
+    events = _events(speaker="player1")
     snapshot = freeze_public_snapshot(
         game_id="game_001", step_idx=1, phase="1_day_speech",
         speaker_id=1, report_trigger="pre_public_speech",
-        observer_ids=[1], public_events=_events(speaker="player1"),
+        observer_ids=[1], public_events=events,
+        speech_annotations=make_speech_annotations(events),
     )
     reports = {
         "player1": {
@@ -92,7 +101,9 @@ def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
     }
     sample = make_twd_tom_sample(public_snapshot=snapshot, reports=reports)
     assert "sp_actions" not in sample
-    assert public_speech_actions(sample["public_events"]) == []
+    assert public_speech_actions(
+        sample["public_events"], sample["speech_annotations"]
+    ) == []
     assert sample["public_event_digest"] == snapshot.public_event_digest
     assert sample["structured_input_digest"] == snapshot.structured_input_digest
     assert sample["label_cutoff_step_idx"] == sample["step_idx"]
@@ -111,16 +122,19 @@ def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
 
 
 def test_sample_requires_exact_observer_reports():
+    events = _events(speaker="player1")
     snapshot = freeze_public_snapshot(
         game_id="game_001", step_idx=1, phase="1_day_speech",
         speaker_id=1, report_trigger="pre_public_speech",
-        observer_ids=[1], public_events=_events(speaker="player1"),
+        observer_ids=[1], public_events=events,
+        speech_annotations=make_speech_annotations(events),
     )
     with pytest.raises(ValueError, match="exactly match"):
         make_twd_tom_sample(public_snapshot=snapshot, reports={})
 
 
 def test_sample_persists_observer_legality_error_without_repair():
+    events = _events(speaker="player1")
     snapshot = freeze_public_snapshot(
         game_id="game_001",
         step_idx=1,
@@ -128,7 +142,8 @@ def test_sample_persists_observer_legality_error_without_repair():
         speaker_id=1,
         report_trigger="pre_public_speech",
         observer_ids=[1],
-        public_events=_events(speaker="player1"),
+        public_events=events,
+        speech_annotations=make_speech_annotations(events),
     )
     error = "suspected_werewolves cannot contain the observer"
     sample = make_twd_tom_sample(

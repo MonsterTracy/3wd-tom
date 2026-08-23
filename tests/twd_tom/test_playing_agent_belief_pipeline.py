@@ -12,6 +12,7 @@ from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
 )
 from werewolf.speech.private_belief_perceiver import PlayingAgentBeliefReporter
+from werewolf.models.twd_tom.speech_annotations import make_speech_annotation
 
 
 class FakeBackend:
@@ -78,6 +79,7 @@ class SyntheticEnvironment:
                 "speaker": "player3",
             },
         ]
+        self.speech_annotations = []
         self.private_logs = {
             player_id: [
                 _log("game_setting", content={"Werewolf": 2, "Villager": 5}),
@@ -105,8 +107,23 @@ class SyntheticEnvironment:
                 "event_type": "public_speech",
                 "speaker": "player3",
                 "raw_text": "public speech",
-                "sp_actions": [action],
             }
+        )
+        event = self.public_events[-1]
+        self.speech_annotations.append(
+            make_speech_annotation(
+                event_idx=event["event_idx"],
+                speaker=event["speaker"],
+                raw_text=event["raw_text"],
+                parser_model_id="synthetic_parser",
+                parser_call_id="synthetic_000002",
+                annotation_source="generator_contract",
+                status="ok",
+                actions=[action],
+                raw_response=None,
+                error_type=None,
+                error_message=None,
+            )
         )
         for logs in self.private_logs.values():
             logs.append(
@@ -193,7 +210,7 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
         )
     )
     assert sample["schema_version"] == (
-        "classic7_pre_speech_player_suspicion_v3"
+        "classic7_pre_speech_player_suspicion_v4"
     )
     assert {
         len(suspicion)
@@ -232,7 +249,8 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
         speech_perceiver=perceiver,
     )
     monkeypatch.setattr(
-        "werewolf.envs.werewolf_text_env_v0.random.randint",
+        env._rng,
+        "randint",
         lambda _start, _end: 0,
     )
     env.reset(roles=roles)
@@ -289,7 +307,9 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
             speaker_id=first_speaker,
             observer_ids=alive_observers,
         )
-        assert public_speech_actions(first["public_events"]) == []
+        assert public_speech_actions(
+            first["public_events"], first["speech_annotations"]
+        ) == []
         assert first["public_action_count"] == 0
         assert [
             len(backend.calls)
@@ -297,7 +317,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
         ] == [1, 1, 1, 1, 0, 1, 1]
 
         env.step(("speech", "first synthetic public speech"))
-        first_actions = env.game_log[-1].content["sp_actions"]
+        first_actions = env.speech_annotations[-1]["actions"]
         assert [action[1] for action in first_actions] == [
             "point_as_werewolf",
             "support",
@@ -313,7 +333,9 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
             speaker_id=second_speaker,
             observer_ids=alive_observers,
         )
-        assert public_speech_actions(second["public_events"]) == first_actions
+        assert public_speech_actions(
+            second["public_events"], second["speech_annotations"]
+        ) == first_actions
         assert second["public_action_count"] == 3
         assert "second synthetic public speech" not in json.dumps(
             second,
@@ -335,9 +357,13 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     assert {
         sample["schema_version"]
         for sample in raw_samples
-    } == {"classic7_pre_speech_player_suspicion_v3"}
-    assert public_speech_actions(raw_samples[0]["public_events"]) == []
-    assert public_speech_actions(raw_samples[1]["public_events"]) == first_actions
+    } == {"classic7_pre_speech_player_suspicion_v4"}
+    assert public_speech_actions(
+        raw_samples[0]["public_events"], raw_samples[0]["speech_annotations"]
+    ) == []
+    assert public_speech_actions(
+        raw_samples[1]["public_events"], raw_samples[1]["speech_annotations"]
+    ) == first_actions
     assert raw_samples[0]["observer_ids"] == alive_observers
     assert raw_samples[1]["observer_ids"] == alive_observers
     assert all(
@@ -355,7 +381,10 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     assert not any(
         private_term
         in json.dumps(
-            public_speech_actions(raw_samples[1]["public_events"])
+            public_speech_actions(
+                raw_samples[1]["public_events"],
+                raw_samples[1]["speech_annotations"],
+            )
         )
         for private_term in (
             "known_werewolves",

@@ -50,13 +50,15 @@ class PublicEventFeatureBuilder:
     def encode_events(
         self,
         public_events: Sequence[Any],
+        speech_annotations: Sequence[Any] = (),
     ) -> dict[str, torch.Tensor]:
-        batch = self.encode_batch([public_events])
+        batch = self.encode_batch([public_events], [speech_annotations])
         return {key: value[0] for key, value in batch.items()}
 
     def encode_batch(
         self,
         event_sequences: Sequence[Sequence[Any]],
+        annotation_sequences: Sequence[Sequence[Any]] | None = None,
     ) -> dict[str, torch.Tensor]:
         if (
             isinstance(event_sequences, (str, bytes))
@@ -65,10 +67,17 @@ class PublicEventFeatureBuilder:
             raise TypeError("event_sequences must be a sequence")
         if not event_sequences:
             raise ValueError("event_sequences cannot be empty")
+        if annotation_sequences is None:
+            annotation_sequences = [() for _ in event_sequences]
+        if len(annotation_sequences) != len(event_sequences):
+            raise ValueError("annotation_sequences must match event_sequences")
 
         encoded = [
-            self._encode_sequence(sequence)
-            for sequence in event_sequences
+            self._encode_sequence(sequence, annotations)
+            for sequence, annotations in zip(
+                event_sequences,
+                annotation_sequences,
+            )
         ]
         sequence_length = max(1, max(map(len, encoded), default=0))
         shape = (len(encoded), sequence_length)
@@ -103,9 +112,10 @@ class PublicEventFeatureBuilder:
     def _encode_sequence(
         self,
         public_events: Sequence[Any],
+        speech_annotations: Sequence[Any],
     ) -> list[tuple[int, int, int, int, int, float]]:
         encoded = []
-        tokens = structured_event_tokens(public_events)
+        tokens = structured_event_tokens(public_events, speech_annotations)
         groups: list[list[dict[str, Any]]] = []
         boundary_types = {
             "phase_change",

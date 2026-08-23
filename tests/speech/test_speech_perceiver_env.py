@@ -105,7 +105,7 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
         ]
         env.vote_queue = []
 
-    def test_visible_observation_contains_sp_actions(self):
+    def test_visible_observation_contains_only_raw_speech_and_sidecar_has_actions(self):
         actions = [
             [
                 "player2",
@@ -159,7 +159,6 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             speech_log.content,
             {
                 "speech_content": "我认为3号是狼人",
-                "sp_actions": actions,
             },
         )
 
@@ -175,12 +174,10 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             observed_log.source,
             2,
         )
-        self.assertEqual(
-            observed_log.content["sp_actions"],
-            actions,
-        )
+        self.assertNotIn("sp_actions", observed_log.content)
+        self.assertEqual(env.speech_annotations[-1]["actions"], actions)
 
-    def test_speech_pk_log_contains_sp_actions(self):
+    def test_speech_pk_actions_are_only_in_annotation_sidecar(self):
         actions = [
             [
                 "player4",
@@ -220,10 +217,8 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
             if log.event == "speech_pk"
         )
 
-        self.assertEqual(
-            speech_log.content["sp_actions"],
-            actions,
-        )
+        self.assertNotIn("sp_actions", speech_log.content)
+        self.assertEqual(env.speech_annotations[-1]["actions"], actions)
 
     def test_parser_exception_prevents_raw_speech_commit(self):
         env = self.make_env(
@@ -253,11 +248,11 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
         )
 
         before_events = list(env.public_events)
-        with self.assertRaisesRegex(TypeError, "must be a sequence"):
+        with self.assertRaisesRegex(TypeError, "three-element sequence"):
             env.step(("speech", "发言"))
         self.assertEqual(env.public_events, before_events)
 
-    def test_random_game_logs_sp_actions_lists(self):
+    def test_random_game_keeps_parser_failures_in_annotation_sidecar(self):
         random.seed(7)
 
         env = self.make_env()
@@ -292,14 +287,11 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
         )
 
         for log in speech_logs:
-            self.assertIn(
-                "sp_actions",
-                log.content,
-            )
-            self.assertIsInstance(
-                log.content["sp_actions"],
-                list,
-            )
+            self.assertNotIn("sp_actions", log.content)
+        self.assertEqual(len(env.speech_annotations), len(speech_logs))
+        self.assertTrue(
+            all(annotation["status"] == "error" for annotation in env.speech_annotations)
+        )
 
 
 if __name__ == "__main__":

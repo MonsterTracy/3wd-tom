@@ -15,6 +15,7 @@ from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
 from tests.twd_tom.public_event_fixtures import make_training_sample
 from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
+from werewolf.models.twd_tom.speech_annotations import make_speech_annotation
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
 )
@@ -68,6 +69,7 @@ class ScriptedEnvironment:
 
         self.game_log = []
         self.public_events = []
+        self.speech_annotations = []
         self.reset_roles = None
         self.step_actions = []
         self.phase = start_phase
@@ -94,6 +96,7 @@ class ScriptedEnvironment:
                 "speaker": "player1",
             },
         ]
+        self.speech_annotations = []
 
         return {
             "current_act_idx": 1,
@@ -123,14 +126,29 @@ class ScriptedEnvironment:
                         },
                     }
                 )
-            self.public_events.append(
-                {
-                    "event_idx": len(self.public_events),
-                    "event_type": "public_speech",
-                    "speaker": f"player{len(self.step_actions)}",
-                    "raw_text": action[1],
-                    "sp_actions": deepcopy(parsed_actions or []),
-                }
+            speech_event = {
+                "event_idx": len(self.public_events),
+                "event_type": "public_speech",
+                "speaker": f"player{len(self.step_actions)}",
+                "raw_text": action[1],
+            }
+            self.public_events.append(speech_event)
+            self.speech_annotations.append(
+                make_speech_annotation(
+                    event_idx=speech_event["event_idx"],
+                    speaker=speech_event["speaker"],
+                    raw_text=speech_event["raw_text"],
+                    parser_model_id="synthetic_parser",
+                    parser_call_id=(
+                        f"synthetic_{speech_event['event_idx']:06d}"
+                    ),
+                    annotation_source="generator_contract",
+                    status="ok" if parsed_actions else "no_action",
+                    actions=deepcopy(parsed_actions or []),
+                    raw_response=None,
+                    error_type=None,
+                    error_message=None,
+                )
             )
 
         if not self.transitions:
@@ -181,6 +199,7 @@ class RecordingSampleCollector:
                     len(env.step_actions)
                 ),
                 "public_history": deepcopy(env.public_events),
+                "speech_annotations": deepcopy(env.speech_annotations),
             }
         )
 
@@ -443,6 +462,7 @@ def test_eval_collects_all_alive_observers_before_public_speech():
                         "speaker": "player1",
                     },
                 ],
+                "speech_annotations": [],
         }
     ]
 
@@ -569,17 +589,16 @@ def test_current_speech_enters_only_the_next_pre_speech_snapshot():
     ]
     collector = RecordingSampleCollector()
     eval(env, agents, roles_=["Villager"] * 7, sample_collector=collector)
-    first, second = [
-        call["public_history"]
-        for call in collector.calls
-    ]
+    first_call, second_call = collector.calls
+    first = first_call["public_history"]
+    second = second_call["public_history"]
     assert first[-1] == {
         "event_idx": 1,
         "event_type": "turn_start",
         "speaker": "player1",
     }
-    assert public_speech_actions(first) == []
-    assert public_speech_actions(second) == []
+    assert public_speech_actions(first, first_call["speech_annotations"]) == []
+    assert public_speech_actions(second, second_call["speech_annotations"]) == []
     assert second[-2]["raw_text"] == "first"
     assert second[-1] == {
         "event_idx": 3,
@@ -632,7 +651,8 @@ def test_multi_action_speech_has_one_pre_speech_snapshot_and_one_dataset_row():
         "speaker": "player1",
     }
     assert public_speech_actions(
-        collector.calls[1]["public_history"]
+        collector.calls[1]["public_history"],
+        collector.calls[1]["speech_annotations"],
     ) == first_actions
 
     assert collector.calls[1]["public_history"][-1]["event_type"] == "turn_start"

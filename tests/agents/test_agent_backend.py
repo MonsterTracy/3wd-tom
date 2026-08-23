@@ -1,5 +1,6 @@
 import inspect
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -37,6 +38,7 @@ from werewolf.agents.prompt_template_v0 import (
     freeze_discussion_candidates,
     project_discussion_content_indices,
     project_discussion_vote_stances,
+    render_deterministic_public_speech,
 )
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
@@ -56,6 +58,37 @@ class MetadataBackend:
 
     def chat_with_metadata(self, **kwargs):
         self.calls.append(kwargs)
+        prompt = kwargs["messages"][0]["content"]
+        if (
+            "response_format" not in kwargs
+            and prompt.startswith("你现在只负责把已经冻结的公开表达意图")
+        ):
+            speaker = int(re.search(r"当前发言者：player([1-7])", prompt).group(1))
+            intent_block = prompt.split(
+                "本轮必须完整表达、且只能表达以下冻结意图：\n", 1
+            )[1].split("\n\n写作约束：", 1)[0]
+            acts = []
+            for line in intent_block.splitlines():
+                match = re.match(
+                    r"- (?P<action>[a-z_]+)(?:\(player(?P<target>[1-7])\))?:",
+                    line,
+                )
+                if match is None:
+                    continue
+                target = match.group("target")
+                acts.append(
+                    DiscussionAct(
+                        match.group("action"),
+                        None if target is None else int(target),
+                    )
+                )
+            return (
+                render_deterministic_public_speech(
+                    speaker,
+                    discussion_acts=tuple(acts),
+                ),
+                {"finish_reason": "stop"},
+            )
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -85,20 +118,8 @@ def _belief(player_id=1, *, role="unknown"):
 
 
 def _structured_speech(speaker, raw_text, *actions, kind="speech"):
-    return (
-        kind,
-        {
-            "raw_text": raw_text,
-            "sp_actions": [
-                [
-                    f"player{speaker}",
-                    action,
-                    None if target is None else f"player{target}",
-                ]
-                for action, target in actions
-            ],
-        },
-    )
+    del speaker, actions
+    return kind, raw_text
 
 
 def _belief_for(role_options, assignments=None):
@@ -985,7 +1006,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("no_commitment", None),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
         cognition_prompt = backend.calls[0]["messages"][0]["content"]
         private_canaries = (
             "Actual role supplied by the Environment: Werewolf",
@@ -1058,7 +1079,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("no_commitment", None),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_seer_bad_is_fixed_outside_inference_and_merged(self):
         observation = _role_observation(
@@ -1123,7 +1144,7 @@ class GameplayCognitionTest(unittest.TestCase):
             finally:
                 agent.close()
 
-            self.assertEqual(len(backend.calls), 1)
+            self.assertEqual(len(backend.calls), 2)
             belief_calls = [
                 call
                 for call in backend.calls
@@ -1156,7 +1177,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("no_commitment", None),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_inventory_invalid_report_does_not_gate_vote(self):
         observation = _observation("1_day_vote")
@@ -1301,7 +1322,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("oppose", 2),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
         self.assertEqual(
             backend.calls[0]["response_format"]["json_schema"]["name"],
             "day_cognition_report_v3",
@@ -1319,13 +1340,19 @@ class GameplayCognitionTest(unittest.TestCase):
             },
         )
         cognition_prompt = backend.calls[0]["messages"][0]["content"]
+        realization_call = backend.calls[1]
+        self.assertNotIn("response_format", realization_call)
+        realization_prompt = realization_call["messages"][0]["content"]
+        self.assertIn("当前天数：Day 1", realization_prompt)
+        self.assertIn("- oppose(player2)", realization_prompt)
+        self.assertIn("只能表达以下冻结意图", realization_prompt)
         self.assertIn("BELIEF OUTPUT", cognition_prompt)
         self.assertIn("PUBLIC CONVERSATION", cognition_prompt)
         self.assertIn("claim_000", cognition_prompt)
         self.assertIn("claim_001", cognition_prompt)
-        self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1]["raw_text"])
+        self.assertNotIn("UNSELECTED-PUBLIC-CLAIM", result[1])
         for private_cognition in ("当前信息有限。", "继续观察。", '"roles"'):
-            self.assertNotIn(private_cognition, result[1]["raw_text"])
+            self.assertNotIn(private_cognition, result[1])
 
     def test_day_cognition_receives_exact_pre_speech_suspicion_support(self):
         observation = _observation()
@@ -1337,7 +1364,7 @@ class GameplayCognitionTest(unittest.TestCase):
             known_werewolves=(),
             known_non_werewolves=("player1",),
             source_schema_version=(
-                "classic7_pre_speech_player_suspicion_v3"
+                "classic7_pre_speech_player_suspicion_v4"
             ),
             label_prompt_version=(
                 "classic7_pre_speech_player_suspicion_prompt_v4"
@@ -1427,26 +1454,29 @@ class GameplayCognitionTest(unittest.TestCase):
                 ),
             ) * len(evidence_selections),
         )
-        self.assertEqual(len(backend.calls), len(evidence_selections))
+        self.assertEqual(len(backend.calls), 2 * len(evidence_selections))
         for call in backend.calls:
             prompt = call["messages"][0]["content"]
             self.assertIn("claim_000", prompt)
             self.assertIn("claim_001", prompt)
             self.assertIn(raw_claim, prompt)
             self.assertIn(nested_claim, prompt)
+        cognition_records = [
+            record for record in records if record["message"] == "belief"
+        ]
         self.assertEqual(
             tuple(
                 decode_evidence_selection(
                     json.loads(record["response"])["evidence_selection"],
                     claim_ids=("claim_000", "claim_001"),
                 )
-                for record in records
+                for record in cognition_records
             ),
             evidence_selections,
         )
         for _action, speech in speeches:
-            self.assertNotIn(raw_claim, speech["raw_text"])
-            self.assertNotIn(nested_claim, speech["raw_text"])
+            self.assertNotIn(raw_claim, speech)
+            self.assertNotIn(nested_claim, speech)
 
     def test_strategic_self_role_bluff_survives_deterministic_realization(self):
         observation = _role_observation("Werewolf", 3)
@@ -1476,7 +1506,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("vote_intent", 6),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
         self.assertIn(
             "Actual role supplied by the Environment: Werewolf",
             backend.calls[0]["messages"][0]["content"],
@@ -1502,7 +1532,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("abstain_intent", None),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_no_commitment_is_deterministic_with_one_cognition_call(self):
         backend = MetadataBackend([_day_cognition()])
@@ -1516,7 +1546,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 ("no_commitment", None),
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
 
     def test_pk_speech_uses_one_cognition_call_and_preserves_action_order(self):
         observation = _observation("2_day_speech_pk")
@@ -1553,7 +1583,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 kind="speech_pk",
             ),
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(len(backend.calls), 2)
         snapshot = freeze_discussion_candidates(observation)
         self.assertEqual(
             project_discussion_vote_stances(snapshot),
@@ -1596,8 +1626,14 @@ class GameplayCognitionTest(unittest.TestCase):
                 agent.close()
 
             records = [json.loads(line) for line in path.read_text().splitlines()]
-            self.assertEqual([record["message"] for record in records], ["belief"])
-            self.assertEqual([record["finish_reason"] for record in records], ["stop"])
+            self.assertEqual(
+                [record["message"] for record in records],
+                ["belief", "speech_realization"],
+            )
+            self.assertEqual(
+                [record["finish_reason"] for record in records],
+                ["stop", "stop"],
+            )
 
     def test_vote_generates_fresh_belief_then_one_legal_target(self):
         backend = MetadataBackend([_belief(), '{"target":4}'])
@@ -1845,7 +1881,7 @@ class GameplayCognitionTest(unittest.TestCase):
         self._agent(speech_backend, gameplay_max_tokens=512).act(_observation())
         self.assertEqual(
             [call["max_tokens"] for call in speech_backend.calls],
-            [512],
+            [512, 512],
         )
 
         night_backend = MetadataBackend(['{"action_index":0}'])

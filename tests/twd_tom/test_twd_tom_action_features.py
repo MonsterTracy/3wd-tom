@@ -5,6 +5,7 @@ import pytest
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.public_events import STRUCTURED_TOKEN_TO_ID
 from werewolf.models.twd_tom.schema import ACTION_TO_ID, NONE_TOKEN, PLAYER_TO_ID
+from tests.twd_tom.public_event_fixtures import make_speech_annotations
 
 
 def _events(raw_text="", actions=None):
@@ -24,7 +25,6 @@ def _events(raw_text="", actions=None):
             "event_type": "public_speech",
             "speaker": "player1",
             "raw_text": raw_text,
-            "sp_actions": [] if actions is None else actions,
         },
         {
             "event_idx": 3,
@@ -39,8 +39,13 @@ def _events(raw_text="", actions=None):
     ]
 
 
+def _annotations(events, actions=None):
+    return make_speech_annotations(events, actions or [])
+
+
 def test_event_encoder_keeps_every_boundary_and_empty_results():
-    features = PublicEventFeatureBuilder().encode_events(_events())
+    events = _events()
+    features = PublicEventFeatureBuilder().encode_events(events, _annotations(events))
     assert features["attention_mask"].tolist() == [1, 1, 1, 1, 1]
     assert features["event_type_ids"].tolist() == [
         STRUCTURED_TOKEN_TO_ID["phase_change"],
@@ -57,8 +62,10 @@ def test_event_encoder_excludes_raw_text_but_keeps_multiple_speech_actions():
         ["player1", "oppose", "player3"],
     ]
     builder = PublicEventFeatureBuilder()
-    first = builder.encode_events(_events("first", actions))
-    second = builder.encode_events(_events("second", actions))
+    first_events = _events("first", actions)
+    second_events = _events("second", actions)
+    first = builder.encode_events(first_events, _annotations(first_events, actions))
+    second = builder.encode_events(second_events, _annotations(second_events, actions))
     assert all(torch.equal(first[key], second[key]) for key in first)
     assert first["attention_mask"].sum().item() == 7
     assert first["event_type_ids"].tolist().count(
@@ -71,17 +78,23 @@ def test_event_encoder_excludes_raw_text_but_keeps_multiple_speech_actions():
 
 def test_event_encoder_right_pads_and_preserves_order():
     builder = PublicEventFeatureBuilder()
-    batch = builder.encode_batch([_events(), _events(actions=[
-        ["player1", "support", "player2"],
-    ])])
+    first_events = _events()
+    actions = [["player1", "support", "player2"]]
+    second_events = _events(actions=actions)
+    batch = builder.encode_batch(
+        [first_events, second_events],
+        [_annotations(first_events), _annotations(second_events, actions)],
+    )
     assert batch["attention_mask"].shape == (2, 6)
     assert batch["attention_mask"][0].tolist() == [1, 1, 1, 1, 1, 0]
     assert batch["attention_mask"][1].tolist() == [1, 1, 1, 1, 1, 1]
 
 
 def test_encodes_exact_subject_action_object_ids_and_dtypes():
+    actions = [["player1", "support", "player2"]]
+    events = _events(actions=actions)
     features = PublicEventFeatureBuilder().encode_events(
-        _events(actions=[["player1", "support", "player2"]])
+        events, _annotations(events, actions)
     )
     index = features["event_type_ids"].tolist().index(
         STRUCTURED_TOKEN_TO_ID["speech_action"]
@@ -100,7 +113,8 @@ def test_encodes_exact_subject_action_object_ids_and_dtypes():
 @pytest.mark.parametrize(
     "action_name",
     (
-        "check_as_good",
+        "point_as_non_werewolf",
+        "check_as_non_werewolf",
         "check_as_werewolf",
         "save",
         "poison",
@@ -108,8 +122,10 @@ def test_encodes_exact_subject_action_object_ids_and_dtypes():
     ),
 )
 def test_extended_actions_encode_to_their_canonical_ids(action_name):
+    actions = [["player1", action_name, "player2"]]
+    events = _events(actions=actions)
     features = PublicEventFeatureBuilder().encode_events(
-        _events(actions=[["player1", action_name, "player2"]])
+        events, _annotations(events, actions)
     )
     index = features["event_type_ids"].tolist().index(
         STRUCTURED_TOKEN_TO_ID["speech_action"]
@@ -119,8 +135,10 @@ def test_extended_actions_encode_to_their_canonical_ids(action_name):
 
 @pytest.mark.parametrize("action_name", ("abstain_intent", "no_commitment"))
 def test_targetless_speech_action_uses_non_padding_none_object(action_name):
+    actions = [["player1", action_name, None]]
+    events = _events(actions=actions)
     features = PublicEventFeatureBuilder().encode_events(
-        _events(actions=[["player1", action_name, None]])
+        events, _annotations(events, actions)
     )
     index = features["event_type_ids"].tolist().index(
         STRUCTURED_TOKEN_TO_ID["speech_action"]
@@ -131,8 +149,9 @@ def test_targetless_speech_action_uses_non_padding_none_object(action_name):
 
 def test_preserves_duplicate_actions_inside_one_speech_boundary():
     action = ["player1", "support", "player2"]
+    events = _events(actions=[action, action])
     features = PublicEventFeatureBuilder().encode_events(
-        _events(actions=[action, action])
+        events, _annotations(events, [action, action])
     )
     assert features["event_type_ids"].tolist().count(
         STRUCTURED_TOKEN_TO_ID["speech_action"]
@@ -140,7 +159,7 @@ def test_preserves_duplicate_actions_inside_one_speech_boundary():
 
 
 def test_empty_event_history_has_one_masked_padding_position():
-    features = PublicEventFeatureBuilder().encode_events([])
+    features = PublicEventFeatureBuilder().encode_events([], [])
     assert all(tensor.shape == (1,) for tensor in features.values())
     assert features["attention_mask"].tolist() == [0]
     assert all(
@@ -155,17 +174,18 @@ def test_truncation_keeps_recent_events_without_dropping_their_boundaries():
         ["player1", "oppose", "player3"],
         ["player1", "point_as_werewolf", "player4"],
     ]
+    events = _events(actions=actions)
     features = PublicEventFeatureBuilder(max_seq_len=3).encode_events(
-        _events(actions=actions)
+        events, _annotations(events, actions)
     )
     assert features["event_type_ids"].tolist() == [
         STRUCTURED_TOKEN_TO_ID["exile_result"],
         STRUCTURED_TOKEN_TO_ID["death_announcement"],
     ]
 
-    speech_only = _events(actions=actions)[:3]
+    speech_only = events[:3]
     features = PublicEventFeatureBuilder(max_seq_len=3).encode_events(
-        speech_only
+        speech_only, _annotations(speech_only, actions)
     )
     assert features["event_type_ids"].tolist() == [
         STRUCTURED_TOKEN_TO_ID["public_speech"],
@@ -185,7 +205,10 @@ def test_truncation_keeps_recent_events_without_dropping_their_boundaries():
 )
 def test_invalid_speech_actions_are_rejected(actions):
     with pytest.raises((TypeError, ValueError)):
-        PublicEventFeatureBuilder().encode_events(_events(actions=actions))
+        events = _events(actions=actions)
+        PublicEventFeatureBuilder().encode_events(
+            events, _annotations(events, actions)
+        )
 
 
 def test_empty_batch_and_invalid_max_length_are_rejected():
@@ -200,7 +223,7 @@ def test_encoder_is_parameter_free_and_api_has_no_private_or_truth_inputs():
     builder = PublicEventFeatureBuilder()
     assert not hasattr(builder, "parameters")
     parameters = set(inspect.signature(builder.encode_events).parameters)
-    assert parameters == {"public_events"}
+    assert parameters == {"public_events", "speech_annotations"}
     assert {
         "roles",
         "actual_roles",

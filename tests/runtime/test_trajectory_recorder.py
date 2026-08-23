@@ -196,7 +196,6 @@ class TrajectoryEnvironment:
                     "event_type": "public_speech",
                     "speaker": "player1",
                     "raw_text": action[1]["raw_text"],
-                    "sp_actions": deepcopy(action[1]["sp_actions"]),
                 }
             )
             self.public_events.append(
@@ -297,7 +296,7 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
     assert trajectory["simulator_baseline"] == SIMULATOR_BASELINE
     assert trajectory["environment_seed"] == 402
     assert trajectory["public_event_schema_version"] == (
-        "classic7_public_event_sequence_v3"
+        "classic7_public_event_sequence_v4"
     )
     assert [player["player_id"] for player in trajectory["players"]] == list(
         range(1, 8)
@@ -334,7 +333,7 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
         if event["event_type"] == "public_speech"
     )
     assert committed_speech["raw_text"] == STRICT_SPEECH_ACTION[1]["raw_text"]
-    assert committed_speech["sp_actions"] == STRICT_SPEECH_ACTION[1]["sp_actions"]
+    assert "sp_actions" not in committed_speech
     assert vote_transition["public_events_appended"][-1]["event_type"] == (
         "exile_result"
     )
@@ -402,7 +401,7 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
 
     assert all(not item.startswith("view:2:") for item in env.order)
     assert any(item.startswith("view:1:") for item in env.order)
-    assert OBSERVATION_SCHEMA_VERSION == "classic7_agent_observation_v1"
+    assert OBSERVATION_SCHEMA_VERSION == "classic7_agent_observation_v2"
 
 
 def test_agent_failure_writes_longest_committed_prefix(tmp_path):

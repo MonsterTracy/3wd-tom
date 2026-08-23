@@ -23,6 +23,12 @@ from werewolf.models.twd_tom.schema import (
     parse_speech_action,
     validate_player_suspicion,
 )
+from werewolf.models.twd_tom.speech_annotations import (
+    SPEECH_ACTION_ONTOLOGY_VERSION,
+    SPEECH_ANNOTATION_SCHEMA_VERSION,
+    normalize_speech_annotations,
+    speech_annotation_digest,
+)
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.speech.private_belief_perceiver import (
     STATUS_OK,
@@ -32,7 +38,7 @@ from werewolf.speech.private_belief_perceiver import (
 )
 
 
-SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v3"
+SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v4"
 PUBLIC_SPEECH_EVENTS = {"speech", "speech_pk"}
 REPORT_TRIGGERS = {"pre_public_speech", "pre_public_speech_pk"}
 SAMPLE_FIELDS = frozenset(
@@ -46,6 +52,10 @@ SAMPLE_FIELDS = frozenset(
         "public_event_schema_version",
         "public_events",
         "public_event_digest",
+        "speech_annotation_schema_version",
+        "speech_action_ontology_version",
+        "speech_annotations",
+        "speech_annotation_digest",
         "structured_input_digest",
         "observer_ids",
         "suspected_werewolves",
@@ -157,6 +167,8 @@ class PublicSnapshot:
     observer_ids: tuple[int, ...]
     public_events: tuple[Mapping[str, Any], ...]
     public_event_digest: str
+    speech_annotations: tuple[Mapping[str, Any], ...]
+    speech_annotation_digest: str
     structured_input_digest: str
     sp_actions: tuple[tuple[str, str, str | None], ...]
     label_cutoff_step_idx: int
@@ -210,6 +222,7 @@ def freeze_public_snapshot(
     report_trigger: str,
     observer_ids: Sequence[int],
     public_events: Sequence[Any],
+    speech_annotations: Sequence[Any],
 ) -> PublicSnapshot:
     """Freeze the single public cutoff used by model and all reporters."""
 
@@ -251,9 +264,17 @@ def freeze_public_snapshot(
         raise ValueError(
             "snapshot phase must match latest public phase_change"
         )
+    normalized_annotations = normalize_speech_annotations(
+        speech_annotations,
+        public_events=normalized_events,
+        require_complete=True,
+    )
     normalized_actions = tuple(
         tuple(parse_speech_action(action).to_list())
-        for action in public_speech_actions(normalized_events)
+        for action in public_speech_actions(
+            normalized_events,
+            normalized_annotations,
+        )
     )
     return PublicSnapshot(
         game_id=game_id,
@@ -267,7 +288,17 @@ def freeze_public_snapshot(
             for event in normalized_events
         ),
         public_event_digest=public_event_digest(normalized_events),
-        structured_input_digest=structured_input_digest(normalized_events),
+        speech_annotations=tuple(
+            _freeze_json_value(annotation)
+            for annotation in normalized_annotations
+        ),
+        speech_annotation_digest=speech_annotation_digest(
+            normalized_annotations
+        ),
+        structured_input_digest=structured_input_digest(
+            normalized_events,
+            normalized_annotations,
+        ),
         sp_actions=normalized_actions,
         label_cutoff_step_idx=step_idx,
         public_action_count=len(normalized_actions),
@@ -355,13 +386,22 @@ def make_twd_tom_sample(
         known_non_werewolves[subject] = closed_non_wolves
 
     public_events = copy_public_events(public_snapshot.public_events)
+    speech_annotations = normalize_speech_annotations(
+        public_snapshot.speech_annotations,
+        public_events=public_events,
+        require_complete=True,
+    )
     if public_event_digest(public_events) != public_snapshot.public_event_digest:
         raise RuntimeError("frozen public event digest changed")
-    if structured_input_digest(public_events) != (
+    if speech_annotation_digest(speech_annotations) != (
+        public_snapshot.speech_annotation_digest
+    ):
+        raise RuntimeError("frozen speech annotation digest changed")
+    if structured_input_digest(public_events, speech_annotations) != (
         public_snapshot.structured_input_digest
     ):
         raise RuntimeError("frozen structured input digest changed")
-    if public_speech_actions(public_events) != [
+    if public_speech_actions(public_events, speech_annotations) != [
         list(action) for action in public_snapshot.sp_actions
     ]:
         raise RuntimeError("frozen public speech actions changed")
@@ -376,6 +416,10 @@ def make_twd_tom_sample(
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "public_events": public_events,
         "public_event_digest": public_snapshot.public_event_digest,
+        "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
+        "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
+        "speech_annotations": speech_annotations,
+        "speech_annotation_digest": public_snapshot.speech_annotation_digest,
         "structured_input_digest": public_snapshot.structured_input_digest,
         "observer_ids": list(public_snapshot.observer_ids),
         "suspected_werewolves": suspicions,
