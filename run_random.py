@@ -29,6 +29,7 @@ from werewolf.models.twd_tom.collector import (
 )
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
+    speaker_pre_speech_belief_from_sample,
 )
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.speech.private_belief_perceiver import (
@@ -101,6 +102,7 @@ def eval(
         ]
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
+        pre_speech_belief = None
         if trajectory_recorder is not None:
             trajectory_recorder.before_agent_act(
                 env,
@@ -118,7 +120,7 @@ def eval(
             trigger in PUBLIC_SPEECH_EVENTS
         ):
             if sample_collector is not None:
-                sample_collector.record(
+                collected_sample = sample_collector.record(
                     env,
                     step_idx=step_idx,
                     trigger=trigger,
@@ -128,6 +130,12 @@ def eval(
                         _alive_observer_ids(env)
                     ),
                 )
+                if collected_sample is not None:
+                    pre_speech_belief = speaker_pre_speech_belief_from_sample(
+                        collected_sample,
+                        speaker_id=current_act_idx,
+                        step_idx=step_idx,
+                    )
 
         audit_context = (
             call_audit.gameplay_context(
@@ -141,7 +149,24 @@ def eval(
         action = None
         try:
             with audit_context:
-                action = agent_list[current_act_idx - 1].act(obs)
+                acting_agent = agent_list[current_act_idx - 1]
+                if pre_speech_belief is None:
+                    action = acting_agent.act(obs)
+                else:
+                    belief_aware_act = getattr(
+                        acting_agent,
+                        "act_with_pre_speech_belief",
+                        None,
+                    )
+                    if not callable(belief_aware_act):
+                        raise TypeError(
+                            "speech agent must support immutable PRE-belief "
+                            "cognition handoff"
+                        )
+                    action = belief_aware_act(
+                        obs,
+                        pre_speech_belief=pre_speech_belief,
+                    )
         except Exception as exc:
             if trajectory_recorder is not None:
                 if action is not None:
@@ -602,7 +627,7 @@ def build_runtime(
         0,
     ) != 0:
         raise ValueError(
-            "TWDM 7-player environment "
+            "classic-7 ToM environment "
             "does not support Hunter."
         )
 
@@ -880,7 +905,7 @@ def build_arg_parser() -> (
         "--config",
         type=str,
         default=(
-            "configs/random_models.yaml"
+            "configs/twd_tom_server_qwen35_9b.yaml"
         ),
         help=(
             "path to the game runtime config"

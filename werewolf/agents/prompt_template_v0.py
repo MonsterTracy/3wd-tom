@@ -247,7 +247,6 @@ def freeze_discussion_candidates(observation):
         for target in range(1, 8):
             if (
                 action == "point_as_werewolf"
-                and identity == "Werewolf"
                 and target == actor
             ):
                 continue
@@ -322,6 +321,8 @@ def render_deterministic_public_speech(
     for act in discussion_acts:
         if act.action not in _DISCUSSION_ACTION_REALIZATIONS:
             raise ValueError(f"unknown DiscussionAct action: {act.action!r}")
+        if act.action == "point_as_werewolf" and act.target == speaker_id:
+            raise ValueError("a speaker cannot accuse itself of being Werewolf")
         if (
             act.action in _SELF_ROLE_CLAIM_REALIZATIONS
             and act.target == speaker_id
@@ -1011,6 +1012,7 @@ def build_day_cognition_prompt(
     role_options,
     candidate_snapshot,
     claim_catalog,
+    pre_speech_belief=None,
 ):
     """Ask for one private Day cognition and frozen public discussion intent."""
 
@@ -1040,13 +1042,35 @@ def build_day_cognition_prompt(
         )
     )
     claim_ids = [claim.claim_id for claim in claim_catalog]
+    pre_speech_belief_block = ""
+    if pre_speech_belief is not None:
+        prompt_payload = pre_speech_belief.prompt_payload()
+        pre_speech_belief_block = f"""
+
+PRE-SPEECH PRIVATE BELIEF (IMMUTABLE INPUT)
+{json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"))}
+This is the exact readonly self-report captured at the current PRE boundary.
+Use it as the fixed private wolf-suspicion support for this cognition; do not
+regenerate, add, delete or reinterpret its entries. Internal belief and public
+communication may strategically differ, so it does not force a matching public
+claim or vote stance."""
     return f"""{context}
+
+{pre_speech_belief_block}
 
 {belief_instructions}
 
 DISCUSSION ACTION SEMANTICS
 {_render_discussion_action_glossary()}
 These are communication semantics only. They are never truth labels.
+
+INTERACTION GUIDANCE
+When the current table state supports a meaningful response, strongly prefer at
+least one existing support(...) or oppose(...) action that states a
+current table judgment, instead of emitting only an isolated role or skill
+declaration. Keep the total public-content selection within the existing
+zero-to-two limit. No new action type is introduced, and point_as_werewolf can
+never target the speaker.
 
 DISCUSSION INTENT OUTPUT
 Set public_content_selection.mode to none, one or two. For one, first_index is

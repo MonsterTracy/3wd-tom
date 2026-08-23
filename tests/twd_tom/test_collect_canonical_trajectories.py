@@ -66,6 +66,20 @@ def runtime_config():
                 }
             ],
         },
+        "pipeline": {
+            "public_event_schema_version": batch_module.PUBLIC_EVENT_SCHEMA_VERSION,
+            "raw_schema_version": batch_module.SAMPLE_SCHEMA_VERSION,
+            "projected_schema_version": batch_module.PROJECTED_SCHEMA_VERSION,
+            "projection_version": batch_module.TARGET_CONVERSION,
+            "collection": {
+                "game_count": 3,
+                "seeds": [1001, 1002, 1003],
+                "max_gameplay_calls_per_game": 10,
+                "max_belief_calls_per_game": 10,
+                "max_total_calls_per_game": 20,
+                "max_wall_seconds_per_game": 60.0,
+            },
+        },
     }
 
 
@@ -297,8 +311,15 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
         return object(), agents, list(ROLES), list(PROFILES)
 
     def fake_run_game(
-        env, agents, roles, *, sample_collector, trajectory_recorder
+        env,
+        agents,
+        roles,
+        *,
+        sample_collector,
+        call_audit,
+        trajectory_recorder,
     ):
+        assert call_audit.game_id == trajectory_recorder._base["game_id"]
         seed = trajectory_recorder._base["environment_seed"]
         calls["game"].append(seed)
         if seed == fail_seed:
@@ -341,6 +362,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["batch_code_commit"] == COMMIT
     assert plan["seeds"] == [1001, 1002, 1003]
     assert plan["planned_game_count"] == 3
+    assert plan["collection_contract"]["seeds"] == [1001, 1002, 1003]
     assert plan["collectors_enabled"] is True
     assert plan["backend_max_retries"] == 0
     assert plan["stop_on_first_failure"] is True
@@ -381,6 +403,8 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert game_summary["environment_seed"] == seed
         assert game_summary["completion_status"] == "COMPLETE"
         assert game_summary["belief_snapshot_count"] == 1
+        assert game_summary["call_audit"]["within_budget"] is True
+        assert (game_dir / "call_audit.json").is_file()
         assert game_summary["belief_snapshots_sha256"] == batch_module._sha256(
             belief_path
         )
@@ -390,7 +414,9 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
 
 
 def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch):
-    config_path = _write_config(tmp_path)
+    config = runtime_config()
+    config["pipeline"]["collection"]["seeds"] = [2001, 2002, 2003]
+    config_path = _write_config(tmp_path, config)
     output_root = tmp_path / "failure-run"
     calls = _install_fake_runtime(monkeypatch, output_root, fail_seed=2002)
 
@@ -418,6 +444,9 @@ def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch)
     assert failure["stop_on_first_failure"] is True
     assert failure["rerun_on_failure"] is False
     assert failure["replacement_seed_on_failure"] is False
+    assert (
+        output_root / "games" / "game_0002_seed_2002" / "call_audit.json"
+    ).is_file()
     payload = deepcopy(failure)
     digest = payload.pop("failure_digest")
     assert digest == canonical_digest(payload)
@@ -460,6 +489,32 @@ def test_non_classic7_config_is_rejected_before_output_publication(tmp_path, mon
             run_id="bad-config",
             seed_start=1,
             game_count=1,
+            output_root=output_root,
+            repo_root=tmp_path,
+        )
+    assert not output_root.exists()
+
+
+def test_pipeline_collection_must_match_cli_before_output_publication(
+    tmp_path,
+    monkeypatch,
+):
+    config = runtime_config()
+    config["pipeline"]["collection"]["seeds"] = [1, 2, 4]
+    config_path = _write_config(tmp_path, config)
+    output_root = tmp_path / "bad-pipeline"
+    monkeypatch.setattr(
+        batch_module,
+        "_read_code_provenance",
+        lambda _root: {"batch_code_commit": COMMIT, "git_worktree_clean": True},
+    )
+
+    with pytest.raises(ValueError, match="exactly match"):
+        batch_module.collect_canonical_trajectory_batch(
+            config_path=config_path,
+            run_id="bad-pipeline",
+            seed_start=1,
+            game_count=3,
             output_root=output_root,
             repo_root=tmp_path,
         )
@@ -597,4 +652,41 @@ def test_complete_artifact_validator_checks_boundary_and_record_digests(tmp_path
             expected_run_id="run-001",
             expected_seed=11,
             expected_source_commit=COMMIT,
+        )
+
+
+def test_belief_artifact_rejects_any_failed_alive_observer(tmp_path):
+    players = [
+        {
+            "player_id": index,
+            "role": ROLES[index - 1],
+            "profile_name": PROFILES[index - 1],
+            "backend_id": f"backend-{index}",
+            "model_name": f"model-{index}",
+        }
+        for index in range(1, 8)
+    ]
+    recorder = batch_module.CanonicalGameInteractionTrajectoryRecorder(
+        tmp_path / "trajectory.json",
+        tmp_path / "observer_views.json",
+        game_id="game_001",
+        run_id="run-001",
+        source_commit=COMMIT,
+        environment_seed=11,
+        runtime_config={"x": 1},
+        players=players,
+    )
+    _complete_artifacts(recorder)
+    snapshot = _belief_snapshot("game_001")
+    snapshot["belief_status"]["player3"] = "parse_error"
+    snapshot["belief_errors"]["player3"] = "synthetic parse failure"
+    snapshot["suspected_werewolves"]["player3"] = None
+    belief_path = tmp_path / "belief_snapshots.jsonl"
+    belief_path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="status=ok.*player3"):
+        batch_module.validate_belief_snapshot_artifact(
+            belief_path,
+            tmp_path / "observer_views.json",
+            expected_game_id="game_001",
         )

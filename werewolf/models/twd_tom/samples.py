@@ -16,12 +16,12 @@ from werewolf.models.twd_tom.public_events import (
     structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import (
-    canonicalize_player_set,
     LABEL_PROMPT_VERSION,
     LABEL_PROVENANCE,
     NUM_PLAYERS,
     normalize_player,
     parse_speech_action,
+    validate_player_suspicion,
 )
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.speech.private_belief_perceiver import (
@@ -32,7 +32,7 @@ from werewolf.speech.private_belief_perceiver import (
 )
 
 
-SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v2"
+SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v3"
 PUBLIC_SPEECH_EVENTS = {"speech", "speech_pk"}
 REPORT_TRIGGERS = {"pre_public_speech", "pre_public_speech_pk"}
 SAMPLE_FIELDS = frozenset(
@@ -63,6 +63,89 @@ SAMPLE_FIELDS = frozenset(
 
 
 @dataclass(frozen=True)
+class SpeakerPreSpeechBelief:
+    """Immutable handoff of the speaker row from collection to cognition."""
+
+    observer_id: str
+    suspected_werewolves: tuple[str, ...]
+    known_werewolves: tuple[str, ...]
+    known_non_werewolves: tuple[str, ...]
+    source_schema_version: str
+    label_prompt_version: str
+    label_provenance: str
+    step_idx: int
+    structured_input_digest: str
+
+    def prompt_payload(self) -> dict[str, list[str]]:
+        return {
+            "suspected_werewolves": list(self.suspected_werewolves),
+        }
+
+
+def speaker_pre_speech_belief_from_sample(
+    sample: Mapping[str, Any],
+    *,
+    speaker_id: int,
+    step_idx: int,
+) -> SpeakerPreSpeechBelief:
+    """Extract the exact valid speaker report from one just-written sample."""
+
+    if not isinstance(sample, Mapping):
+        raise TypeError("collected belief sample must be a mapping")
+    if sample.get("schema_version") != SAMPLE_SCHEMA_VERSION:
+        raise ValueError("unsupported speaker belief sample schema_version")
+    if sample.get("speaker_id") != speaker_id:
+        raise ValueError("speaker belief sample has a different speaker_id")
+    if sample.get("step_idx") != step_idx:
+        raise ValueError("speaker belief sample has a different step_idx")
+    if sample.get("label_cutoff_step_idx") != step_idx:
+        raise ValueError("speaker belief cutoff must equal the current step_idx")
+    if sample.get("label_prompt_version") != LABEL_PROMPT_VERSION:
+        raise ValueError("unsupported speaker belief label_prompt_version")
+    if sample.get("label_provenance") != LABEL_PROVENANCE:
+        raise ValueError("unsupported speaker belief label_provenance")
+
+    observer = normalize_player(speaker_id)
+    status = sample.get("belief_status", {}).get(observer)
+    if status != STATUS_OK:
+        raise ValueError("speaker PRE belief requires status=ok")
+    if sample.get("belief_errors", {}).get(observer) is not None:
+        raise ValueError("speaker PRE belief status=ok requires null error")
+
+    known_wolves = sample.get("known_werewolves", {}).get(observer)
+    known_non_wolves = sample.get("known_non_werewolves", {}).get(observer)
+    closed_wolves, closed_non_wolves = close_hard_knowledge(
+        known_wolves,
+        known_non_wolves,
+    )
+    if known_wolves != closed_wolves or known_non_wolves != closed_non_wolves:
+        raise ValueError("speaker PRE hard knowledge must already be closed")
+    suspected = validate_player_suspicion(
+        sample.get("suspected_werewolves", {}).get(observer),
+        closed_wolves,
+        closed_non_wolves,
+        observer_id=observer,
+    )
+    if sample["suspected_werewolves"][observer] != suspected:
+        raise ValueError("speaker PRE suspicion must use canonical order")
+
+    digest = sample.get("structured_input_digest")
+    if not isinstance(digest, str) or not digest:
+        raise ValueError("speaker PRE belief requires structured_input_digest")
+    return SpeakerPreSpeechBelief(
+        observer_id=observer,
+        suspected_werewolves=tuple(suspected),
+        known_werewolves=tuple(closed_wolves),
+        known_non_werewolves=tuple(closed_non_wolves),
+        source_schema_version=SAMPLE_SCHEMA_VERSION,
+        label_prompt_version=LABEL_PROMPT_VERSION,
+        label_provenance=LABEL_PROVENANCE,
+        step_idx=step_idx,
+        structured_input_digest=digest,
+    )
+
+
+@dataclass(frozen=True)
 class PublicSnapshot:
     """Immutable model-visible public history shared by all reporters."""
 
@@ -82,7 +165,7 @@ class PublicSnapshot:
 
     @property
     def public_history_digest(self) -> str:
-        """Prompt-v2 audit alias; not part of the serialized v2 schema."""
+        """Audit alias for the frozen structured-input digest."""
 
         return self.structured_input_digest
 
@@ -244,9 +327,11 @@ def make_twd_tom_sample(
         if status == STATUS_OK:
             if not isinstance(suspicion, list):
                 raise ValueError(f"{subject} ok report requires a list")
-            normalized_suspicion = canonicalize_player_set(
+            normalized_suspicion = validate_player_suspicion(
                 suspicion,
-                field_name="suspected_werewolves",
+                closed_wolves,
+                closed_non_wolves,
+                observer_id=subject,
             )
             if error is not None:
                 raise ValueError(f"{subject} ok report cannot contain an error")
@@ -311,6 +396,8 @@ __all__ = [
     "PUBLIC_SPEECH_EVENTS",
     "REPORT_TRIGGERS",
     "SAMPLE_FIELDS",
+    "SpeakerPreSpeechBelief",
+    "speaker_pre_speech_belief_from_sample",
     "PublicSnapshot",
     "freeze_public_snapshot",
     "make_twd_tom_sample",

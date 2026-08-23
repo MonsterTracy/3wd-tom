@@ -23,10 +23,10 @@ RAW_LABEL_FIELD = "suspected_werewolves"
 RAW_LABEL_TYPE = "finite_symbolic_player_set"
 NUMERIC_ANNOTATION_PRESENT = False
 RAW_LABEL_SEMANTICS = (
-    "observer_internal_player_suspicion_set_v1"
+    "observer_internal_hard_knowledge_consistent_player_suspicion_set_v2"
 )
 SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v1"
-LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v1"
+LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v2"
 LABEL_SOURCE = "playing_agent_readonly_self_report"
 LABEL_CONTEXT_SCOPE = "playing_agent_legally_available_information_state"
 MODEL_INPUT_SCOPE = "structured_public_events_only"
@@ -38,7 +38,7 @@ PRIVATE_CONTEXT_SERIALIZED = False
 REPORT_TIMING = "pre_public_speech"
 TRUTH_BASED_OBSERVER_SELECTION = False
 OBSERVER_SELECTION = "publicly_alive_players"
-LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v3"
+LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v4"
 PAD_TOKEN = "<pad>"
 NONE_TOKEN = "<none>"
 
@@ -174,6 +174,55 @@ def normalize_player(value: Any) -> str:
         )
 
     return f"player{player_id}"
+
+
+def validate_player_suspicion(
+    suspected_werewolves: Any,
+    known_werewolves: Any,
+    known_non_werewolves: Any,
+    *,
+    observer_id: Any,
+) -> list[str]:
+    """Validate one soft suspicion support against legal hard knowledge."""
+
+    observer = normalize_player(observer_id)
+    suspected = canonicalize_player_set(
+        suspected_werewolves,
+        field_name="suspected_werewolves",
+    )
+    known_wolves = canonicalize_player_set(
+        known_werewolves,
+        field_name="known_werewolves",
+    )
+    known_non_wolves = canonicalize_player_set(
+        known_non_werewolves,
+        field_name="known_non_werewolves",
+    )
+    if set(known_wolves) & set(known_non_wolves):
+        raise ValueError("hard knowledge sets must be disjoint")
+    if observer in suspected:
+        raise ValueError("suspected_werewolves cannot contain the observer")
+
+    missing = sorted(
+        (set(known_wolves) - {observer}) - set(suspected),
+        key=PLAYER_TO_ID.__getitem__,
+    )
+    if missing:
+        raise ValueError(
+            "suspected_werewolves must include all known Werewolves other "
+            f"than the observer; missing={missing}"
+        )
+
+    forbidden_non_wolves = sorted(
+        set(suspected) & set(known_non_wolves),
+        key=PLAYER_TO_ID.__getitem__,
+    )
+    if forbidden_non_wolves:
+        raise ValueError(
+            "suspected_werewolves cannot contain known non-Werewolves; "
+            f"forbidden={forbidden_non_wolves}"
+        )
+    return suspected
 
 
 def normalize_action(value: Any) -> str:
@@ -327,5 +376,6 @@ __all__ = [
     "normalize_action",
     "normalize_guess_role",
     "canonicalize_player_set",
+    "validate_player_suspicion",
     "parse_speech_action",
 ]

@@ -2,6 +2,9 @@
 
 The local MLX runtime uses the existing OpenAI-compatible backend interface.
 The project does not download models or start and stop these services.
+The configured endpoints must implement OpenAI-compatible strict JSON Schema
+responses; collection fails closed if an endpoint does not provide that
+capability because speaker PRE belief is consumed by strict day cognition.
 
 Start the three independent servers in separate terminals:
 
@@ -53,13 +56,3 @@ For `localhost`, the `127.0.0.0/8` range, and `::1`, the OpenAI-compatible
 client explicitly ignores environment proxy settings. Remote and cloud
 endpoints retain the SDK's default proxy behavior, so users do not need to set
 `NO_PROXY` manually. This does not change retry or fail-closed behavior.
-
-The historical V2.7 validator remains available in the archive and does not
-contact a model service:
-
-```bash
-python -m archive.legacy_tom.script.twd_tom.pipeline \
-  --config configs/twd_tom_local_mlx.yaml \
-  --run-id local_mlx_check \
-  --stage validate
-```

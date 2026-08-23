@@ -20,12 +20,14 @@ flowchart LR
     O --> Q[playing-agent readonly belief query]
     Q --> R[suspected_werewolves 符号集合]
     R --> J[raw belief snapshot JSONL]
+    R -->|speaker 同一份冻结报告| G[strict day cognition]
+    G --> S[确定性公开发言]
     J --> M[按 game 进行 canonical materialization]
     M --> D[稀疏集合到 belief row 转换]
     D --> T[7×7 observer-conditioned target]
 ```
 
-同一冻结边界用于所有观察者。collector 只选择公开存活玩家，不接收真实角色标签；每次 query 前后比较 playing agent 状态，任何状态变化都直接失败。
+同一冻结边界用于所有观察者。collector 只选择公开存活玩家，不接收真实角色标签；每次 query 前后比较 playing agent 状态，任何状态变化都直接失败。说话者的成功报告由冻结对象原样传入紧随其后的 strict day cognition，其他观察者报告仅用于监督；说话者报告失败时不得继续生成该次公开发言。
 
 ## 不属于主线的路径
 
@@ -37,7 +39,7 @@ flowchart LR
 - online shadow inference；
 - tom-v1 formal reporter 与 pilot pipeline。
 
-Dataset 只以结构化公开事件作为模型特征。非空怀疑集合只在集合成员上均分，空集合在六个非自身玩家上均分；`observer_alive_mask` 控制有效行，`diagonal_target_mask` 只排除自身列。死亡玩家仍保留为 target。raw hard knowledge 只做 provenance、合法性与泄漏审计，不约束 self-report，也不进入模型特征。
+Dataset 只以结构化公开事件作为模型特征。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合仅在 `P - F` 上均分，并且仅当 `R` 为空时合法。`observer_alive_mask` 控制有效行，`diagonal_target_mask` 只排除自身列。死亡玩家仍保留为 target；hard knowledge 不进入模型特征。
 
 ## 模型目标
 

@@ -193,7 +193,7 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
         )
     )
     assert sample["schema_version"] == (
-        "classic7_pre_speech_player_suspicion_v2"
+        "classic7_pre_speech_player_suspicion_v3"
     )
     assert {
         len(suspicion)
@@ -247,7 +247,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     responses = {
         1: '{"suspected_werewolves":["player2","player3"]}',
         2: '{"suspected_werewolves":["player1"]}',
-        3: '{"suspected_werewolves":["player1"]}',
+        3: '{"suspected_werewolves":["player1","player4"]}',
         4: '{"suspected_werewolves":[]}',
         5: '{"suspected_werewolves":[]}',
         6: '{"suspected_werewolves":["player1","player2","player3"]}',
@@ -335,7 +335,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     assert {
         sample["schema_version"]
         for sample in raw_samples
-    } == {"classic7_pre_speech_player_suspicion_v2"}
+    } == {"classic7_pre_speech_player_suspicion_v3"}
     assert public_speech_actions(raw_samples[0]["public_events"]) == []
     assert public_speech_actions(raw_samples[1]["public_events"]) == first_actions
     assert raw_samples[0]["observer_ids"] == alive_observers

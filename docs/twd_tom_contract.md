@@ -4,6 +4,16 @@
 
 每个 raw sample 在 `speech` 或 `speech_pk` 动作生成前创建。冻结的 `public_events` 必须截止于与当前 speaker 对应的 `turn_start`，且 `label_cutoff_step_idx == step_idx`。
 
+当前冻结版本：
+
+- raw sample：`classic7_pre_speech_player_suspicion_v3`；
+- label prompt：`classic7_pre_speech_player_suspicion_prompt_v4`；
+- label provenance：`alive_observer_readonly_pre_speech_report_v2`；
+- target conversion：`hard_knowledge_consistent_sparse_suspicion_uniform_support_v2`；
+- public event：`classic7_public_event_sequence_v3`。
+
+旧版本不做兼容读取或隐式迁移；需要重新采集。
+
 ## 观察者
 
 采集对象是当前公开存活玩家。对每个 `observer_id`：
@@ -17,7 +27,18 @@
 
 ## 原始标签
 
-成功报告的原始标签是按 canonical player 顺序保存的 `suspected_werewolves` 集合。失败报告保存明确 status/error，并将该观察者的 suspicion 记为 `null`；不进行修复、重试、fallback、补猜或概率化。
+成功报告的原始标签是按 canonical player 顺序保存的 `suspected_werewolves` 集合。它表示观察者在合法私有信息状态下的狼人怀疑支持集，而不是公开指控、真实角色、完整双狼人组合或 reporter 概率。
+
+对观察者 `i`，令 `K+` 为 Environment 规则推导并闭包后的已知狼人，`K-` 为已知非狼人，`R = K+ - {i}`，`F = K- ∪ {i}`。成功集合 `S` 必须满足：
+
+```text
+R ⊆ S
+S ∩ F = ∅
+```
+
+因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。失败报告保存明确 status/error，并将该观察者的 suspicion 记为 `null`；不进行修复、重试、fallback、补猜或概率化。包含任一非 `ok` 存活观察者的 snapshot 不能进入训练 Dataset。
+
+在正式 canonical collector 中，这一条件不是延迟到训练时才检查：任一存活 observer 非 `ok` 会使当前 game 的 artifact validation 失败，batch 随即停止。失败目录和 `call_audit.json` 保留，不能用 replacement seed 补位。
 
 raw sample 保存 public history 的两个 digest、观察者集合、每个观察者的 self-report、hard knowledge、状态与 backend provenance。它不保存 raw model response、私有 observation、pair target 或概率矩阵。
 
@@ -25,7 +46,7 @@ raw sample 保存 public history 的两个 digest、观察者集合、每个观�
 
 tom-v2 只有一个 Dataset。输入是同一时间边界的结构化公开历史和存活观察者集合；raw label 直接读取 playing-agent self-report 中的 `suspected_werewolves`，不经过 external annotation、public-only reporter、ToM1/ToM2 materialization 或旧 lineage adapter。
 
-Dataset 将每个观察者的怀疑集合确定性转换为长度 7 的稀疏 belief row：非空集合只在被列入的玩家上均分概率，其他玩家为 0；空集合对应六个非自身玩家的均匀分布。观察者自身不能出现在怀疑集合中且对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
+Dataset 将每个观察者的合法怀疑集合确定性转换为长度 7 的稀疏 belief row：非空集合只在被列入的玩家上均分概率，其他玩家为 0；空集合只在 admissible players `P - F` 上均匀分布。观察者自身对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
 
 Dataset 输出：
 
@@ -33,11 +54,21 @@ Dataset 输出：
 - `observer_alive_mask`：`[7]` 布尔张量，只表示该时间点公开存活的 observer；
 - `diagonal_target_mask`：`[7, 7]` 布尔张量，只排除 observer 自身列。
 
-死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。raw sample 中的 hard knowledge 只保留为 provenance，并用于合法性审计与泄漏检查；它不约束、补充或删除 self-report 内容，也不进入模型特征或 Dataset 输出。训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜、不生成额外有效性 mask。
+死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。raw sample 中的 hard knowledge 是 label 合法性与空集合 fallback 的约束，但不进入模型特征或 Dataset 输出。训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜、不生成额外有效性 mask。
+
+## Speaker cognition 同源契约
+
+collector 返回 sample 后，从该 sample 中提取当前 speaker 的同一行成功报告，并将其封装为不可变 `SpeakerPreSpeechBelief`。对象同时锁定 observer、集合、hard knowledge、schema/prompt/provenance、step 和 structured-input digest；随后只能通过 `act_with_pre_speech_belief()` 进入紧邻的 strict day cognition。day cognition 不得重新生成、增删或替换这份私有怀疑支持，但公开 communication 仍可出于阵营策略与内部 belief 不同。
+
+speaker report 非 `ok`、边界不匹配、agent 不支持专用入口或非 strict gameplay 时，必须在公开发言生成前失败。非 speaker 的报告不进入其行动上下文。
+
+公开发言继续只使用既有 action vocabulary 和确定性 renderer。候选 prompt 鼓励用现有 `support` / `oppose` 表达当前桌面判断；不增加 action 或监督标签。所有身份都禁止 `point_as_werewolf(observer)`，candidate builder 与 renderer 双重拒绝。
 
 ## Canonical materialization
 
 `script/twd_tom/materialize_canonical_belief_dataset.py` 扫描 `canonical_root/games/*/belief_snapshots.jsonl`，按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+
+物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。
 
 ## 唯一来源
 
@@ -47,4 +78,6 @@ Dataset 输出：
 
 模型输入只有结构化 `public_history <= t`，并对七个 canonical observer query 共享参数。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`。
 
-对每个存活 observer，在六个非自身 target 上计算 soft-target cross entropy；batch loss 是所有存活 observer 行的算术平均。死亡 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。checkpoint、metrics、train 和 eval 均使用这一单一目标，不保存旧任务阶数或组合类别字段。
+对每个存活 observer，在六个非自身 target 位置上计算 soft-target cross entropy；其中 hard knowledge 不允许的列已有 target 概率为 0。batch loss 是所有存活 observer 行的算术平均。死亡 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。checkpoint、metrics、train 和 eval 均使用这一单一目标，不保存旧任务阶数或组合类别字段。
+
+评估中的 top-1 指标定义为预测最高概率集合是否与 soft target 的正概率支持集相交，不再把 `target.argmax()` 当作唯一类别。同时报告六个非自身玩家均匀分布的固定 baseline cross entropy、total variation 与 mean absolute error，便于判断模型是否真正超过无信息预测。

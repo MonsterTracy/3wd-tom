@@ -35,7 +35,9 @@ from werewolf.models.twd_tom.metrics import (
 )
 from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION,
+    SpeakerPreSpeechBelief,
     make_twd_tom_sample,
+    speaker_pre_speech_belief_from_sample,
 )
 
 
@@ -53,5 +55,7 @@ __all__ = [
     "masked_belief_probabilities",
     "compute_belief_metrics",
     "SAMPLE_SCHEMA_VERSION",
+    "SpeakerPreSpeechBelief",
     "make_twd_tom_sample",
+    "speaker_pre_speech_belief_from_sample",
 ]

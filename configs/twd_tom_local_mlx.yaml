@@ -1,16 +1,19 @@
 backends:
   local_qwen25_7b:
     type: openai_compatible
+    supports_json_schema: true
     base_url: "http://127.0.0.1:8080/v1"
     default_model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
 
   local_llama31_8b:
     type: openai_compatible
+    supports_json_schema: true
     base_url: "http://127.0.0.1:8081/v1"
     default_model: "mlx-community/Llama-3.1-8B-Instruct-4bit"
 
   local_mistral7b_v03:
     type: openai_compatible
+    supports_json_schema: true
     base_url: "http://127.0.0.1:8082/v1"
     default_model: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
 
@@ -40,6 +43,7 @@ agent_config:
       model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
       model_params:
         temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
       sample_ratio: 1.0
 
     - profile_name: local_llama31_8b
@@ -48,6 +52,7 @@ agent_config:
       model: "mlx-community/Llama-3.1-8B-Instruct-4bit"
       model_params:
         temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
       sample_ratio: 1.0
 
     - profile_name: local_mistral7b_v03
@@ -56,13 +61,14 @@ agent_config:
       model: "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
       model_params:
         temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
       sample_ratio: 1.0
 
 pipeline:
   public_event_schema_version: classic7_public_event_sequence_v3
-  raw_schema_version: classic7_pre_speech_player_suspicion_v2
-  projected_schema_version: classic7_pre_speech_suspicion_pair_distribution_v2
-  projection_version: classic7_player_suspicion_pair_projection_base2_v1
+  raw_schema_version: classic7_pre_speech_player_suspicion_v3
+  projected_schema_version: classic7_observer_conditioned_belief_matrix_v1
+  projection_version: hard_knowledge_consistent_sparse_suspicion_uniform_support_v2
 
   collection:
     game_count: 3

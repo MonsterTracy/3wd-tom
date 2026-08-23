@@ -6,7 +6,6 @@ import unittest
 
 from werewolf.agents import agent_registry
 from werewolf.agents.gpt_agent import GPTAgent
-from werewolf.agents.twdm_agent import TWDMStrategyAgent
 from werewolf.agents.llm_agent import (
     BELIEF_ROLES,
     BeliefValidationError,
@@ -41,6 +40,7 @@ from werewolf.agents.prompt_template_v0 import (
 )
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
+from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
 from werewolf.registry import Registry
 
 
@@ -1327,6 +1327,41 @@ class GameplayCognitionTest(unittest.TestCase):
         for private_cognition in ("当前信息有限。", "继续观察。", '"roles"'):
             self.assertNotIn(private_cognition, result[1]["raw_text"])
 
+    def test_day_cognition_receives_exact_pre_speech_suspicion_support(self):
+        observation = _observation()
+        backend = MetadataBackend([_day_cognition(observation)])
+        agent = self._agent(backend)
+        pre_speech_belief = SpeakerPreSpeechBelief(
+            observer_id="player1",
+            suspected_werewolves=("player3", "player7"),
+            known_werewolves=(),
+            known_non_werewolves=("player1",),
+            source_schema_version=(
+                "classic7_pre_speech_player_suspicion_v3"
+            ),
+            label_prompt_version=(
+                "classic7_pre_speech_player_suspicion_prompt_v4"
+            ),
+            label_provenance=(
+                "alive_observer_readonly_pre_speech_report_v2"
+            ),
+            step_idx=4,
+            structured_input_digest="digest-4",
+        )
+
+        agent.act_with_pre_speech_belief(
+            observation,
+            pre_speech_belief=pre_speech_belief,
+        )
+
+        prompt = backend.calls[0]["messages"][0]["content"]
+        self.assertIn("PRE-SPEECH PRIVATE BELIEF (IMMUTABLE INPUT)", prompt)
+        self.assertIn(
+            '{"suspected_werewolves":["player3","player7"]}',
+            prompt,
+        )
+        self.assertIn("communication may strategically differ", prompt)
+
     def test_evidence_linkage_cannot_republish_nested_raw_claims(self):
         observation = _observation()
         raw_claim = "建议投 player2。"
@@ -1895,28 +1930,6 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(explicit["model_name"], "explicit")
         self.assertEqual(alias["model_name"], "model-alias")
-
-    def test_twdm_generation_preserves_backend_model_and_token_forwarding(self):
-        backend = MetadataBackend(["  structured response  "])
-        agent = TWDMStrategyAgent(
-            backend=backend,
-            model_name="twdm-model",
-            temperature=0.1,
-            gameplay_max_tokens=512,
-        )
-
-        response = agent._TWDMStrategyAgent__api_generate(
-            [{"role": "user", "content": " prompt "}]
-        )
-
-        self.assertEqual(response, "structured response")
-        self.assertEqual(backend.calls[0]["model"], "twdm-model")
-        self.assertEqual(backend.calls[0]["temperature"], 0.1)
-        self.assertEqual(backend.calls[0]["max_tokens"], 512)
-        self.assertEqual(
-            backend.calls[0]["messages"],
-            [{"role": "user", "content": "prompt"}],
-        )
 
     def test_registry_has_no_provider_or_credential_responsibility(self):
         source = inspect.getsource(Registry)

@@ -103,7 +103,7 @@ def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
     assert "believed_werewolves" not in sample
     assert sample["known_non_werewolves"]["player1"] == ["player1"]
     assert sample["label_prompt_version"] == (
-        "classic7_pre_speech_player_suspicion_prompt_v3"
+        "classic7_pre_speech_player_suspicion_prompt_v4"
     )
     assert sample["label_prompt_version"] == LABEL_PROMPT_VERSION
     assert "target_distribution_is_reporter_probability" not in sample

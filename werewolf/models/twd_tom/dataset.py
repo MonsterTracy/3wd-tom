@@ -30,19 +30,21 @@ from werewolf.models.twd_tom.samples import (
     SAMPLE_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.schema import (
-    canonicalize_player_set,
     LABEL_PROMPT_VERSION,
     LABEL_PROVENANCE,
     NUM_PLAYERS,
     PLAYER_NAMES,
     PLAYER_TO_ID,
     normalize_player,
+    validate_player_suspicion,
 )
 from werewolf.speech.private_belief_perceiver import STATUS_OK
 
 
 MODEL_INPUT_SCOPE = "structured_public_events_only"
-TARGET_CONVERSION = "sparse_suspicion_uniform_support_player_vector_v1"
+TARGET_CONVERSION = (
+    "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
+)
 CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
 
 _SUBJECT_MAPPING_FIELDS = (
@@ -283,9 +285,11 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         )
         if known_wolves != closed_wolves or known_non_wolves != closed_non_wolves:
             raise ValueError(f"{subject} hard knowledge must already be closed")
-        normalized_suspicion = canonicalize_player_set(
+        normalized_suspicion = validate_player_suspicion(
             suspicion,
-            field_name="suspected_werewolves",
+            closed_wolves,
+            closed_non_wolves,
+            observer_id=subject,
         )
         if suspicion != normalized_suspicion:
             raise ValueError(
@@ -298,6 +302,8 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         targets[subject] = suspicion_set_to_belief_vector(
             normalized_suspicion,
             observer_id=subject,
+            known_werewolves=closed_wolves,
+            known_non_werewolves=closed_non_wolves,
             dtype=torch.float64,
         )
 

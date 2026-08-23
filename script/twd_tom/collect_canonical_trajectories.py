@@ -21,7 +21,12 @@ from run_random import (
     build_twd_tom_sample_collector,
     eval as run_game,
 )
+from script.twd_tom.collection_budget import (
+    GameCallBudgetAudit,
+    audited_backends,
+)
 from werewolf.backends import load_named_backends
+from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
@@ -51,10 +56,11 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v1"
-GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v1"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v1"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v2"
+GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v2"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v2"
 BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v1"
+PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
 BACKEND_MAX_RETRIES = 0
 STOP_ON_FIRST_FAILURE = True
@@ -296,6 +302,99 @@ def _validate_classic7_config(normalized: Mapping[str, Any]) -> None:
             "canonical batch requires frozen Classic-7 role counts; "
             f"mismatches={mismatches}"
         )
+
+
+def _pipeline_collection_contract(
+    parsed_yaml: Mapping[str, Any],
+    *,
+    seeds: Sequence[int],
+) -> dict[str, Any]:
+    """Validate the frozen pipeline declaration against this invocation."""
+
+    pipeline = parsed_yaml.get("pipeline")
+    if not isinstance(pipeline, Mapping):
+        raise TypeError("runtime config pipeline must be a mapping")
+    expected_versions = {
+        "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
+        "raw_schema_version": SAMPLE_SCHEMA_VERSION,
+        "projected_schema_version": PROJECTED_SCHEMA_VERSION,
+        "projection_version": TARGET_CONVERSION,
+    }
+    mismatches = {
+        field: (pipeline.get(field), expected)
+        for field, expected in expected_versions.items()
+        if pipeline.get(field) != expected
+    }
+    if mismatches:
+        raise ValueError(
+            "pipeline schema/projection contract mismatch; "
+            f"mismatches={mismatches}"
+        )
+
+    collection = pipeline.get("collection")
+    if not isinstance(collection, Mapping):
+        raise TypeError("pipeline.collection must be a mapping")
+    configured_game_count = _positive_integer(
+        collection.get("game_count"),
+        field_name="pipeline.collection.game_count",
+    )
+    configured_seeds = collection.get("seeds")
+    if (
+        isinstance(configured_seeds, (str, bytes))
+        or not isinstance(configured_seeds, Sequence)
+    ):
+        raise TypeError("pipeline.collection.seeds must be a sequence")
+    configured_seeds = list(configured_seeds)
+    if any(
+        isinstance(seed, bool) or not isinstance(seed, int)
+        for seed in configured_seeds
+    ):
+        raise TypeError("pipeline.collection.seeds must contain integers")
+    if configured_game_count != len(configured_seeds):
+        raise ValueError(
+            "pipeline.collection.game_count must equal the configured seed count"
+        )
+    if configured_seeds != list(seeds):
+        raise ValueError(
+            "CLI seed range/game_count must exactly match pipeline.collection"
+        )
+
+    contract = {
+        "game_count": configured_game_count,
+        "seeds": configured_seeds,
+        "max_gameplay_calls_per_game": _positive_integer(
+            collection.get("max_gameplay_calls_per_game"),
+            field_name="pipeline.collection.max_gameplay_calls_per_game",
+        ),
+        "max_belief_calls_per_game": _positive_integer(
+            collection.get("max_belief_calls_per_game"),
+            field_name="pipeline.collection.max_belief_calls_per_game",
+        ),
+        "max_total_calls_per_game": _positive_integer(
+            collection.get("max_total_calls_per_game"),
+            field_name="pipeline.collection.max_total_calls_per_game",
+        ),
+    }
+    wall_seconds = collection.get("max_wall_seconds_per_game")
+    if (
+        isinstance(wall_seconds, bool)
+        or not isinstance(wall_seconds, (int, float))
+        or wall_seconds <= 0
+    ):
+        raise ValueError(
+            "pipeline.collection.max_wall_seconds_per_game "
+            "must be a positive number"
+        )
+    contract["max_wall_seconds_per_game"] = float(wall_seconds)
+    if contract["max_total_calls_per_game"] < max(
+        contract["max_gameplay_calls_per_game"],
+        contract["max_belief_calls_per_game"],
+    ):
+        raise ValueError(
+            "pipeline.collection max_total_calls_per_game cannot be smaller "
+            "than a category budget"
+        )
+    return contract
 
 
 def _game_id(run_id: str, game_number: int, seed: int) -> str:
@@ -742,6 +841,30 @@ def validate_belief_snapshot_artifact(
             value = record[field_name]
             if not isinstance(value, Mapping) or set(value) != expected_subjects:
                 raise ValueError(f"belief snapshot {field_name} observer set mismatch")
+        failed_reports = {
+            subject: status
+            for subject, status in record["belief_status"].items()
+            if status != "ok"
+        }
+        if failed_reports:
+            raise ValueError(
+                "canonical belief snapshot requires status=ok for every "
+                f"alive observer; failures={failed_reports}"
+            )
+        if any(
+            error is not None
+            for error in record["belief_errors"].values()
+        ):
+            raise ValueError(
+                "successful canonical belief reports must have null errors"
+            )
+        if any(
+            not isinstance(suspected, list)
+            for suspected in record["suspected_werewolves"].values()
+        ):
+            raise TypeError(
+                "successful canonical suspected_werewolves rows must be lists"
+            )
 
         phases = {view["observation"].get("phase") for view in boundary_views}
         if phases != {record["phase"]}:
@@ -764,6 +887,10 @@ def validate_belief_snapshot_artifact(
         raise ValueError("belief snapshots do not cover every PRE-speech boundary")
     return {
         "belief_snapshot_count": len(records),
+        "belief_report_count": sum(
+            len(record["observer_ids"])
+            for record in records
+        ),
         "belief_snapshots_sha256": _sha256(belief_snapshots_path),
     }
 
@@ -787,6 +914,7 @@ def _batch_plan(
     config_sha256: str,
     normalized_runtime_config_digest: str,
     seeds: Sequence[int],
+    collection_contract: Mapping[str, Any],
 ) -> dict[str, Any]:
     plan = {
         "schema_version": BATCH_PLAN_SCHEMA_VERSION,
@@ -805,6 +933,7 @@ def _batch_plan(
         "canonical_runtime_builder": "run_random.build_runtime",
         "canonical_game_driver": "run_random.eval",
         "collectors_enabled": True,
+        "collection_contract": dict(collection_contract),
         "backend_max_retries": BACKEND_MAX_RETRIES,
         "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
         "rerun_on_failure": RERUN_ON_FAILURE,
@@ -872,6 +1001,10 @@ def collect_canonical_trajectory_batch(
         raise ValueError("runtime config must be a mapping")
     normalized = normalize_runtime_config(deepcopy(parsed_yaml))
     _validate_classic7_config(normalized)
+    collection_contract = _pipeline_collection_contract(
+        parsed_yaml,
+        seeds=seeds,
+    )
     normalized_digest = canonical_digest(normalized)
 
     destination.mkdir(parents=True)
@@ -881,6 +1014,7 @@ def collect_canonical_trajectory_batch(
         config_sha256=_sha256(config_path),
         normalized_runtime_config_digest=normalized_digest,
         seeds=seeds,
+        collection_contract=collection_contract,
     )
     _write_json_new(destination / "plan.json", plan)
 
@@ -914,14 +1048,30 @@ def collect_canonical_trajectory_batch(
             trajectory_path = game_dir / "trajectory.json"
             observer_views_path = game_dir / "observer_views.json"
             belief_snapshots_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
+            call_audit_path = game_dir / "call_audit.json"
             summary_path = game_dir / "summary.json"
+            call_audit = GameCallBudgetAudit(
+                game_id=game_id,
+                max_gameplay_calls=collection_contract[
+                    "max_gameplay_calls_per_game"
+                ],
+                max_belief_calls=collection_contract[
+                    "max_belief_calls_per_game"
+                ],
+                max_total_calls=collection_contract[
+                    "max_total_calls_per_game"
+                ],
+                max_wall_seconds=collection_contract[
+                    "max_wall_seconds_per_game"
+                ],
+            )
             stage = "build_runtime"
             try:
                 env, agents, roles, profile_names = build_runtime(
                     deepcopy(parsed_yaml),
                     log_save_path=str(log_dir),
                     random_seed=seed,
-                    backends=backend_map,
+                    backends=audited_backends(backend_map, call_audit),
                 )
                 players = _build_players(
                     roles=roles,
@@ -944,6 +1094,7 @@ def collect_canonical_trajectory_batch(
                     agent_list=agents,
                     output_path=str(belief_snapshots_path),
                     game_id=game_id,
+                    report_audit=call_audit,
                 )
                 try:
                     stage = "gameplay"
@@ -952,10 +1103,16 @@ def collect_canonical_trajectory_batch(
                         agents,
                         roles,
                         sample_collector=belief_collector,
+                        call_audit=call_audit,
                         trajectory_recorder=recorder,
                     )
+                    call_audit.assert_wall_budget()
                 finally:
                     belief_collector.close()
+                call_audit_record = call_audit.snapshot()
+                if not call_audit_record["within_budget"]:
+                    raise RuntimeError("game call audit finished outside its budget")
+                _write_json_new(call_audit_path, call_audit_record)
                 stage = "artifact_validation"
                 validation = validate_complete_game_artifacts(
                     trajectory_path,
@@ -980,9 +1137,12 @@ def collect_canonical_trajectory_batch(
                 if result != expected_result:
                     raise ValueError("run_random result disagrees with trajectory winner")
                 validation["run_random_result"] = result
+                validation["call_audit"] = call_audit_record
                 game_summary = _game_summary(validation, summary_path=summary_path)
                 completed_games.append(game_summary)
             except BaseException as exc:
+                if not call_audit_path.exists():
+                    _write_json_new(call_audit_path, call_audit.snapshot())
                 failure = _failure_record(
                     run_id=run_id,
                     commit=provenance["batch_code_commit"],
@@ -1028,6 +1188,21 @@ def collect_canonical_trajectory_batch(
             ),
             "total_belief_snapshot_count": sum(
                 game["belief_snapshot_count"] for game in completed_games
+            ),
+            "total_belief_report_count": sum(
+                game["belief_report_count"] for game in completed_games
+            ),
+            "total_gameplay_call_count": sum(
+                game["call_audit"]["gameplay_call_count"]
+                for game in completed_games
+            ),
+            "total_belief_call_count": sum(
+                game["call_audit"]["belief_call_count"]
+                for game in completed_games
+            ),
+            "total_backend_call_count": sum(
+                game["call_audit"]["total_call_count"]
+                for game in completed_games
             ),
             "backend_max_retries": BACKEND_MAX_RETRIES,
             "stop_on_first_failure": True,

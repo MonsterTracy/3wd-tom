@@ -22,6 +22,7 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_NAMES,
     canonicalize_player_set,
     normalize_player,
+    validate_player_suspicion,
 )
 
 
@@ -36,7 +37,7 @@ PRIVATE_BELIEF_JSON_SCHEMA = {
         "suspected_werewolves": {
             "type": "array",
             "minItems": 0,
-            "maxItems": 7,
+            "maxItems": 6,
             "items": {
                 "type": "string",
                 "enum": list(
@@ -194,11 +195,18 @@ class PlayingAgentBeliefReporter:
                 known_non_werewolves=known_non_werewolves,
             )
 
-        if observer in suspected:
+        try:
+            suspected = validate_player_suspicion(
+                suspected,
+                known_werewolves,
+                known_non_werewolves,
+                observer_id=observer,
+            )
+        except (TypeError, ValueError) as exc:
             return self._result(
                 observer=observer,
                 status=STATUS_SEMANTIC_ERROR,
-                error="suspected_werewolves cannot contain the observer",
+                error=str(exc),
                 agent_backend_id=agent_backend_id,
                 known_werewolves=known_werewolves,
                 known_non_werewolves=known_non_werewolves,
@@ -249,14 +257,28 @@ class PlayingAgentBeliefReporter:
             raise ValueError("public snapshot requires public_action_count")
         canonical_identifiers = list(PLAYER_NAMES)
         canonical_list = ", ".join(canonical_identifiers)
-        canonicalize_player_set(
+        known_wolves = canonicalize_player_set(
             known_werewolves,
             field_name="known_werewolves",
         )
-        canonicalize_player_set(
+        known_non_wolves = canonicalize_player_set(
             known_non_werewolves,
             field_name="known_non_werewolves",
         )
+        if set(known_wolves) & set(known_non_wolves):
+            raise ValueError("hard knowledge sets must be disjoint")
+        required = [player for player in known_wolves if player != observer]
+        forbidden = [
+            player for player in canonical_identifiers
+            if player == observer or player in known_non_wolves
+        ]
+        legal_candidates = [
+            player for player in canonical_identifiers
+            if player not in forbidden
+        ]
+        required_text = ", ".join(required) if required else "<none>"
+        forbidden_text = ", ".join(forbidden)
+        legal_candidates_text = ", ".join(legal_candidates)
         public_history = json.dumps(
             copy_public_events(
                 public_snapshot.public_events
@@ -265,7 +287,7 @@ class PlayingAgentBeliefReporter:
             separators=(",", ":"),
         )
         return f"""这是一个私有的训练标注请求，不是游戏中的公开发言。
-其他玩家不会看到你的回答。回答不会写入你的游戏记忆，也不会影响你的下一次发言、投票或技能行动。
+其他玩家不会看到你的回答，回答也不会写入你的游戏记忆。若你是当前发言者，同一份报告会作为随后 day cognition 的只读输入。
 
 请只根据你截至本次公开发言之前合法拥有的公开历史和自己的私人信息，报告你当前内部真实怀疑哪些具体玩家是狼人。不要为了阵营策略欺骗这个私有 reporter。不得使用 god view、actual roles、其他玩家私人信息、当前尚未生成的发言或未来信息。
 
@@ -275,12 +297,18 @@ Canonical player IDs (complete ordered list):
 Canonical pre-speech public_events:
 {public_history}
 
-`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。只报告你当前认为相对更可疑的其他玩家，不得包含 observer 自己；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入。允许列出 0、1、2 或更多人；若确实怀疑所有其他玩家，允许全部列出；没有怀疑对象时输出空数组。只允许上面的 canonical player IDs，不得重复。
+Environment-derived hard knowledge:
+MUST INCLUDE: {required_text}
+MUST EXCLUDE: {forbidden_text}
+Current legal candidates: {legal_candidates_text}
+
+`suspected_werewolves` 是玩家级的相对怀疑集合，不是完整双狼人组合约束。它必须包含 MUST INCLUDE 中的全部玩家，并且不得包含 MUST EXCLUDE 中的任何玩家。在满足硬约束后，只额外报告你当前认为相对更可疑的玩家；不要求确定性、不要求完整找到两狼，也不要求恰好两人。不要仅因为某人“仍有可能是狼”就将其列入。允许列出一个或更多合法玩家；只有 MUST INCLUDE 为空时才允许输出空数组。若确实怀疑所有合法候选人，可以全部列出。只允许上面的 canonical player IDs，不得重复。
 
 Before answering, silently verify this checklist:
 - 这是我的内部真实怀疑，而不是公开发言策略吗？
 - 是否把“仍可能”误当成“当前值得怀疑”？
 - 是否错误地强行补足两人？
+- 是否包含全部 MUST INCLUDE，且排除了全部 MUST EXCLUDE？
 - 是否只输出允许的 JSON？
 
 Do not output probabilities, confidence, scores, rankings, reasons, the checklist, reasoning, or chain-of-thought. Do not output any extra field.

@@ -47,9 +47,6 @@ class Registry(BaseModel):
             agent_params["gameplay_max_tokens"] = kwargs[
                 "gameplay_max_tokens"
             ]
-        if type.lower() == "twdm_agent":
-            agent_params["twdm_config"] = kwargs.get("twdm_config", {})
-
         return type, agent_params
 
     def build_agent(self, type: str,
@@ -62,17 +59,6 @@ class Registry(BaseModel):
             raise ValueError(
                 f'{type} is not registered. Please register with the .register("{type}") method provided in {self.name} registry'
             )
-        if type == "twdm_agent":
-            return self.entries[type](backend=agent_param["backend"],
-                                      model_name=agent_param["model_name"],
-                                      tokenizer=agent_param.get("tokenizer"),
-                                      temperature=agent_param["temperature"],
-                                      log_file=log_file,
-                                      twdm_config=agent_param.get("twdm_config", {}),
-                                      gameplay_max_tokens=agent_param.get(
-                                          "gameplay_max_tokens"
-                                      ))
-
         return self.entries[type](backend=agent_param["backend"],
                                   model_name=agent_param["model_name"],
                                   tokenizer=agent_param.get("tokenizer"),

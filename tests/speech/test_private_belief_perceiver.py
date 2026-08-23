@@ -111,7 +111,7 @@ def _report(
     return result, backend, agent
 
 
-def test_prompt_defines_player_suspicion_without_pair_support_semantics():
+def test_prompt_defines_hard_knowledge_consistent_player_suspicion():
     prompt = PlayingAgentBeliefReporter.build_prompt(
         observer_id="player3",
         public_snapshot=_snapshot(),
@@ -127,8 +127,10 @@ def test_prompt_defines_player_suspicion_without_pair_support_semantics():
         "不要求完整找到两狼",
         "不要求恰好两人",
         "仍有可能",
-        "输出空数组",
-        "允许全部列出",
+        "MUST INCLUDE: player1",
+        "MUST EXCLUDE: player3, player6",
+        "Current legal candidates: player1, player2, player4, player5, player7",
+        "只有 MUST INCLUDE 为空时才允许输出空数组",
         "Your observer identity is exactly: player3",
         "player1, player2, player3, player4, player5, player6, player7",
         '"raw_text":"earlier public speech"',
@@ -145,12 +147,8 @@ def test_prompt_defines_player_suspicion_without_pair_support_semantics():
         "strictly reduce",
         "pair support",
         "complete pair",
-        "HARD CONSTRAINTS",
-        "MUST INCLUDE",
-        "MUST EXCLUDE",
-        "Environment-derived known_werewolves",
-        "Environment-derived known_non_werewolves",
-        "Current legal_candidates",
+        "pair support",
+        "complete pair",
     ):
         assert forbidden not in prompt
 
@@ -258,8 +256,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             ["player3"],
             ["player2", "player6", "player7"],
-            STATUS_OK,
-            ["player1", "player2", "player4", "player5"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":[]}',
@@ -267,8 +265,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             ["player2"],
             ["player3"],
-            STATUS_OK,
-            [],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":["player2"]}',
@@ -285,8 +283,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Seer",
             [],
             ["player2", "player3"],
-            STATUS_OK,
-            ["player2"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":["player3"]}',
@@ -294,8 +292,8 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Villager",
             [],
             ["player1", "player3"],
-            STATUS_OK,
-            ["player3"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":["player5"]}',
@@ -303,14 +301,14 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Witch",
             [],
             ["player4", "player5"],
-            STATUS_OK,
-            ["player5"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
         (
             '{"suspected_werewolves":["player5"]}',
             2,
             "Werewolf",
-            ["player5"],
+            ["player2", "player5"],
             ["player1", "player3", "player4", "player6", "player7"],
             STATUS_OK,
             ["player5"],
@@ -321,12 +319,12 @@ def test_parser_rejects_noncanonical_or_old_structures(raw):
             "Werewolf",
             ["player2", "player5"],
             ["player1", "player3", "player4", "player6", "player7"],
-            STATUS_OK,
-            ["player3"],
+            STATUS_SEMANTIC_ERROR,
+            None,
         ),
     ],
 )
-def test_hard_knowledge_does_not_constrain_self_report_content(
+def test_hard_knowledge_constrains_self_report_content(
     response,
     player_id,
     identity,
@@ -422,7 +420,7 @@ def test_belief_request_uses_capability_format_and_fixed_budget(
             "suspected_werewolves"
         ]
         assert array_schema["minItems"] == 0
-        assert array_schema["maxItems"] == 7
+        assert array_schema["maxItems"] == 6
         assert array_schema["items"] == {
             "type": "string",
             "enum": [f"player{i}" for i in range(1, 8)],
@@ -633,9 +631,9 @@ def test_full_candidate_report_succeeds_once_without_retry():
     assert len(backend.calls) == 1
 
 
-def test_current_prompt_version_is_player_suspicion_v3():
+def test_current_prompt_version_is_player_suspicion_v4():
     assert LABEL_PROMPT_VERSION == (
-        "classic7_pre_speech_player_suspicion_prompt_v3"
+        "classic7_pre_speech_player_suspicion_prompt_v4"
     )
 
 

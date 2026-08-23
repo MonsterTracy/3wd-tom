@@ -592,7 +592,6 @@ Villager: {3}""".format(*counts)
 
     def test_deterministic_renderer_naturalizes_self_role_claims(self):
         cases = (
-            ("point_as_werewolf", "我是狼人。"),
             ("point_as_villager", "我是普通村民。"),
             ("point_as_seer", "我是预言家。"),
             ("point_as_witch", "我是女巫。"),
@@ -607,6 +606,12 @@ Villager: {3}""".format(*counts)
                     ),
                     expected,
                 )
+
+        with self.assertRaisesRegex(ValueError, "cannot accuse itself"):
+            render_deterministic_public_speech(
+                3,
+                discussion_acts=(DiscussionAct("point_as_werewolf", 3),),
+            )
 
     def test_deterministic_renderer_preserves_order_and_is_atemporal(self):
         speech = render_deterministic_public_speech(
@@ -698,6 +703,36 @@ Villager: {3}""".format(*counts)
         self.assertNotIn(DiscussionAct("point_as_werewolf", 3), snapshot)
         self.assertIn(DiscussionAct("point_as_werewolf", 7), snapshot)
         self.assertEqual(snapshot, freeze_discussion_candidates(normal))
+
+        for identity in ("Villager", "Seer", "Witch"):
+            with self.subTest(identity=identity):
+                candidate_set = freeze_discussion_candidates(
+                    _observation(identity=identity)
+                )
+                self.assertNotIn(
+                    DiscussionAct("point_as_werewolf", 3),
+                    candidate_set,
+                )
+                self.assertIn(
+                    DiscussionAct("point_as_villager", 3),
+                    candidate_set,
+                )
+
+    def test_day_prompt_encourages_existing_interaction_actions(self):
+        observation = _observation()
+        exact_roles, role_options = derive_belief_constraints(observation)
+        prompt = build_day_cognition_prompt(
+            observation,
+            exact_roles=exact_roles,
+            role_options=role_options,
+            candidate_snapshot=freeze_discussion_candidates(observation),
+            claim_catalog=build_public_claim_catalog(observation),
+        )
+
+        self.assertIn("INTERACTION GUIDANCE", prompt)
+        self.assertIn("support(...) or oppose(...)", prompt)
+        self.assertIn("current table judgment", prompt)
+        self.assertIn("No new action type", prompt)
 
     def test_pk_vote_intent_uses_only_latest_draw_speech_queue(self):
         observation = _observation(identity="Villager", phase="2_day_speech_pk")

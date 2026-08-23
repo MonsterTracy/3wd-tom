@@ -249,7 +249,7 @@ def is_post_completed_public_speech_pre_next_action(
     *,
     reasoning_player_id: int,
 ) -> bool:
-    """Return whether this is the formal synchronized ToM2 boundary."""
+    """Return whether this is the synchronized tom-v2 snapshot boundary."""
 
     if (
         isinstance(reasoning_player_id, bool)

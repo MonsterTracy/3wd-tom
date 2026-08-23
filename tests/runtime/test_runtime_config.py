@@ -326,43 +326,6 @@ class RuntimeConfigNormalizationTest(unittest.TestCase):
             ["deepseek-profile"],
         )
 
-    def test_battle_legacy_role_groups_normalize(self):
-        config = legacy_config()
-        config["agent_config"] = {
-            "werewolf": {
-                "model_type": "twdm_agent",
-                "model_params": {
-                    "temperature": 0.2,
-                    "twdm_config": {"enable_strategy": True},
-                },
-            },
-            "village_team": {
-                "model_type": "deepseek",
-                "model_params": {"temperature": 1.0},
-            },
-            "replace": {
-                "model_type": "gpt",
-                "model_params": {"temperature": 0.5},
-                "replace_player": "werewolf_last",
-            },
-        }
-
-        agent_config = normalize_runtime_config(config)["agent_config"]
-
-        self.assertEqual(
-            agent_config["werewolf"]["profile_name"],
-            "twdm_agent",
-        )
-        self.assertEqual(
-            agent_config["village_team"]["agent_type"],
-            "deepseek",
-        )
-        self.assertEqual(
-            agent_config["replace"]["replace_player"],
-            "werewolf_last",
-        )
-        self.assertEqual(agent_config["must_include"], [])
-
     def test_root_fields_are_preserved_and_input_is_not_modified(self):
         config = legacy_config()
         config["custom_runtime_field"] = {"nested": [1, 2]}

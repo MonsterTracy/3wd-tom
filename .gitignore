@@ -33,14 +33,18 @@ env/
 # Jupyter
 .ipynb_checkpoints/
 
-# External runtime storage
-/data/
-/datasets/
-/logs/
-/outputs/
-/review/
-/checkpoints/
-/models/
+# External runtime storage.  These patterns intentionally also match
+# same-name symlinks used by the server checkout.
+/data
+/datasets
+/logs
+/outputs
+/review
+/checkpoints
+/models
+/canonical_data
+/smoke_data
+/cache
 
 # Experiment services and generated artifacts
 wandb/
@@ -57,10 +61,8 @@ artifacts/
 *.safetensors
 *.onnx
 
-# Generated archives; tracked source migrations live under legacy_tom.
-/archive/*
-!/archive/__init__.py
-!/archive/legacy_tom/
+# Generated archives
+/archive/
 *.tar.gz
 *.bundle
 twd_tom_legacy_projection_source.zip

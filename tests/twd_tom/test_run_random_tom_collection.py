@@ -13,6 +13,8 @@ from werewolf.models.twd_tom.collector import (
 )
 from werewolf.models.twd_tom.public_events import public_speech_actions
 from tests.twd_tom.public_event_fixtures import public_history_fields
+from tests.twd_tom.public_event_fixtures import make_training_sample
+from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
 )
@@ -181,6 +183,96 @@ class RecordingSampleCollector:
                 "public_history": deepcopy(env.public_events),
             }
         )
+
+
+def test_eval_passes_exact_immutable_speaker_report_to_speech_agent():
+    sample = make_training_sample(
+        step_idx=0,
+        speaker_id=1,
+        observers=(1,),
+    )
+    sample["suspected_werewolves"]["player1"] = ["player3", "player7"]
+
+    class ReturningCollector:
+        def record(self, _env, **_kwargs):
+            return deepcopy(sample)
+
+    class BeliefAwareAgent:
+        def __init__(self):
+            self.received = None
+
+        def reset(self):
+            return None
+
+        def act(self, _observation):
+            raise AssertionError("speech must use the PRE-belief entry point")
+
+        def act_with_pre_speech_belief(
+            self,
+            observation,
+            *,
+            pre_speech_belief,
+        ):
+            self.received = pre_speech_belief
+            assert observation["current_act_idx"] == 1
+            return ("speech", "belief-aware speech")
+
+    env = ScriptedEnvironment(
+        transitions=[
+            (
+                {"current_act_idx": 1, "phase": "1_day_vote"},
+                0,
+                True,
+                {"Werewolf": -1},
+            )
+        ],
+        alive=[1, 0, 0, 0, 0, 0, 0],
+    )
+    agent = BeliefAwareAgent()
+
+    eval(
+        env,
+        [agent],
+        roles_=["Villager"],
+        sample_collector=ReturningCollector(),
+    )
+
+    assert isinstance(agent.received, SpeakerPreSpeechBelief)
+    assert agent.received.observer_id == "player1"
+    assert agent.received.suspected_werewolves == ("player3", "player7")
+    assert agent.received.step_idx == 0
+    with pytest.raises(AttributeError):
+        agent.received.observer_id = "player2"
+
+
+def test_eval_rejects_non_ok_speaker_report_before_public_action():
+    sample = make_training_sample(
+        step_idx=0,
+        speaker_id=1,
+        observers=(1,),
+    )
+    sample["belief_status"]["player1"] = "semantic_error"
+    sample["belief_errors"]["player1"] = "synthetic invalid report"
+    sample["suspected_werewolves"]["player1"] = None
+
+    class ReturningCollector:
+        def record(self, _env, **_kwargs):
+            return deepcopy(sample)
+
+    env = ScriptedEnvironment(
+        transitions=[],
+        alive=[1, 0, 0, 0, 0, 0, 0],
+    )
+    agent = ScriptedAgent([("speech", "must not run")])
+
+    with pytest.raises(ValueError, match="speaker PRE belief requires status=ok"):
+        eval(
+            env,
+            [agent],
+            roles_=["Villager"],
+            sample_collector=ReturningCollector(),
+        )
+    assert agent.observations == []
 
 
 def test_eval_orders_trajectory_pre_boundary_before_belief_and_action():

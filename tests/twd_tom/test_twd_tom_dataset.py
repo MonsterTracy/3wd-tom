@@ -58,6 +58,8 @@ def test_each_alive_observer_row_matches_the_deterministic_conversion(
         expected = suspicion_set_to_belief_vector(
             sample["suspected_werewolves"][subject],
             observer_id=subject,
+            known_werewolves=sample["known_werewolves"][subject],
+            known_non_werewolves=sample["known_non_werewolves"][subject],
             dtype=torch.float64,
         )
         torch.testing.assert_close(item["belief_targets"][observer_id - 1], expected)
@@ -234,7 +236,7 @@ def test_suspicion_set_remains_strict(
         TWDToMDataset([sample])
 
 
-def test_hard_knowledge_is_audit_provenance_not_target_content_constraint(
+def test_dataset_rejects_suspicion_that_contradicts_hard_knowledge(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
@@ -243,10 +245,22 @@ def test_hard_knowledge_is_audit_provenance_not_target_content_constraint(
     sample["known_werewolves"]["player1"] = ["player3"]
     sample["known_non_werewolves"]["player1"] = ["player7"]
 
+    with pytest.raises(ValueError, match="known Werewolves"):
+        TWDToMDataset([sample])
+
+
+def test_dataset_empty_report_excludes_known_non_wolves_from_fallback(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory(
+        suspicions_by_observer={1: []}
+    )
+    sample["known_non_werewolves"]["player1"] = ["player1", "player4"]
+
     item = TWDToMDataset([sample])[0]
 
     assert item["belief_targets"][0].tolist() == pytest.approx(
-        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        [0.0, 0.2, 0.2, 0.0, 0.2, 0.2, 0.2]
     )
 
 

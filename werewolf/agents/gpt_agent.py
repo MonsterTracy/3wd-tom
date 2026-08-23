@@ -29,6 +29,7 @@ from werewolf.agents.prompt_template_v0 import (
 )
 from werewolf.backends import BackendError
 from werewolf.models.twd_tom.schema import normalize_player
+from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
 from . import agent_registry as AgentRegistry
 
 
@@ -64,6 +65,36 @@ class GPTAgent(LLMAgent):
         self.temperature = temperature
 
     def act(self, observation):
+        return self._act(observation, pre_speech_belief=None)
+
+    def act_with_pre_speech_belief(
+        self,
+        observation,
+        *,
+        pre_speech_belief,
+    ):
+        """Generate speech from the exact immutable PRE self-report."""
+
+        if not isinstance(pre_speech_belief, SpeakerPreSpeechBelief):
+            raise TypeError(
+                "pre_speech_belief must be SpeakerPreSpeechBelief"
+            )
+        if self.gameplay_prompt_profile != STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE:
+            raise ValueError(
+                "PRE-belief cognition handoff requires strict_classic7 gameplay"
+            )
+        if normalize_player(observation.get("current_act_idx")) != (
+            pre_speech_belief.observer_id
+        ):
+            raise ValueError("PRE-belief observer does not match current speaker")
+        if "speech" not in observation.get("phase", ""):
+            raise ValueError("PRE-belief handoff is only valid for speech")
+        return self._act(
+            observation,
+            pre_speech_belief=pre_speech_belief,
+        )
+
+    def _act(self, observation, *, pre_speech_belief):
         phase = observation["phase"]
         is_speech = "speech" in phase
         speech_kind = "speech_pk" if "speech_pk" in phase else "speech"
@@ -78,6 +109,7 @@ class GPTAgent(LLMAgent):
             day_cognition, candidate_snapshot, _claim_catalog = (
                 self._generate_day_cognition(
                     observation,
+                    pre_speech_belief=pre_speech_belief,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -218,6 +250,7 @@ class GPTAgent(LLMAgent):
         self,
         observation,
         *,
+        pre_speech_belief,
         temperature,
         max_tokens,
     ):
@@ -233,6 +266,7 @@ class GPTAgent(LLMAgent):
             role_options=role_options,
             candidate_snapshot=candidate_snapshot,
             claim_catalog=claim_catalog,
+            pre_speech_belief=pre_speech_belief,
         )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],

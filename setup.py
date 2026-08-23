@@ -19,9 +19,6 @@ setup(
         "tiktoken>=0.7.0",
     ],
     extras_require={
-        "strategy": [
-            "torch>=2.0.0",
-        ],
         "local_model": [
             "torch>=2.0.0",
             "transformers>=4.47.1",

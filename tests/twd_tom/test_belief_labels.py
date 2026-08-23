@@ -7,11 +7,18 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 
 
-def test_empty_suspicion_is_uniform_over_six_non_self_targets():
-    target = suspicion_set_to_belief_vector([], observer_id="player7")
+def test_empty_suspicion_is_uniform_over_hard_knowledge_admissible_targets():
+    target = suspicion_set_to_belief_vector(
+        [],
+        observer_id="player7",
+        known_werewolves=[],
+        known_non_werewolves=["player2", "player7"],
+    )
     assert target.shape == (7,)
     assert target[6].item() == 0.0
-    assert target[:6].tolist() == pytest.approx([1.0 / 6.0] * 6)
+    assert target.tolist() == pytest.approx(
+        [0.2, 0.0, 0.2, 0.2, 0.2, 0.2, 0.0]
+    )
     assert target.sum().item() == pytest.approx(1.0)
 
 
@@ -19,6 +26,8 @@ def test_non_empty_suspicion_is_uniform_only_over_suspected_players():
     target = suspicion_set_to_belief_vector(
         ["player3", "player5"],
         observer_id="player1",
+        known_werewolves=[],
+        known_non_werewolves=["player1"],
         dtype=torch.float64,
     )
     assert target.tolist() == pytest.approx([0.0, 0.0, 0.5, 0.0, 0.5, 0.0, 0.0])
@@ -29,6 +38,8 @@ def test_three_suspected_players_receive_exact_sparse_thirds():
     target = suspicion_set_to_belief_vector(
         ["player2", "player5", "player6"],
         observer_id="player1",
+        known_werewolves=[],
+        known_non_werewolves=["player1"],
         dtype=torch.float64,
     )
     assert target.tolist() == pytest.approx(
@@ -38,10 +49,16 @@ def test_three_suspected_players_receive_exact_sparse_thirds():
 
 def test_conversion_is_canonical_and_deterministic():
     first = suspicion_set_to_belief_vector(
-        ["player5", "player2"], observer_id=3
+        ["player5", "player2"],
+        observer_id=3,
+        known_werewolves=[],
+        known_non_werewolves=["player3"],
     )
     second = suspicion_set_to_belief_vector(
-        ["player2", "player5"], observer_id="player3"
+        ["player2", "player5"],
+        observer_id="player3",
+        known_werewolves=[],
+        known_non_werewolves=["player3"],
     )
     torch.testing.assert_close(first, second)
 
@@ -52,18 +69,62 @@ def test_conversion_is_canonical_and_deterministic():
 )
 def test_conversion_rejects_non_set_or_non_canonical_members(value):
     with pytest.raises((TypeError, ValueError)):
-        suspicion_set_to_belief_vector(value, observer_id="player1")
+        suspicion_set_to_belief_vector(
+            value,
+            observer_id="player1",
+            known_werewolves=[],
+            known_non_werewolves=["player1"],
+        )
 
 
 def test_self_suspicion_is_rejected_by_the_observer_legality_contract():
     with pytest.raises(ValueError, match="cannot contain the observer"):
-        suspicion_set_to_belief_vector(["player4"], observer_id="player4")
+        suspicion_set_to_belief_vector(
+            ["player4"],
+            observer_id="player4",
+            known_werewolves=[],
+            known_non_werewolves=["player4"],
+        )
 
 
 def test_conversion_requires_floating_dtype():
     with pytest.raises(TypeError, match="floating-point"):
         suspicion_set_to_belief_vector(
-            [], observer_id="player1", dtype=torch.int64
+            [],
+            observer_id="player1",
+            known_werewolves=[],
+            known_non_werewolves=["player1"],
+            dtype=torch.int64,
+        )
+
+
+def test_conversion_requires_every_known_wolf_in_the_reported_support():
+    with pytest.raises(ValueError, match="known Werewolves"):
+        suspicion_set_to_belief_vector(
+            ["player5"],
+            observer_id="player1",
+            known_werewolves=["player3"],
+            known_non_werewolves=["player1"],
+        )
+
+
+def test_conversion_rejects_known_non_wolf_from_reported_support():
+    with pytest.raises(ValueError, match="known non-Werewolves"):
+        suspicion_set_to_belief_vector(
+            ["player4"],
+            observer_id="player1",
+            known_werewolves=[],
+            known_non_werewolves=["player1", "player4"],
+        )
+
+
+def test_empty_suspicion_is_invalid_when_a_known_wolf_is_required():
+    with pytest.raises(ValueError, match="known Werewolves"):
+        suspicion_set_to_belief_vector(
+            [],
+            observer_id="player1",
+            known_werewolves=["player3"],
+            known_non_werewolves=["player1"],
         )
 
 

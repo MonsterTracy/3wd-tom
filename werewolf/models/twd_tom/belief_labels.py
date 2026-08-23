@@ -13,6 +13,7 @@ from werewolf.models.twd_tom.schema import (
     PLAYER_TO_ID,
     canonicalize_player_set,
     normalize_player,
+    validate_player_suspicion,
 )
 
 
@@ -20,27 +21,37 @@ def suspicion_set_to_belief_vector(
     suspected_werewolves: Any,
     *,
     observer_id: Any,
+    known_werewolves: Any,
+    known_non_werewolves: Any,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Convert one suspicion set to the frozen sparse seven-player row."""
+    """Convert a legal suspicion set to one sparse seven-player row."""
 
     if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
         raise TypeError("dtype must be a floating-point torch dtype")
     observer = normalize_player(observer_id)
-    suspected = canonicalize_player_set(
-        suspected_werewolves,
-        field_name="suspected_werewolves",
+    closed_wolves, closed_non_wolves = close_hard_knowledge(
+        known_werewolves,
+        known_non_werewolves,
     )
-    if observer in suspected:
-        raise ValueError("suspected_werewolves cannot contain the observer")
+    suspected = validate_player_suspicion(
+        suspected_werewolves,
+        closed_wolves,
+        closed_non_wolves,
+        observer_id=observer,
+    )
     target = torch.zeros(NUM_PLAYERS, dtype=dtype, device=device)
     if suspected:
         for player in suspected:
             target[PLAYER_TO_ID[player] - 1] = 1.0
     else:
-        target.fill_(1.0)
-        target[PLAYER_TO_ID[observer] - 1] = 0.0
+        forbidden = set(closed_non_wolves) | {observer}
+        for player in PLAYER_NAMES:
+            if player not in forbidden:
+                target[PLAYER_TO_ID[player] - 1] = 1.0
+    if target.sum().item() == 0.0:
+        raise RuntimeError("hard knowledge leaves no admissible target player")
     target /= target.sum()
 
     if not torch.isfinite(target).all() or torch.any(target < 0.0):

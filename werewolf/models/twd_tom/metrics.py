@@ -47,6 +47,8 @@ def compute_belief_metrics(
         belief_logits,
         target_mask,
     )
+    uniform_probabilities = target_mask.to(dtype=belief_logits.dtype)
+    uniform_probabilities /= target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
 
     total_variation = 0.5 * (probabilities - targets).abs().sum(dim=-1)
     absolute_error = torch.where(
@@ -54,9 +56,27 @@ def compute_belief_metrics(
         (probabilities - targets).abs(),
         torch.zeros_like(probabilities),
     ).sum(dim=-1) / target_mask.sum(dim=-1).clamp_min(1)
-    top1_agreement = (
-        probabilities.argmax(dim=-1) == targets.argmax(dim=-1)
-    ).to(dtype=belief_logits.dtype)
+    top_probability = probabilities.max(dim=-1, keepdim=True).values
+    predicted_top_support = probabilities == top_probability
+    target_support = targets > 0
+    top1_support_hit = (
+        predicted_top_support & target_support & target_mask
+    ).any(dim=-1).to(dtype=belief_logits.dtype)
+
+    uniform_cross_entropy = -(
+        targets
+        * uniform_probabilities.clamp_min(
+            torch.finfo(belief_logits.dtype).tiny
+        ).log()
+    ).sum(dim=-1)
+    uniform_total_variation = 0.5 * (
+        uniform_probabilities - targets
+    ).abs().sum(dim=-1)
+    uniform_absolute_error = torch.where(
+        target_mask,
+        (uniform_probabilities - targets).abs(),
+        torch.zeros_like(uniform_probabilities),
+    ).sum(dim=-1) / target_mask.sum(dim=-1).clamp_min(1)
 
     return {
         "valid_observer_count": int(valid_observers.sum().item()),
@@ -72,8 +92,20 @@ def compute_belief_metrics(
             absolute_error,
             valid_observers,
         ),
-        "mean_belief_top1_agreement": _masked_mean(
-            top1_agreement,
+        "mean_belief_top1_support_hit": _masked_mean(
+            top1_support_hit,
+            valid_observers,
+        ),
+        "uniform_non_self_baseline_mean_cross_entropy": _masked_mean(
+            uniform_cross_entropy,
+            valid_observers,
+        ),
+        "uniform_non_self_baseline_mean_total_variation": _masked_mean(
+            uniform_total_variation,
+            valid_observers,
+        ),
+        "uniform_non_self_baseline_mean_absolute_error": _masked_mean(
+            uniform_absolute_error,
             valid_observers,
         ),
     }
