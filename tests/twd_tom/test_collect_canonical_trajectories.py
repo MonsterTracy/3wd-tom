@@ -424,7 +424,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["backend_max_attempts"] == 3
     assert plan["backend_sdk_max_retries"] == 0
     assert plan["gameplay_generation_max_attempts"] == 3
-    assert plan["label_generation_max_attempts"] == 1
+    assert plan["label_generation_max_attempts"] == 3
     assert plan["stop_on_first_failure"] is True
     assert plan["rerun_on_failure"] is False
     assert plan["replacement_seed_on_failure"] is False
@@ -441,6 +441,8 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert summary["collection_mode"] == "canonical"
     assert summary["canonical_eligible"] is True
     assert summary["total_gameplay_fallback_count"] == 0
+    assert summary["total_missing_pre_belief_snapshot_count"] == 0
+    assert summary["total_label_snapshot_failure_count"] == 0
     assert summary["total_belief_snapshot_count"] == 3
     assert summary["deterministic_replay_match_count"] == 3
     assert summary["game_ids"] == [
@@ -590,6 +592,47 @@ def test_canonical_validator_rejects_embedded_gameplay_fallback(
     summary_path.write_text(canonical_json(summary) + "\n")
 
     with pytest.raises(ValueError, match="contains gameplay fallback"):
+        batch_module.validate_canonical_belief_batch(output_root)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "error_pattern"),
+    [
+        (
+            "total_missing_pre_belief_snapshot_count",
+            "missing PRE belief snapshots",
+        ),
+        (
+            "total_label_snapshot_failure_count",
+            "failed label snapshots",
+        ),
+    ],
+)
+def test_canonical_validator_rejects_incomplete_label_coverage(
+    tmp_path,
+    monkeypatch,
+    field_name,
+    error_pattern,
+):
+    config_path = _write_config(tmp_path)
+    output_root = tmp_path / f"canonical-{field_name}"
+    _install_fake_runtime(monkeypatch, output_root)
+    batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id=f"canonical-{field_name}",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
+    summary_path = output_root / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary[field_name] = 1
+    summary.pop("summary_digest")
+    summary["summary_digest"] = canonical_digest(summary)
+    summary_path.write_text(canonical_json(summary) + "\n")
+
+    with pytest.raises(ValueError, match=error_pattern):
         batch_module.validate_canonical_belief_batch(output_root)
 
 
@@ -848,6 +891,60 @@ def test_belief_artifact_rejects_any_failed_alive_observer(tmp_path):
     )
 
     with pytest.raises(ValueError, match="status=ok.*player3"):
+        batch_module.validate_belief_snapshot_artifact(
+            belief_path,
+            tmp_path / "observer_views.json",
+            speech_path,
+            expected_game_id="game_001",
+        )
+
+
+def test_pilot_belief_artifact_allows_missing_failed_pre_snapshot(tmp_path):
+    players = [
+        {
+            "player_id": index,
+            "role": ROLES[index - 1],
+            "profile_name": PROFILES[index - 1],
+            "backend_id": f"backend-{index}",
+            "model_name": f"model-{index}",
+        }
+        for index in range(1, 8)
+    ]
+    recorder = batch_module.CanonicalGameInteractionTrajectoryRecorder(
+        tmp_path / "trajectory.json",
+        tmp_path / "observer_views.json",
+        game_id="game_001",
+        run_id="run-001",
+        source_commit=COMMIT,
+        environment_seed=11,
+        runtime_config={"x": 1},
+        players=players,
+    )
+    _complete_artifacts(recorder)
+    snapshot = _belief_snapshot("game_001")
+    belief_path = tmp_path / "belief_snapshots.jsonl"
+    belief_path.write_text("", encoding="utf-8")
+    speech_path = tmp_path / "speech_annotations.jsonl"
+    speech_path.write_text(
+        "".join(
+            json.dumps(annotation) + "\n"
+            for annotation in snapshot["speech_annotations"]
+        ),
+        encoding="utf-8",
+    )
+
+    validation = batch_module.validate_belief_snapshot_artifact(
+        belief_path,
+        tmp_path / "observer_views.json",
+        speech_path,
+        expected_game_id="game_001",
+        require_complete=False,
+    )
+
+    assert validation["belief_snapshot_count"] == 0
+    assert validation["belief_snapshot_complete"] is False
+    assert validation["belief_snapshot_missing_pre_boundary_count"] == 1
+    with pytest.raises(ValueError, match="count must equal"):
         batch_module.validate_belief_snapshot_artifact(
             belief_path,
             tmp_path / "observer_views.json",

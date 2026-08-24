@@ -127,3 +127,34 @@ def test_backend_transient_error_raises_after_third_attempt():
 
     assert len(backend.calls) == 3
     assert audit.snapshot()["backend_retry_count"] == 2
+
+
+def test_label_generation_attempts_and_snapshot_failure_are_audited():
+    audit = make_audit()
+    audit.record_label_generation_attempt(
+        report_id="belief_report_000001",
+        observer_id="player6",
+        generation_attempt=3,
+        status="semantic_error",
+        error="suspected_werewolves cannot contain the observer",
+        raw_response='{"suspected_werewolves":["player6"]}',
+    )
+    audit.record_label_snapshot_failure(
+        step_idx=4,
+        acting_player_id=2,
+        phase="1_day_speech",
+        observer_id="player6",
+        status="semantic_error",
+        error="suspected_werewolves cannot contain the observer",
+        generation_attempt_count=3,
+    )
+
+    snapshot = audit.snapshot()
+    assert snapshot["label_generation_attempt_count"] == 1
+    assert snapshot["label_generation_attempt_events"][0][
+        "generation_attempt"
+    ] == 3
+    assert snapshot["label_snapshot_failure_count"] == 1
+    assert snapshot["label_snapshot_failure_events"][0]["observer_id"] == (
+        "player6"
+    )

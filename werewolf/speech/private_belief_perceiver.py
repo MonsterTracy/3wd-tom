@@ -27,31 +27,43 @@ from werewolf.models.twd_tom.schema import (
 
 
 PRIVATE_BELIEF_MAX_TOKENS = 96
-PRIVATE_BELIEF_JSON_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "suspected_werewolves",
-    ],
-    "properties": {
-        "suspected_werewolves": {
-            "type": "array",
-            "minItems": 0,
-            "maxItems": 6,
-            "items": {
-                "type": "string",
-                "enum": list(
-                    PLAYER_NAMES
-                ),
+LABEL_GENERATION_MAX_ATTEMPTS = 3
+
+
+def _private_belief_json_schema(
+    legal_candidates: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    candidates = canonicalize_player_set(
+        list(legal_candidates),
+        field_name="legal_candidates",
+    )
+    items: dict[str, Any] = {"type": "string"}
+    if candidates:
+        items["enum"] = candidates
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["suspected_werewolves"],
+        "properties": {
+            "suspected_werewolves": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": len(candidates),
+                "items": items,
             },
         },
-    },
-}
+    }
+
+
+PRIVATE_BELIEF_JSON_SCHEMA = _private_belief_json_schema(
+    PLAYER_NAMES,
+)
 
 
 def private_belief_response_format(
     *,
     supports_json_schema: bool,
+    legal_candidates: list[str] | tuple[str, ...] = PLAYER_NAMES,
 ) -> dict[str, Any]:
     """Build the provider request format without weakening local validation."""
 
@@ -71,9 +83,7 @@ def private_belief_response_format(
         "json_schema": {
             "name": "private_belief_report",
             "strict": True,
-            "schema": deepcopy(
-                PRIVATE_BELIEF_JSON_SCHEMA
-            ),
+            "schema": deepcopy(_private_belief_json_schema(legal_candidates)),
         },
     }
 
@@ -150,6 +160,11 @@ class PlayingAgentBeliefReporter:
                 known_werewolves=known_werewolves,
                 known_non_werewolves=known_non_werewolves,
             )
+            legal_candidates = self.legal_candidates(
+                observer_id=observer,
+                known_werewolves=known_werewolves,
+                known_non_werewolves=known_non_werewolves,
+            )
             if self.audit_hook is not None:
                 report_id, report_prompt = self.audit_hook.prepare_report(
                     observer_id=observer,
@@ -158,19 +173,7 @@ class PlayingAgentBeliefReporter:
                     agent_model_id=getattr(agent, "model_name", None),
                     report_prompt=report_prompt,
                 )
-            audit_context = (
-                self.audit_hook.belief_context(report_id)
-                if self.audit_hook is not None
-                else nullcontext()
-            )
-            with audit_context:
-                raw_response = agent.report_suspected_werewolves_readonly(
-                    observation=observation,
-                    report_prompt=report_prompt,
-                )
         except Exception as exc:
-            if self.audit_hook is not None and report_id is not None:
-                self.audit_hook.complete_report(report_id, None)
             return self._result(
                 observer=observer,
                 status=STATUS_REPORTER_ERROR,
@@ -180,47 +183,110 @@ class PlayingAgentBeliefReporter:
                 known_non_werewolves=known_non_werewolves,
             )
 
-        if self.audit_hook is not None:
-            self.audit_hook.complete_report(report_id, raw_response)
+        for generation_attempt in range(1, LABEL_GENERATION_MAX_ATTEMPTS + 1):
+            raw_response = None
+            try:
+                audit_context = (
+                    self.audit_hook.belief_context(report_id)
+                    if self.audit_hook is not None
+                    else nullcontext()
+                )
+                with audit_context:
+                    raw_response = agent.report_suspected_werewolves_readonly(
+                        observation=observation,
+                        report_prompt=report_prompt,
+                        legal_candidates=legal_candidates,
+                    )
+            except Exception as exc:
+                self._record_generation_attempt(
+                    report_id=report_id,
+                    observer_id=observer,
+                    generation_attempt=generation_attempt,
+                    status=STATUS_REPORTER_ERROR,
+                    error=str(exc),
+                    raw_response=None,
+                )
+                if self.audit_hook is not None and report_id is not None:
+                    self.audit_hook.complete_report(report_id, None)
+                return self._result(
+                    observer=observer,
+                    status=STATUS_REPORTER_ERROR,
+                    error=str(exc),
+                    agent_backend_id=agent_backend_id,
+                    known_werewolves=known_werewolves,
+                    known_non_werewolves=known_non_werewolves,
+                    generation_attempt_count=generation_attempt,
+                )
 
-        try:
-            suspected = self.parse_response(raw_response)
-        except (TypeError, ValueError) as exc:
-            return self._result(
-                observer=observer,
-                status=STATUS_PARSE_ERROR,
-                error=str(exc),
-                agent_backend_id=agent_backend_id,
-                known_werewolves=known_werewolves,
-                known_non_werewolves=known_non_werewolves,
-            )
+            try:
+                suspected = self.parse_response(raw_response)
+            except (TypeError, ValueError) as exc:
+                result = self._result(
+                    observer=observer,
+                    status=STATUS_PARSE_ERROR,
+                    error=str(exc),
+                    agent_backend_id=agent_backend_id,
+                    known_werewolves=known_werewolves,
+                    known_non_werewolves=known_non_werewolves,
+                    generation_attempt_count=generation_attempt,
+                )
+            else:
+                try:
+                    suspected = validate_player_suspicion(
+                        suspected,
+                        known_werewolves,
+                        known_non_werewolves,
+                        observer_id=observer,
+                    )
+                except (TypeError, ValueError) as exc:
+                    result = self._result(
+                        observer=observer,
+                        status=STATUS_SEMANTIC_ERROR,
+                        error=str(exc),
+                        agent_backend_id=agent_backend_id,
+                        known_werewolves=known_werewolves,
+                        known_non_werewolves=known_non_werewolves,
+                        generation_attempt_count=generation_attempt,
+                    )
+                else:
+                    result = self._result(
+                        observer=observer,
+                        status=STATUS_OK,
+                        suspected_werewolves=suspected,
+                        error=None,
+                        agent_backend_id=agent_backend_id,
+                        known_werewolves=known_werewolves,
+                        known_non_werewolves=known_non_werewolves,
+                        generation_attempt_count=generation_attempt,
+                    )
 
-        try:
-            suspected = validate_player_suspicion(
-                suspected,
-                known_werewolves,
-                known_non_werewolves,
+            self._record_generation_attempt(
+                report_id=report_id,
                 observer_id=observer,
+                generation_attempt=generation_attempt,
+                status=result["status"],
+                error=result["error"],
+                raw_response=raw_response,
             )
-        except (TypeError, ValueError) as exc:
-            return self._result(
-                observer=observer,
-                status=STATUS_SEMANTIC_ERROR,
-                error=str(exc),
-                agent_backend_id=agent_backend_id,
-                known_werewolves=known_werewolves,
-                known_non_werewolves=known_non_werewolves,
-            )
+            if result["status"] == STATUS_OK or (
+                generation_attempt == LABEL_GENERATION_MAX_ATTEMPTS
+            ):
+                if self.audit_hook is not None:
+                    self.audit_hook.complete_report(report_id, raw_response)
+                return result
 
-        return self._result(
-            observer=observer,
-            status=STATUS_OK,
-            suspected_werewolves=suspected,
-            error=None,
-            agent_backend_id=agent_backend_id,
-            known_werewolves=known_werewolves,
-            known_non_werewolves=known_non_werewolves,
+        raise AssertionError("unreachable label generation loop")
+
+    def _record_generation_attempt(self, **event) -> None:
+        if self.audit_hook is None:
+            return
+        recorder = getattr(
+            self.audit_hook,
+            "record_label_generation_attempt",
+            None,
         )
+        if callable(recorder):
+            recorder(**event)
 
     def record_agent_state(
         self,
@@ -322,6 +388,30 @@ Return only this JSON structure:
 {{"suspected_werewolves":[...]}}"""
 
     @staticmethod
+    def legal_candidates(
+        *,
+        observer_id: int | str,
+        known_werewolves: list[str],
+        known_non_werewolves: list[str],
+    ) -> list[str]:
+        observer = normalize_player(observer_id)
+        known_wolves = canonicalize_player_set(
+            known_werewolves,
+            field_name="known_werewolves",
+        )
+        known_non_wolves = canonicalize_player_set(
+            known_non_werewolves,
+            field_name="known_non_werewolves",
+        )
+        if set(known_wolves) & set(known_non_wolves):
+            raise ValueError("hard knowledge sets must be disjoint")
+        return [
+            player
+            for player in PLAYER_NAMES
+            if player != observer and player not in known_non_wolves
+        ]
+
+    @staticmethod
     def parse_response(
         raw_response: Any,
     ) -> list[str]:
@@ -354,6 +444,7 @@ Return only this JSON structure:
         error: str | None,
         known_werewolves: list[str],
         known_non_werewolves: list[str],
+        generation_attempt_count: int = 0,
     ) -> dict[str, Any]:
         if not isinstance(agent_backend_id, str) or not agent_backend_id.strip():
             raise ValueError("agent_backend_id must be non-empty text")
@@ -365,6 +456,7 @@ Return only this JSON structure:
             "known_non_werewolves": list(known_non_werewolves),
             "error": error,
             "agent_backend_id": agent_backend_id,
+            "generation_attempt_count": generation_attempt_count,
         }
 
 
@@ -374,6 +466,7 @@ __all__ = [
     "STATUS_SEMANTIC_ERROR",
     "STATUS_REPORTER_ERROR",
     "PRIVATE_BELIEF_MAX_TOKENS",
+    "LABEL_GENERATION_MAX_ATTEMPTS",
     "PRIVATE_BELIEF_JSON_SCHEMA",
     "private_belief_response_format",
     "PlayingAgentBeliefReporter",

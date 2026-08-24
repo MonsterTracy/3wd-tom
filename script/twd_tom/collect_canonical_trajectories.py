@@ -32,6 +32,9 @@ from script.twd_tom.replay_canonical_trajectory import (
 from werewolf.backends import load_named_backends
 from werewolf.agents.gpt_agent import GAMEPLAY_GENERATION_MAX_ATTEMPTS
 from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
+from werewolf.models.twd_tom.belief_snapshot import (
+    BeliefSnapshotCollectionError,
+)
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
     normalize_public_events,
@@ -55,6 +58,9 @@ from werewolf.models.twd_tom.schema import (
     LABEL_PROMPT_VERSION,
     LABEL_PROVENANCE,
 )
+from werewolf.speech.private_belief_perceiver import (
+    LABEL_GENERATION_MAX_ATTEMPTS,
+)
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.trajectory import (
     CanonicalGameInteractionTrajectoryRecorder,
@@ -70,14 +76,13 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v5"
-GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v5"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v5"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v6"
+GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v6"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v6"
 BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v3"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
 BACKEND_SDK_MAX_RETRIES = 0
-LABEL_GENERATION_MAX_ATTEMPTS = 1
 CANONICAL_COLLECTION_MODE = "canonical"
 PILOT_COLLECTION_MODE = "pilot"
 COLLECTION_MODES = (CANONICAL_COLLECTION_MODE, PILOT_COLLECTION_MODE)
@@ -276,6 +281,10 @@ def validate_canonical_belief_batch(
         raise ValueError("canonical batch summary is not canonical-eligible")
     if summary.get("total_gameplay_fallback_count") != 0:
         raise ValueError("canonical batch contains gameplay fallback actions")
+    if summary.get("total_missing_pre_belief_snapshot_count") != 0:
+        raise ValueError("canonical batch contains missing PRE belief snapshots")
+    if summary.get("total_label_snapshot_failure_count") != 0:
+        raise ValueError("canonical batch contains failed label snapshots")
 
     planned_count = _positive_integer(
         summary.get("planned_game_count"),
@@ -340,6 +349,12 @@ def validate_canonical_belief_batch(
             raise ValueError(f"canonical game has no call audit: {game_id}")
         if call_audit.get("gameplay_fallback_count") != 0:
             raise ValueError(f"canonical game contains gameplay fallback: {game_id}")
+        if call_audit.get("label_snapshot_failure_count") != 0:
+            raise ValueError(f"canonical game contains label failure: {game_id}")
+        if game_summary.get("belief_snapshot_complete") is not True:
+            raise ValueError(f"canonical game has incomplete PRE labels: {game_id}")
+        if game_summary.get("belief_snapshot_missing_pre_boundary_count") != 0:
+            raise ValueError(f"canonical game has missing PRE labels: {game_id}")
 
         belief_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
         belief_sha256 = _sha256(belief_path)
@@ -1016,6 +1031,7 @@ def validate_belief_snapshot_artifact(
     speech_annotations_path: str | Path,
     *,
     expected_game_id: str,
+    require_complete: bool = True,
 ) -> dict[str, Any]:
     """Validate raw self-reports against the canonical PRE-speech cutoffs."""
 
@@ -1029,7 +1045,9 @@ def validate_belief_snapshot_artifact(
         if isinstance(boundary, Mapping)
         and boundary.get("boundary_type") == PRE_PUBLIC_SPEECH
     }
-    if len(records) != len(pre_boundaries):
+    if not isinstance(require_complete, bool):
+        raise TypeError("require_complete must be boolean")
+    if require_complete and len(records) != len(pre_boundaries):
         raise ValueError(
             "belief snapshot count must equal PRE_PUBLIC_SPEECH boundary count"
         )
@@ -1170,14 +1188,18 @@ def validate_belief_snapshot_artifact(
         ):
             raise ValueError("belief snapshot public action count mismatch")
 
-    if seen_steps != set(pre_boundaries):
+    if require_complete and seen_steps != set(pre_boundaries):
         raise ValueError("belief snapshots do not cover every PRE-speech boundary")
+    missing_steps = sorted(set(pre_boundaries) - seen_steps)
     return {
         "belief_snapshot_count": len(records),
         "belief_report_count": sum(
             len(record["observer_ids"])
             for record in records
         ),
+        "belief_snapshot_complete": not missing_steps,
+        "belief_snapshot_missing_pre_boundary_count": len(missing_steps),
+        "belief_snapshot_missing_pre_step_indices": missing_steps,
         "belief_snapshots_sha256": _sha256(belief_snapshots_path),
     }
 
@@ -1201,6 +1223,7 @@ def _game_summary(
         "canonical_eligible": (
             collection_mode == CANONICAL_COLLECTION_MODE
             and fallback_count == 0
+            and validation.get("belief_snapshot_complete") is True
         ),
     }
     summary["summary_digest"] = canonical_digest(summary)
@@ -1253,6 +1276,9 @@ def _batch_plan(
         ),
         "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
         "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
+        "label_failure_policy": (
+            "canonical_fail_closed_pilot_skip_pre_and_no_commitment"
+        ),
         "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
         "rerun_on_failure": RERUN_ON_FAILURE,
         "replacement_seed_on_failure": REPLACEMENT_SEED_ON_FAILURE,
@@ -1477,6 +1503,9 @@ def collect_canonical_trajectory_batch(
                         observer_views_path,
                         speech_annotations_path,
                         expected_game_id=game_id,
+                        require_complete=(
+                            collection_mode == CANONICAL_COLLECTION_MODE
+                        ),
                     )
                 )
                 if validation["runtime_config_digest"] != normalized_digest:
@@ -1502,12 +1531,17 @@ def collect_canonical_trajectory_batch(
             except BaseException as exc:
                 if not call_audit_path.exists():
                     _write_json_new(call_audit_path, call_audit.snapshot())
+                failure_stage = (
+                    "belief_snapshot"
+                    if isinstance(exc, BeliefSnapshotCollectionError)
+                    else stage
+                )
                 failure = _failure_record(
                     run_id=run_id,
                     commit=provenance["batch_code_commit"],
                     failed_seed=seed,
                     failed_game_id=game_id,
-                    failure_stage=stage,
+                    failure_stage=failure_stage,
                     exception=exc,
                     completed_games=completed_games,
                     collection_mode=collection_mode,
@@ -1524,6 +1558,7 @@ def collect_canonical_trajectory_batch(
                 collection_mode == CANONICAL_COLLECTION_MODE
                 and all(
                     game["call_audit"]["gameplay_fallback_count"] == 0
+                    and game["belief_snapshot_complete"] is True
                     for game in completed_games
                 )
             ),
@@ -1564,6 +1599,10 @@ def collect_canonical_trajectory_batch(
             "total_belief_report_count": sum(
                 game["belief_report_count"] for game in completed_games
             ),
+            "total_missing_pre_belief_snapshot_count": sum(
+                game["belief_snapshot_missing_pre_boundary_count"]
+                for game in completed_games
+            ),
             "total_speech_annotation_count": sum(
                 game["speech_annotation_count"] for game in completed_games
             ),
@@ -1590,6 +1629,20 @@ def collect_canonical_trajectory_batch(
                 game["call_audit"]["gameplay_fallback_count"]
                 for game in completed_games
             ),
+            "total_label_generation_attempt_count": sum(
+                game["call_audit"].get(
+                    "label_generation_attempt_count",
+                    0,
+                )
+                for game in completed_games
+            ),
+            "total_label_snapshot_failure_count": sum(
+                game["call_audit"].get(
+                    "label_snapshot_failure_count",
+                    0,
+                )
+                for game in completed_games
+            ),
             "backend_max_attempts": BACKEND_MAX_ATTEMPTS,
             "backend_sdk_max_retries": BACKEND_SDK_MAX_RETRIES,
             "gameplay_generation_max_attempts": (
@@ -1597,6 +1650,9 @@ def collect_canonical_trajectory_batch(
             ),
             "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
             "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
+            "label_failure_policy": (
+                "canonical_fail_closed_pilot_skip_pre_and_no_commitment"
+            ),
             "stop_on_first_failure": True,
             "rerun_on_failure": False,
             "replacement_seed_on_failure": False,

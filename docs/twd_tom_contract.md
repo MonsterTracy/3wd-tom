@@ -8,9 +8,9 @@
 
 当前冻结版本：
 
-- raw sample：`classic7_pre_speech_player_suspicion_v4`；
-- label prompt：`classic7_pre_speech_player_suspicion_prompt_v4`；
-- label provenance：`alive_observer_readonly_pre_speech_report_v2`；
+- raw sample：`classic7_pre_speech_player_suspicion_v5`；
+- label prompt：`classic7_pre_speech_player_suspicion_prompt_v5`；
+- label provenance：`alive_observer_readonly_pre_speech_report_v3`；
 - target conversion：`hard_knowledge_consistent_sparse_suspicion_uniform_support_v2`；
 - target semantics：`relative_suspicion_matrix_v1`；
 - model input scope：`completed_structured_public_events_without_terminal_turn_start_v1`；
@@ -43,9 +43,13 @@ R ⊆ S
 S ∩ F = ∅
 ```
 
-因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。label self-report 只做一次语义生成，不进行修复、重新生成、fallback、补猜或概率化；底层 `BackendError` 最多进行 3 次显式、计入预算的传输尝试。任一存活观察者的报告非 `ok` 时立即终止当前局，失败 snapshot 不写入 raw JSONL。
+因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。每个请求使用 observer-specific JSON Schema：候选 enum 在调用前排除 `F`。重复项由本地 parser 拒绝，而不把 vLLM xgrammar 不支持的 `uniqueItems` 发给服务端。该 Schema 只降低非法输出概率，去重与 `R ⊆ S` 仍由本地校验强制执行。
 
-在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个非 `ok` 报告后不再请求其余 observer，batch 随即停止。失败目录、`call_audit.json` 和包含异常类型与消息的 `batch_failure.json` 保留，不能用 replacement seed 补位。
+纯解析或语义失败时，系统用同一个冻结 prompt、observation 和 hard knowledge 重新执行 readonly label query，最多 3 次；接受首个完全合法的原始集合。每次尝试的原始响应、状态和错误写入 `call_audit.json`。这属于可审计的 rejection generation，不会修复响应、删除非法成员、强制补入 `R`、补猜或概率化。底层 `BackendError` 另有最多 3 次显式、计入预算的传输尝试；纯 backend 连续失败不会再启动语义重生成。
+
+在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个三次生成后仍非 `ok` 的报告，不再请求其余 observer，batch 随即停止。失败 snapshot 不写入 raw JSONL；失败目录、逐次响应所在的 `call_audit.json` 和包含异常类型与消息的 `batch_failure.json` 保留，不能用 replacement seed 补位。
+
+pilot 模式下，同样的 label failure 会跳过整条 PRE snapshot，而不是保存部分 observer 或伪造失败行；当前 speaker 随后直接提交固定 `no_commitment` 发言使游戏继续。per-game summary 记录缺失 PRE step，call audit 记录 label failure 与 fallback。pilot 始终 `canonical_eligible=false`，其不完整标签只能用于诊断，不能训练或物化。
 
 raw sample 保存 public history 的两个 digest、观察者集合、每个观察者的 self-report、hard knowledge、状态与 backend provenance。它不保存 raw model response、私有 observation、pair target 或概率矩阵。
 
@@ -77,7 +81,7 @@ day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过�
 
 ## Canonical materialization
 
-`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受 `collection_mode=canonical`、`canonical_eligible=true`、所有 fallback count 为 0，且具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链并不存在 `batch_failure.json` 的 canonical batch。`--mode pilot` 产生的批次即使没有实际 fallback 也不能进入物化。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受 `collection_mode=canonical`、`canonical_eligible=true`、所有 fallback/label snapshot failure count 为 0、每个 PRE boundary 都有完整成功 snapshot，且具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链并不存在 `batch_failure.json` 的 canonical batch。`--mode pilot` 产生的批次即使没有实际 fallback 也不能进入物化。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
 
 物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口先验证上述成功批次摘要链，再验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。物化目录原子生成 `train.jsonl`、`validation.jsonl`、`test.jsonl` 和 `split_manifest.json`；manifest 绑定来源批次摘要、game-level split、输出文件 SHA256 与自身 digest。
 

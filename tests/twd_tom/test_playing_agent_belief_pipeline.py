@@ -219,7 +219,7 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
         )
     )
     assert sample["schema_version"] == (
-        "classic7_pre_speech_player_suspicion_v4"
+        "classic7_pre_speech_player_suspicion_v5"
     )
     assert {
         len(suspicion)
@@ -366,7 +366,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     assert {
         sample["schema_version"]
         for sample in raw_samples
-    } == {"classic7_pre_speech_player_suspicion_v4"}
+    } == {"classic7_pre_speech_player_suspicion_v5"}
     assert public_speech_actions(
         raw_samples[0]["public_events"], raw_samples[0]["speech_annotations"]
     ) == []
@@ -436,5 +436,5 @@ def test_belief_collection_stops_on_first_failed_report(tmp_path):
                 observer_ids=list(range(1, 8)),
             )
 
-    assert [len(backend.calls) for backend in backends] == [1, 1, 1, 0, 0, 0, 0]
+    assert [len(backend.calls) for backend in backends] == [1, 1, 3, 0, 0, 0, 0]
     assert path.read_text(encoding="utf-8") == ""

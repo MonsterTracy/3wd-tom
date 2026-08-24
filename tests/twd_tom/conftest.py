@@ -119,8 +119,14 @@ def canonical_belief_batch_factory():
                 "belief_report_count": sum(
                     len(record["observer_ids"]) for record in records
                 ),
+                "belief_snapshot_complete": True,
+                "belief_snapshot_missing_pre_boundary_count": 0,
+                "belief_snapshot_missing_pre_step_indices": [],
                 "belief_snapshots_sha256": _sha256(belief_path),
-                "call_audit": {"gameplay_fallback_count": 0},
+                "call_audit": {
+                    "gameplay_fallback_count": 0,
+                    "label_snapshot_failure_count": 0,
+                },
             }
             game_summary["summary_digest"] = canonical_digest(game_summary)
             _write_json(game_dir / "summary.json", game_summary)
@@ -140,6 +146,8 @@ def canonical_belief_batch_factory():
             "collection_mode": "canonical",
             "canonical_eligible": True,
             "total_gameplay_fallback_count": 0,
+            "total_missing_pre_belief_snapshot_count": 0,
+            "total_label_snapshot_failure_count": 0,
             "plan_digest": plan["plan_digest"],
             "planned_game_count": len(game_ids),
             "completed_game_count": len(game_ids),

@@ -26,7 +26,7 @@ RAW_LABEL_SEMANTICS = (
     "observer_internal_hard_knowledge_consistent_player_suspicion_set_v2"
 )
 SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v1"
-LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v2"
+LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v3"
 LABEL_SOURCE = "playing_agent_readonly_self_report"
 LABEL_CONTEXT_SCOPE = "playing_agent_legally_available_information_state"
 REPORT_CONTEXT_MODE = "readonly_clone_of_playing_agent_context"
@@ -37,7 +37,7 @@ PRIVATE_CONTEXT_SERIALIZED = False
 REPORT_TIMING = "pre_public_speech"
 TRUTH_BASED_OBSERVER_SELECTION = False
 OBSERVER_SELECTION = "publicly_alive_players"
-LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v4"
+LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v5"
 PAD_TOKEN = "<pad>"
 NONE_TOKEN = "<none>"
 

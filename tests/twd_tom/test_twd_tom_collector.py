@@ -60,10 +60,10 @@ def test_collector_freezes_then_writes_player_suspicion_jsonl(tmp_path):
     record = json.loads(path.read_text(encoding="utf-8"))
     assert record == sample
     assert record["schema_version"] == SAMPLE_SCHEMA_VERSION
-    assert record["schema_version"] == "classic7_pre_speech_player_suspicion_v4"
+    assert record["schema_version"] == "classic7_pre_speech_player_suspicion_v5"
     assert record["label_prompt_version"] == LABEL_PROMPT_VERSION
     assert record["label_prompt_version"] == (
-        "classic7_pre_speech_player_suspicion_prompt_v4"
+        "classic7_pre_speech_player_suspicion_prompt_v5"
     )
     assert "belief_mode" not in json.dumps(record)
     assert "believed_werewolves" not in record

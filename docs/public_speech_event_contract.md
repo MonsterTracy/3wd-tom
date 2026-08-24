@@ -8,7 +8,7 @@
 - speech annotation：`classic7_speech_annotation_v2`
 - speech action ontology：`classic7_speech_action_v1`
 - speech parser prompt：`classic7_speech_parser_v2`
-- PRE belief sample：`classic7_pre_speech_player_suspicion_v4`
+- PRE belief sample：`classic7_pre_speech_player_suspicion_v5`
 
 版本不做隐式兼容或自动迁移。任一版本变化都必须产生新 canonical run；历史原文可以通过显式离线重标注生成新 annotation artifact，但不能原地覆盖旧 artifact。
 
@@ -100,7 +100,7 @@ realization prompt 可以得到冻结 intent 和此前公开历史用于自然�
 
 realization 遇到截断或确定性质量校验失败时，只重生成 realization，最多 3 次；不会重新生成已经冻结的 day cognition intent。独立 speech parser 的语义解析只执行一次，parser 失败可以让环境留下原文和错误 annotation，但该局随后必须在 canonical artifact validation 中失败并保留审计工件。两类请求的底层 backend 瞬时异常均可做最多 3 次显式且计入预算的传输尝试。
 
-`--mode canonical` 在 realization 三次生成仍失败时停在发言提交前，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言继续游戏，但 plan/summary/call audit 必须标记其为非 canonical；canonical validator 和 materializer 必须拒绝整批 pilot 数据，而不只拒绝实际触发 fallback 的那一局。
+`--mode canonical` 在 realization 或 PRE label 三次生成仍失败时停在发言提交前，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言；若 PRE label 三次仍失败，则跳过整条 PRE snapshot 并提交同一固定无承诺发言继续游戏。plan/summary/call audit 必须记录缺失 PRE、label failure 与 fallback，并将整批标记为非 canonical；canonical validator 和 materializer 必须拒绝整批 pilot 数据，而不只拒绝实际触发 fallback 的那一局。
 
 ## 8. 验收条件
 

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from script.twd_tom.collection_budget import GameCallBudgetAudit
 from werewolf.agents.llm_agent import LLMAgent
 from werewolf.helper.log_utils import Log
 from werewolf.models.twd_tom.public_events import copy_public_events
@@ -10,6 +11,7 @@ from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION
 from werewolf.models.twd_tom.samples import freeze_public_snapshot
 from tests.twd_tom.public_event_fixtures import make_speech_annotations
 from werewolf.speech.private_belief_perceiver import (
+    LABEL_GENERATION_MAX_ATTEMPTS,
     PRIVATE_BELIEF_JSON_SCHEMA,
     PRIVATE_BELIEF_MAX_TOKENS,
     PlayingAgentBeliefReporter,
@@ -22,12 +24,19 @@ from werewolf.speech.private_belief_perceiver import (
 
 class CapturingBackend:
     def __init__(self, response, *, supports_json_schema=False):
+        self.responses = (
+            list(response)
+            if isinstance(response, (list, tuple))
+            else None
+        )
         self.response = response
         self.calls = []
         self.supports_json_schema = supports_json_schema
 
     def chat(self, **kwargs):
         self.calls.append(deepcopy(kwargs))
+        if self.responses is not None:
+            return self.responses.pop(0)
         return self.response
 
 
@@ -90,13 +99,14 @@ def _report(
     known_non_werewolves=None,
     supports_json_schema=False,
     observation=None,
+    audit_hook=None,
 ):
     backend = CapturingBackend(
         response,
         supports_json_schema=supports_json_schema,
     )
     agent = LLMAgent(backend=backend, model_name="fake")
-    result = PlayingAgentBeliefReporter().report(
+    result = PlayingAgentBeliefReporter(audit_hook=audit_hook).report(
         agent=agent,
         observation=(
             observation
@@ -400,11 +410,6 @@ def test_belief_request_uses_capability_format_and_fixed_budget(
         "thinking": {"type": "disabled"}
     }
     if supports_json_schema:
-        assert request["response_format"]["json_schema"] == {
-            "name": "private_belief_report",
-            "strict": True,
-            "schema": PRIVATE_BELIEF_JSON_SCHEMA,
-        }
         transport_schema = request["response_format"][
             "json_schema"
         ]["schema"]
@@ -426,8 +431,9 @@ def test_belief_request_uses_capability_format_and_fixed_budget(
         assert array_schema["maxItems"] == 6
         assert array_schema["items"] == {
             "type": "string",
-            "enum": [f"player{i}" for i in range(1, 8)],
+            "enum": [f"player{i}" for i in range(2, 8)],
         }
+        assert transport_schema != PRIVATE_BELIEF_JSON_SCHEMA
     else:
         assert request["response_format"] == {
             "type": "json_object"
@@ -632,11 +638,54 @@ def test_full_candidate_report_succeeds_once_without_retry():
     ]
     assert result["error"] is None
     assert len(backend.calls) == 1
+    assert result["generation_attempt_count"] == 1
 
 
-def test_current_prompt_version_is_player_suspicion_v4():
+def test_semantic_generation_retries_until_third_valid_response():
+    audit = GameCallBudgetAudit(
+        game_id="label-retry",
+        max_gameplay_calls=1,
+        max_belief_calls=3,
+        max_total_calls=4,
+        max_wall_seconds=60,
+    )
+    result, backend, _ = _report(
+        [
+            '{"suspected_werewolves":["player1"]}',
+            '{"suspected_werewolves":["player1","player3"]}',
+            '{"suspected_werewolves":["player3"]}',
+        ],
+        supports_json_schema=True,
+        audit_hook=audit,
+    )
+
+    assert result["status"] == STATUS_OK
+    assert result["suspected_werewolves"] == ["player3"]
+    assert result["generation_attempt_count"] == 3
+    assert len(backend.calls) == LABEL_GENERATION_MAX_ATTEMPTS == 3
+    attempt_events = audit.snapshot()["label_generation_attempt_events"]
+    assert [event["status"] for event in attempt_events] == [
+        STATUS_SEMANTIC_ERROR,
+        STATUS_SEMANTIC_ERROR,
+        STATUS_OK,
+    ]
+
+
+def test_semantic_generation_stops_after_three_invalid_responses():
+    result, backend, _ = _report(
+        '{"suspected_werewolves":["player1"]}',
+        supports_json_schema=True,
+    )
+
+    assert result["status"] == STATUS_SEMANTIC_ERROR
+    assert result["suspected_werewolves"] is None
+    assert result["generation_attempt_count"] == 3
+    assert len(backend.calls) == LABEL_GENERATION_MAX_ATTEMPTS == 3
+
+
+def test_current_prompt_version_is_player_suspicion_v5():
     assert LABEL_PROMPT_VERSION == (
-        "classic7_pre_speech_player_suspicion_prompt_v4"
+        "classic7_pre_speech_player_suspicion_prompt_v5"
     )
 
 

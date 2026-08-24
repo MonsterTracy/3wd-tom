@@ -23,6 +23,7 @@ from werewolf.backends import (
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models import SpeechPerceiver
 from werewolf.models.twd_tom.belief_snapshot import (
+    BeliefSnapshotCollectionError,
     PlayingAgentBeliefSnapshotCollector,
 )
 from werewolf.models.twd_tom.collector import (
@@ -93,6 +94,28 @@ def _deterministic_legal_fallback_action(observation):
     return tuple(candidate) if isinstance(candidate, (list, tuple)) else candidate
 
 
+def _act_with_optional_pre_speech_belief(
+    acting_agent,
+    observation,
+    pre_speech_belief,
+):
+    if pre_speech_belief is None:
+        return acting_agent.act(observation)
+    belief_aware_act = getattr(
+        acting_agent,
+        "act_with_pre_speech_belief",
+        None,
+    )
+    if not callable(belief_aware_act):
+        raise TypeError(
+            "speech agent must support immutable PRE-belief cognition handoff"
+        )
+    return belief_aware_act(
+        observation,
+        pre_speech_belief=pre_speech_belief,
+    )
+
+
 def eval(
     env,
     agent_list,
@@ -140,6 +163,7 @@ def eval(
         action_phase = obs["phase"]
         trigger = getattr(env, "phase", None)
         pre_speech_belief = None
+        action = None
         if trajectory_recorder is not None:
             trajectory_recorder.before_agent_act(
                 env,
@@ -157,16 +181,53 @@ def eval(
             trigger in PUBLIC_SPEECH_EVENTS
         ):
             if sample_collector is not None:
-                collected_sample = sample_collector.record(
-                    env,
-                    step_idx=step_idx,
-                    trigger=trigger,
-                    phase=action_phase,
-                    speaker_id=current_act_idx,
-                    observer_ids=(
-                        _alive_observer_ids(env)
-                    ),
-                )
+                try:
+                    collected_sample = sample_collector.record(
+                        env,
+                        step_idx=step_idx,
+                        trigger=trigger,
+                        phase=action_phase,
+                        speaker_id=current_act_idx,
+                        observer_ids=(
+                            _alive_observer_ids(env)
+                        ),
+                    )
+                except BeliefSnapshotCollectionError as exc:
+                    if not allow_gameplay_fallback:
+                        if trajectory_recorder is not None:
+                            trajectory_recorder.fail(
+                                failure_stage="belief_snapshot",
+                                exception=exc,
+                            )
+                        raise
+                    call_audit.record_label_snapshot_failure(
+                        step_idx=step_idx,
+                        acting_player_id=current_act_idx,
+                        phase=action_phase,
+                        observer_id=exc.observer_id,
+                        status=exc.status,
+                        error=exc.error,
+                        generation_attempt_count=(
+                            exc.generation_attempt_count
+                        ),
+                    )
+                    try:
+                        action = _deterministic_legal_fallback_action(obs)
+                        call_audit.record_gameplay_fallback(
+                            step_idx=step_idx,
+                            acting_player_id=current_act_idx,
+                            phase=action_phase,
+                            action=action,
+                            exception=exc,
+                        )
+                    except Exception as fallback_exc:
+                        if trajectory_recorder is not None:
+                            trajectory_recorder.fail(
+                                failure_stage="belief_snapshot_fallback",
+                                exception=fallback_exc,
+                            )
+                        raise
+                    collected_sample = None
                 if collected_sample is not None:
                     pre_speech_belief = speaker_pre_speech_belief_from_sample(
                         collected_sample,
@@ -174,69 +235,56 @@ def eval(
                         step_idx=step_idx,
                     )
 
-        audit_context = (
-            call_audit.gameplay_context(
-                acting_player_id=current_act_idx,
-                observation=obs,
-                public_events=env.public_events,
+        if action is None:
+            audit_context = (
+                call_audit.gameplay_context(
+                    acting_player_id=current_act_idx,
+                    observation=obs,
+                    public_events=env.public_events,
+                )
+                if call_audit is not None
+                else nullcontext()
             )
-            if call_audit is not None
-            else nullcontext()
-        )
-        action = None
-        try:
-            with audit_context:
-                acting_agent = agent_list[current_act_idx - 1]
-                if pre_speech_belief is None:
-                    action = acting_agent.act(obs)
-                else:
-                    belief_aware_act = getattr(
-                        acting_agent,
-                        "act_with_pre_speech_belief",
-                        None,
-                    )
-                    if not callable(belief_aware_act):
-                        raise TypeError(
-                            "speech agent must support immutable PRE-belief "
-                            "cognition handoff"
-                        )
-                    action = belief_aware_act(
+            try:
+                with audit_context:
+                    action = _act_with_optional_pre_speech_belief(
+                        agent_list[current_act_idx - 1],
                         obs,
-                        pre_speech_belief=pre_speech_belief,
+                        pre_speech_belief,
                     )
-        except GameplayGenerationExhausted as exc:
-            if not allow_gameplay_fallback:
+            except GameplayGenerationExhausted as exc:
+                if not allow_gameplay_fallback:
+                    if trajectory_recorder is not None:
+                        trajectory_recorder.fail(
+                            failure_stage="agent_act",
+                            exception=exc,
+                        )
+                    raise
+                try:
+                    action = _deterministic_legal_fallback_action(obs)
+                    call_audit.record_gameplay_fallback(
+                        step_idx=step_idx,
+                        acting_player_id=current_act_idx,
+                        phase=action_phase,
+                        action=action,
+                        exception=exc,
+                    )
+                except Exception as fallback_exc:
+                    if trajectory_recorder is not None:
+                        trajectory_recorder.fail(
+                            failure_stage="agent_act",
+                            exception=fallback_exc,
+                        )
+                    raise
+            except Exception as exc:
                 if trajectory_recorder is not None:
+                    if action is not None:
+                        trajectory_recorder.after_agent_act(action)
                     trajectory_recorder.fail(
                         failure_stage="agent_act",
                         exception=exc,
                     )
                 raise
-            try:
-                action = _deterministic_legal_fallback_action(obs)
-                call_audit.record_gameplay_fallback(
-                    step_idx=step_idx,
-                    acting_player_id=current_act_idx,
-                    phase=action_phase,
-                    action=action,
-                    exception=exc,
-                )
-            except Exception as fallback_exc:
-                if trajectory_recorder is not None:
-                    trajectory_recorder.fail(
-                        failure_stage="agent_act",
-                        exception=fallback_exc,
-                    )
-                raise
-        except Exception as exc:
-            if trajectory_recorder is not None:
-                if action is not None:
-                    trajectory_recorder.after_agent_act(action)
-                trajectory_recorder.fail(
-                    failure_stage="agent_act",
-                    exception=exc,
-                )
-            raise
 
         if trajectory_recorder is not None:
             trajectory_recorder.after_agent_act(action)

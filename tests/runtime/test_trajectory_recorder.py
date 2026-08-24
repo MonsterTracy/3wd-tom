@@ -15,6 +15,9 @@ from werewolf.models.twd_tom.public_events import (
     normalize_public_events,
     public_event_digest,
 )
+from werewolf.models.twd_tom.belief_snapshot import (
+    BeliefSnapshotCollectionError,
+)
 from werewolf.trajectory import (
     OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION,
     OBSERVATION_SCHEMA_VERSION,
@@ -248,6 +251,42 @@ class FallbackVoteEnvironment:
         self.submitted_action = action
         assert action == ("vote", 0)
         return {}, 0, True, {"Werewolf": -1}
+
+
+class LabelFallbackSpeechEnvironment:
+    def __init__(self):
+        self.phase = "speech"
+        self.alive = [1] * 7
+        self.public_events = []
+        self.submitted_action = None
+
+    def reset(self, roles):
+        assert list(roles) == ROLES
+        return {
+            "current_act_idx": 2,
+            "identity": ROLES[1],
+            "phase": "1_day_speech",
+            "game_log": [],
+            "valid_action": [],
+        }
+
+    def step(self, action):
+        self.submitted_action = action
+        assert action == (
+            "speech",
+            "我本轮暂不作任何身份、查验、技能或投票表态。",
+        )
+        return {}, 0, True, {"Werewolf": -1}
+
+
+class FailingBeliefSampleCollector:
+    def record(self, *_args, **_kwargs):
+        raise BeliefSnapshotCollectionError(
+            observer_id="player6",
+            status="semantic_error",
+            error="suspected_werewolves cannot contain the observer",
+            generation_attempt_count=3,
+        )
 
 
 def _agents(*, first=None, second=None):
@@ -516,6 +555,49 @@ def test_canonical_default_rejects_gameplay_fallback():
             env,
             _agents(first=ScriptedAgent(error=exhausted)),
             ROLES,
+        )
+
+    assert env.submitted_action is None
+
+
+def test_pilot_label_failure_skips_snapshot_and_submits_no_commitment_speech():
+    env = LabelFallbackSpeechEnvironment()
+    audit = GameCallBudgetAudit(
+        game_id="pilot-label-fallback",
+        max_gameplay_calls=2,
+        max_belief_calls=1,
+        max_total_calls=3,
+        max_wall_seconds=60,
+    )
+
+    result = eval(
+        env,
+        _agents(),
+        ROLES,
+        sample_collector=FailingBeliefSampleCollector(),
+        call_audit=audit,
+        allow_gameplay_fallback=True,
+    )
+
+    assert result == "Villager win"
+    assert env.submitted_action[0] == "speech"
+    snapshot = audit.snapshot()
+    assert snapshot["label_snapshot_failure_count"] == 1
+    assert snapshot["label_snapshot_failure_events"][0]["observer_id"] == (
+        "player6"
+    )
+    assert snapshot["gameplay_fallback_count"] == 1
+
+
+def test_canonical_label_failure_still_terminates():
+    env = LabelFallbackSpeechEnvironment()
+
+    with pytest.raises(BeliefSnapshotCollectionError, match="observer=player6"):
+        eval(
+            env,
+            _agents(),
+            ROLES,
+            sample_collector=FailingBeliefSampleCollector(),
         )
 
     assert env.submitted_action is None

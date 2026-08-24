@@ -14,7 +14,7 @@ from werewolf.trajectory import (
 )
 
 
-CALL_AUDIT_SCHEMA_VERSION = "classic7_collection_call_audit_v2"
+CALL_AUDIT_SCHEMA_VERSION = "classic7_collection_call_audit_v3"
 BACKEND_MAX_ATTEMPTS = 3
 
 
@@ -91,6 +91,8 @@ class GameCallBudgetAudit:
         self._report_sequence = 0
         self._backend_retry_events: list[dict[str, Any]] = []
         self._gameplay_fallback_events: list[dict[str, Any]] = []
+        self._label_generation_attempt_events: list[dict[str, Any]] = []
+        self._label_snapshot_failure_events: list[dict[str, Any]] = []
 
     def _elapsed_seconds(self) -> float:
         return max(0.0, float(self._clock()) - self._started_at)
@@ -196,6 +198,54 @@ class GameCallBudgetAudit:
             }
         )
 
+    def record_label_generation_attempt(
+        self,
+        *,
+        report_id: str | None,
+        observer_id: str,
+        generation_attempt: int,
+        status: str,
+        error: str | None,
+        raw_response: Any,
+    ) -> None:
+        self._label_generation_attempt_events.append(
+            {
+                "report_id": report_id,
+                "observer_id": observer_id,
+                "generation_attempt": generation_attempt,
+                "status": status,
+                "error": (
+                    sanitize_exception_message(RuntimeError(error))
+                    if error is not None
+                    else None
+                ),
+                "raw_response": serialize_json_value(raw_response),
+            }
+        )
+
+    def record_label_snapshot_failure(
+        self,
+        *,
+        step_idx: int,
+        acting_player_id: int,
+        phase: str,
+        observer_id: str,
+        status: str,
+        error: str,
+        generation_attempt_count: int,
+    ) -> None:
+        self._label_snapshot_failure_events.append(
+            {
+                "step_idx": step_idx,
+                "acting_player_id": acting_player_id,
+                "phase": phase,
+                "observer_id": observer_id,
+                "status": status,
+                "error": sanitize_exception_message(RuntimeError(error)),
+                "generation_attempt_count": generation_attempt_count,
+            }
+        )
+
     def snapshot(self) -> dict[str, Any]:
         elapsed = self._elapsed_seconds()
         total_calls = self._gameplay_calls + self._belief_calls
@@ -216,6 +266,18 @@ class GameCallBudgetAudit:
             "backend_retry_events": list(self._backend_retry_events),
             "gameplay_fallback_count": len(self._gameplay_fallback_events),
             "gameplay_fallback_events": list(self._gameplay_fallback_events),
+            "label_generation_attempt_count": len(
+                self._label_generation_attempt_events
+            ),
+            "label_generation_attempt_events": list(
+                self._label_generation_attempt_events
+            ),
+            "label_snapshot_failure_count": len(
+                self._label_snapshot_failure_events
+            ),
+            "label_snapshot_failure_events": list(
+                self._label_snapshot_failure_events
+            ),
             "within_budget": (
                 self._gameplay_calls <= self.max_gameplay_calls
                 and self._belief_calls <= self.max_belief_calls

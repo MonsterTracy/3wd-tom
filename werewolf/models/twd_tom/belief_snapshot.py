@@ -19,6 +19,28 @@ _EXTERNAL_AGENT_FIELDS = {
 }
 
 
+class BeliefSnapshotCollectionError(RuntimeError):
+    """One observer row exhausted the readonly label protocol."""
+
+    def __init__(
+        self,
+        *,
+        observer_id: str,
+        status: str,
+        error: str,
+        generation_attempt_count: int,
+    ) -> None:
+        self.observer_id = observer_id
+        self.status = status
+        self.error = error
+        self.generation_attempt_count = generation_attempt_count
+        super().__init__(
+            "readonly belief report failed: "
+            f"observer={observer_id} status={status!r} error={error!r} "
+            f"generation_attempt_count={generation_attempt_count}"
+        )
+
+
 def _snapshot_agent_state(agent) -> dict[str, Any]:
     """Copy agent-owned state while excluding external service handles."""
 
@@ -93,10 +115,14 @@ class PlayingAgentBeliefSnapshotCollector:
             if result.get("observer") != observer:
                 raise ValueError("reporter returned an unexpected observer")
             if result.get("status") != "ok":
-                raise RuntimeError(
-                    "readonly belief report failed: "
-                    f"observer={observer} status={result.get('status')!r} "
-                    f"error={result.get('error')!r}"
+                raise BeliefSnapshotCollectionError(
+                    observer_id=observer,
+                    status=result.get("status"),
+                    error=result.get("error"),
+                    generation_attempt_count=result.get(
+                        "generation_attempt_count",
+                        0,
+                    ),
                 )
             reports[observer] = result
 
@@ -104,5 +130,6 @@ class PlayingAgentBeliefSnapshotCollector:
 
 
 __all__ = [
+    "BeliefSnapshotCollectionError",
     "PlayingAgentBeliefSnapshotCollector",
 ]

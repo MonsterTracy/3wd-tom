@@ -1393,13 +1393,13 @@ class GameplayCognitionTest(unittest.TestCase):
             known_werewolves=(),
             known_non_werewolves=("player1",),
             source_schema_version=(
-                "classic7_pre_speech_player_suspicion_v4"
+                "classic7_pre_speech_player_suspicion_v5"
             ),
             label_prompt_version=(
-                "classic7_pre_speech_player_suspicion_prompt_v4"
+                "classic7_pre_speech_player_suspicion_prompt_v5"
             ),
             label_provenance=(
-                "alive_observer_readonly_pre_speech_report_v2"
+                "alive_observer_readonly_pre_speech_report_v3"
             ),
             step_idx=4,
             structured_input_digest="digest-4",
