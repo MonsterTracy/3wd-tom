@@ -1416,7 +1416,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 "classic7_pre_speech_player_suspicion_v5"
             ),
             label_prompt_version=(
-                "classic7_pre_speech_player_suspicion_prompt_v5"
+                "classic7_pre_speech_player_suspicion_prompt_v6"
             ),
             label_provenance=(
                 "alive_observer_readonly_pre_speech_report_v3"

@@ -1204,6 +1204,7 @@ class LLMAgent(Agent):
         observation,
         report_prompt,
         legal_candidates,
+        required_candidates,
     ):
         """Run a detached self-report without mutating this agent context."""
 
@@ -1231,6 +1232,7 @@ class LLMAgent(Agent):
                         )
                     ),
                     legal_candidates=legal_candidates,
+                    required_candidates=required_candidates,
                 )
             ),
             extra_body={"thinking": {"type": "disabled"}},

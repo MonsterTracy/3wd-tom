@@ -440,6 +440,31 @@ def test_belief_request_uses_capability_format_and_fixed_budget(
         }
 
 
+def test_schema_min_items_matches_required_known_werewolves():
+    result, backend, _ = _report(
+        '{"suspected_werewolves":["player3"]}',
+        player_id=4,
+        identity="Werewolf",
+        known_werewolves=["player3", "player4"],
+        known_non_werewolves=[
+            "player1",
+            "player2",
+            "player5",
+            "player6",
+            "player7",
+        ],
+        supports_json_schema=True,
+    )
+
+    assert result["status"] == STATUS_OK
+    array_schema = backend.calls[0]["response_format"][
+        "json_schema"
+    ]["schema"]["properties"]["suspected_werewolves"]
+    assert array_schema["minItems"] == 1
+    assert array_schema["maxItems"] == 1
+    assert array_schema["items"]["enum"] == ["player3"]
+
+
 def test_reporter_uses_public_history_once_and_only_role_private_logs():
     observation = _observation(
         player_id=1,
@@ -669,6 +694,66 @@ def test_semantic_generation_retries_until_third_valid_response():
         STATUS_SEMANTIC_ERROR,
         STATUS_OK,
     ]
+    assert "上一次输出未通过" not in backend.calls[0]["messages"][1]["content"]
+    assert "cannot contain the observer" in backend.calls[1]["messages"][1][
+        "content"
+    ]
+    assert "cannot contain the observer" in backend.calls[2]["messages"][1][
+        "content"
+    ]
+    assert "必须重新生成完整 JSON" in backend.calls[1]["messages"][1]["content"]
+
+
+def test_required_known_werewolf_retry_uses_validation_feedback():
+    audit = GameCallBudgetAudit(
+        game_id="known-wolf-label-retry",
+        max_gameplay_calls=1,
+        max_belief_calls=2,
+        max_total_calls=3,
+        max_wall_seconds=60,
+    )
+    result, backend, _ = _report(
+        [
+            '{"suspected_werewolves":[]}',
+            '{"suspected_werewolves":["player3"]}',
+        ],
+        player_id=4,
+        identity="Werewolf",
+        known_werewolves=["player3", "player4"],
+        known_non_werewolves=[
+            "player1",
+            "player2",
+            "player5",
+            "player6",
+            "player7",
+        ],
+        supports_json_schema=True,
+        audit_hook=audit,
+    )
+
+    assert result["status"] == STATUS_OK
+    assert result["suspected_werewolves"] == ["player3"]
+    assert result["generation_attempt_count"] == 2
+    assert len(backend.calls) == 2
+    assert "missing=['player3']" in backend.calls[1]["messages"][1]["content"]
+    attempt_events = audit.snapshot()["label_generation_attempt_events"]
+    assert [event["raw_response"] for event in attempt_events] == [
+        '{"suspected_werewolves":[]}',
+        '{"suspected_werewolves":["player3"]}',
+    ]
+
+
+def test_parse_retry_uses_validation_feedback():
+    result, backend, _ = _report(
+        [
+            "not json",
+            '{"suspected_werewolves":["player3"]}',
+        ],
+    )
+
+    assert result["status"] == STATUS_OK
+    assert result["suspected_werewolves"] == ["player3"]
+    assert "pure JSON object" in backend.calls[1]["messages"][1]["content"]
 
 
 def test_semantic_generation_stops_after_three_invalid_responses():
@@ -683,9 +768,9 @@ def test_semantic_generation_stops_after_three_invalid_responses():
     assert len(backend.calls) == LABEL_GENERATION_MAX_ATTEMPTS == 3
 
 
-def test_current_prompt_version_is_player_suspicion_v5():
+def test_current_prompt_version_is_player_suspicion_v6():
     assert LABEL_PROMPT_VERSION == (
-        "classic7_pre_speech_player_suspicion_prompt_v5"
+        "classic7_pre_speech_player_suspicion_prompt_v6"
     )
 
 

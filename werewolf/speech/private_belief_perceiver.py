@@ -32,11 +32,18 @@ LABEL_GENERATION_MAX_ATTEMPTS = 3
 
 def _private_belief_json_schema(
     legal_candidates: list[str] | tuple[str, ...],
+    required_candidates: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     candidates = canonicalize_player_set(
         list(legal_candidates),
         field_name="legal_candidates",
     )
+    required = canonicalize_player_set(
+        list(required_candidates),
+        field_name="required_candidates",
+    )
+    if not set(required).issubset(candidates):
+        raise ValueError("required_candidates must be legal candidates")
     items: dict[str, Any] = {"type": "string"}
     if candidates:
         items["enum"] = candidates
@@ -47,7 +54,7 @@ def _private_belief_json_schema(
         "properties": {
             "suspected_werewolves": {
                 "type": "array",
-                "minItems": 0,
+                "minItems": len(required),
                 "maxItems": len(candidates),
                 "items": items,
             },
@@ -64,6 +71,7 @@ def private_belief_response_format(
     *,
     supports_json_schema: bool,
     legal_candidates: list[str] | tuple[str, ...] = PLAYER_NAMES,
+    required_candidates: list[str] | tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the provider request format without weakening local validation."""
 
@@ -74,6 +82,10 @@ def private_belief_response_format(
         raise TypeError(
             "supports_json_schema must be boolean"
         )
+    schema = _private_belief_json_schema(
+        legal_candidates,
+        required_candidates,
+    )
     if not supports_json_schema:
         return {
             "type": "json_object",
@@ -83,7 +95,7 @@ def private_belief_response_format(
         "json_schema": {
             "name": "private_belief_report",
             "strict": True,
-            "schema": deepcopy(_private_belief_json_schema(legal_candidates)),
+            "schema": deepcopy(schema),
         },
     }
 
@@ -165,6 +177,18 @@ class PlayingAgentBeliefReporter:
                 known_werewolves=known_werewolves,
                 known_non_werewolves=known_non_werewolves,
             )
+            required_candidates = [
+                player
+                for player in canonicalize_player_set(
+                    known_werewolves,
+                    field_name="known_werewolves",
+                )
+                if player != observer
+            ]
+            if not set(required_candidates).issubset(legal_candidates):
+                raise ValueError(
+                    "required known Werewolves must be legal candidates"
+                )
             if self.audit_hook is not None:
                 report_id, report_prompt = self.audit_hook.prepare_report(
                     observer_id=observer,
@@ -183,9 +207,18 @@ class PlayingAgentBeliefReporter:
                 known_non_werewolves=known_non_werewolves,
             )
 
+        validation_error = None
         for generation_attempt in range(1, LABEL_GENERATION_MAX_ATTEMPTS + 1):
             raw_response = None
             try:
+                attempt_prompt = (
+                    report_prompt
+                    if generation_attempt == 1
+                    else self.retry_prompt(
+                        report_prompt,
+                        validation_error,
+                    )
+                )
                 audit_context = (
                     self.audit_hook.belief_context(report_id)
                     if self.audit_hook is not None
@@ -194,8 +227,9 @@ class PlayingAgentBeliefReporter:
                 with audit_context:
                     raw_response = agent.report_suspected_werewolves_readonly(
                         observation=observation,
-                        report_prompt=report_prompt,
+                        report_prompt=attempt_prompt,
                         legal_candidates=legal_candidates,
+                        required_candidates=required_candidates,
                     )
             except Exception as exc:
                 self._record_generation_attempt(
@@ -274,8 +308,22 @@ class PlayingAgentBeliefReporter:
                 if self.audit_hook is not None:
                     self.audit_hook.complete_report(report_id, raw_response)
                 return result
+            validation_error = result["error"]
 
         raise AssertionError("unreachable label generation loop")
+
+    @staticmethod
+    def retry_prompt(report_prompt: str, validation_error: str | None) -> str:
+        """Request a new full response using only the last local error."""
+
+        if not isinstance(validation_error, str) or not validation_error:
+            raise ValueError("label retry requires a validation error")
+        return f"""{report_prompt}
+
+上一次输出未通过本地严格验证：
+{validation_error}
+
+必须重新生成完整 JSON。不得修补、引用或解释上一次响应；不得输出额外字段、推理或 Markdown。"""
 
     def _record_generation_attempt(self, **event) -> None:
         if self.audit_hook is None:

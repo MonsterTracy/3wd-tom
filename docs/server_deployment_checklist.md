@@ -28,7 +28,7 @@
 4. 使用 `configs/twd_tom_server_qwen35_9b.yaml`；CLI 的 seed 范围和 game count 必须与其中 `pipeline.collection` 完全相同。
 5. 为每次尝试选择全新的 `run_id` 和不存在的输出目录，例如 `/data/yuxiao/3wd-tom/canonical_data/<run_id>`。
 6. 先用 `--mode pilot` 跑小批诊断。每次 backend 瞬时异常最多执行 3 次显式、计数的尝试；每个 gameplay 生成阶段、PRE readonly label 和独立 speech parser 的完整生成都最多 3 次。speech parser 的后续尝试只携带上一次验证错误，不修补或部分接受旧响应。SDK 内部 retry 保持为 0，不启用 provider fallback 或 replacement seed。
-7. label 请求使用按 observer/hard knowledge 动态收窄的 JSON Schema，直接排除 observer 自身和已知非狼人；重复项由本地 parser 拒绝（不向 vLLM xgrammar 发送其不支持的 `uniqueItems`）。每次 label 尝试的原始响应、状态与错误都写入 `call_audit.json`，但不会删除非法成员、补猜或伪造标签。
+7. label 请求使用按 observer/hard knowledge 动态收窄的 JSON Schema，直接排除 observer 自身和已知非狼人，并令 `minItems` 等于必须包含的已知其他狼人数；具体成员与重复项仍由本地 parser 严格验证（不向 vLLM xgrammar 发送其不支持的 `uniqueItems`、`contains` 或 `minContains`）。后续 label 尝试只附加上一次本地验证错误并重新生成完整 JSON。每次原始响应、状态与错误都写入 `call_audit.json`，但不会删除非法成员、补猜或伪造标签。
 8. pilot 在 gameplay 三次生成都失败后可以提交确定性的合法 fallback action；若某条 PRE snapshot 的 label 三次仍失败，则跳过整条 snapshot，并由当前 speaker 提交固定 `no_commitment` 发言继续。speech parser 三次仍失败时保留 `status=error` 与所有 attempts 并继续后续局数，不伪造 action。整批始终不能物化为 canonical 数据。
 9. 正式采集必须显式使用 `--mode canonical`。canonical 允许上述有界尝试，但三次 gameplay 或 label 生成仍失败时立即终止，永不提交 fallback action，也不接受缺失 PRE snapshot。
 10. 逐局确认存在 `speech_annotations.jsonl`；canonical 的每条公开发言都必须是 `annotation_source=llm_parser` 且不能是 `status=error`。pilot 可出现显式 error 用于诊断。生成器 intent 不能替代独立 parser 标注。

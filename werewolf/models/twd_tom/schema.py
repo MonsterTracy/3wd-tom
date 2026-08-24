@@ -37,7 +37,7 @@ PRIVATE_CONTEXT_SERIALIZED = False
 REPORT_TIMING = "pre_public_speech"
 TRUTH_BASED_OBSERVER_SELECTION = False
 OBSERVER_SELECTION = "publicly_alive_players"
-LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v5"
+LABEL_PROMPT_VERSION = "classic7_pre_speech_player_suspicion_prompt_v6"
 PAD_TOKEN = "<pad>"
 NONE_TOKEN = "<none>"
 
