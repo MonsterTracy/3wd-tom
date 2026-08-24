@@ -300,7 +300,8 @@ class SpeechPerceiver:
 subject | action | object
 
 subject 必须是当前发言者 player{speaker}。
-带目标动作的 object 必须是 player1 到 player7；无目标动作的 object 必须是 NONE。
+只有 abstain_intent 和 no_commitment 是无目标动作，且必须使用 object=NONE。
+其余所有 action 都是带目标动作，object 必须是 player1 到 player7，绝不能使用 NONE。
 允许的 action 只有：
 {allowed_actions}
 
@@ -310,7 +311,7 @@ subject 必须是当前发言者 player{speaker}。
 3. point_as_villager：只有明确判断目标的具体身份是 Villager、村民或平民时使用。
 4. point_as_seer：明确判断目标是预言家。
 5. point_as_witch：明确判断目标是女巫。
-6. support：明确支持、认可、站边目标玩家或其观点；不能从“好人”“村民”或查验非狼自动推导。
+6. support：明确支持、认可、站边具体目标玩家或其观点；目标玩家必须在同一命题中被明确点名。泛化的“站边好人阵营”“支持好人阵营”“维护好人阵营”没有具体玩家目标，不产生 support；不能从“好人”“村民”或查验非狼自动推导。
 7. oppose：明确反对、不信任、质疑目标玩家或其观点；不能从狼人判断、查杀或投票意图自动推导。
 8. check_as_non_werewolf：speaker明确声称自己通过查验或验人得到目标是好人或非狼的结果。
 9. check_as_werewolf：speaker明确声称自己通过查验或验人得到目标是狼人的结果。
@@ -404,8 +405,15 @@ player{speaker} | abstain_intent | NONE
 输出：
 player{speaker} | no_commitment | NONE
 
+输入：我是平民，明确站边好人阵营。首夜信息有限，但我觉得 player4 的言行值得怀疑，我建议今天就票出 player4。
+输出：
+player{speaker} | point_as_villager | player{speaker}
+player{speaker} | oppose | player4
+player{speaker} | vote_intent | player4
+
 输出协议：
 - 每个动作单独一行，格式严格为：subject | action | object
+- object=NONE 只允许用于 abstain_intent 和 no_commitment；其他 action 必须使用明确的 player1 到 player7。
 - 穷尽输出所有明确动作，不要重复动作。
 - 没有可抽取动作时，只输出：NONE
 - 不输出 JSON、解释或 Markdown 代码块。

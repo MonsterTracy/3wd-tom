@@ -100,6 +100,14 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertIn("most-specific-source", prompt)
         self.assertIn("不得读取真实角色或环境技能记录", prompt)
         self.assertIn("vote_intent不等于环境实际vote", prompt)
+        self.assertIn(
+            "泛化的“站边好人阵营”“支持好人阵营”“维护好人阵营”",
+            prompt,
+        )
+        self.assertIn(
+            "object=NONE 只允许用于 abstain_intent 和 no_commitment",
+            prompt,
+        )
 
     def test_prompt_requires_explicit_target_and_atomic_range_output(self):
         backend = FakeBackend("NONE")
@@ -135,6 +143,30 @@ class SpeechPerceiverTest(unittest.TestCase):
                 ["player1", "no_commitment", None],
             ],
         )
+
+    def test_targeted_action_rejects_none_without_partial_acceptance(self):
+        raw_response = (
+            "player5 | point_as_villager | player5\n"
+            "player5 | support | NONE\n"
+            "player5 | oppose | player4\n"
+            "player5 | vote_intent | player4"
+        )
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(raw_response),
+            model_name="test-model",
+        )
+
+        with self.assertRaisesRegex(
+            SpeechActionValidationError,
+            "support requires a canonical player object",
+        ) as caught:
+            perceiver.parse(
+                5,
+                "我是平民，明确站边好人阵营，但我质疑并准备投票放逐 player4。",
+                1,
+                "speech",
+            )
+        self.assertEqual(caught.exception.raw_response, raw_response)
 
     def test_deduplicates_only_exact_valid_actions(self):
         perceiver = SpeechPerceiver(

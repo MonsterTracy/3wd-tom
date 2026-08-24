@@ -17,7 +17,7 @@
 - public event：`classic7_public_event_sequence_v4`；
 - speech annotation：`classic7_speech_annotation_v2`；
 - speech action ontology：`classic7_speech_action_v1`；
-- speech parser prompt：`classic7_speech_parser_v2`。
+- speech parser prompt：`classic7_speech_parser_v3`。
 
 旧版本不做兼容读取或隐式迁移；需要重新采集。
 

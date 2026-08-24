@@ -7,7 +7,7 @@
 - public event：`classic7_public_event_sequence_v4`
 - speech annotation：`classic7_speech_annotation_v2`
 - speech action ontology：`classic7_speech_action_v1`
-- speech parser prompt：`classic7_speech_parser_v2`
+- speech parser prompt：`classic7_speech_parser_v3`
 - PRE belief sample：`classic7_pre_speech_player_suspicion_v5`
 
 版本不做隐式兼容或自动迁移。任一版本变化都必须产生新 canonical run；历史原文可以通过显式离线重标注生成新 annotation artifact，但不能原地覆盖旧 artifact。
@@ -70,7 +70,7 @@ error_type, error_message
 | `abstain_intent` | speaker 明确表达本轮准备弃票，object 为 `null` |
 | `no_commitment` | speaker 明确表示本轮暂不作正式表态，object 为 `null` |
 
-采用 most-specific-source：一个具体命题不自动派生更泛化 action。比如“查验 player3 是好人”只产生 `check_as_non_werewolf`，不自动产生 `point_as_non_werewolf`、`point_as_villager` 或 `support`；“player3 可信”只产生 `support`。parser 只忠实抽取当前 speaker 的明确公开命题，不验证真假，不读取真实角色或私有技能记录。
+采用 most-specific-source：一个具体命题不自动派生更泛化 action。比如“查验 player3 是好人”只产生 `check_as_non_werewolf`，不自动产生 `point_as_non_werewolf`、`point_as_villager` 或 `support`；“player3 可信”只产生 `support`。`object=null` 只允许用于 `abstain_intent` 和 `no_commitment`；`support` 等目标型 action 必须在同一命题中明确点名具体玩家，泛化的“站边好人阵营”不产生 `support`。parser 只忠实抽取当前 speaker 的明确公开命题，不验证真假，不读取真实角色或私有技能记录。
 
 ## 5. 正式发言链路
 

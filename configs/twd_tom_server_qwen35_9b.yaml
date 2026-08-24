@@ -39,7 +39,7 @@ pipeline:
   public_event_schema_version: classic7_public_event_sequence_v4
   speech_annotation_schema_version: classic7_speech_annotation_v2
   speech_action_ontology_version: classic7_speech_action_v1
-  speech_parser_prompt_version: classic7_speech_parser_v2
+  speech_parser_prompt_version: classic7_speech_parser_v3
   raw_schema_version: classic7_pre_speech_player_suspicion_v5
   projected_schema_version: classic7_observer_conditioned_belief_matrix_v1
   projection_version: hard_knowledge_consistent_sparse_suspicion_uniform_support_v2

@@ -129,6 +129,32 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
 
+    def test_generic_good_camp_alignment_does_not_create_support(self):
+        speech = (
+            "我是平民，明确站边好人阵营。首夜信息有限，但我觉得 "
+            "player4 的言行值得怀疑，我建议今天就票出 player4。"
+        )
+        actions, prompt = self.parse_with_response(
+            speaker=5,
+            speech=speech,
+            response=(
+                "player5 | point_as_villager | player5\n"
+                "player5 | oppose | player4\n"
+                "player5 | vote_intent | player4"
+            ),
+        )
+
+        self.assertEqual(
+            actions,
+            [
+                ["player5", "point_as_villager", "player5"],
+                ["player5", "oppose", "player4"],
+                ["player5", "vote_intent", "player4"],
+            ],
+        )
+        self.assertIn(speech, prompt)
+        self.assertIn("没有具体玩家目标，不产生 support", prompt)
+
     def test_explicit_player6_villager_claim_is_preserved(
         self,
     ):
