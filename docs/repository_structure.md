@@ -11,6 +11,7 @@
 | `werewolf/models/twd_tom/collector.py` | 将 raw sample 写入 JSONL |
 | `script/twd_tom/collection_budget.py` | 对正式采集的实际 backend dispatch 和单局墙钟执行预算 |
 | `script/twd_tom/audit_canonical_belief_data.py` | 物化前的 canonical label/sequence/truncation 审计 |
+| `script/twd_tom/audit_shadow_speech_parser.py` | 对既有公开发言执行只读 DeepSeek 影子解析并输出跨模型一致性审计，不回写 canonical 标注 |
 | `script/twd_tom/materialize_canonical_belief_dataset.py` | 按 game-level split 发布不变的 raw snapshots |
 | `werewolf/models/twd_tom/belief_labels.py` | 校验 hard knowledge 并将相对怀疑集合确定性转换为归一化 belief row |
 | `werewolf/models/twd_tom/dataset.py` | 输出 7×7 observer-conditioned target 与两个 mask |
@@ -22,4 +23,4 @@
 
 ## 已退出 tom-v2 主线
 
-仓库不再提供 public-only reporter、PBM、external offline annotation/materialization、D splitter、online ToM2 shadow 或 tom-v1 archive 的可导入实现。tom-v1 历史由 Git 保存。
+仓库不再提供 public-only reporter、PBM、可进入训练链的 external offline annotation/materialization、D splitter、online ToM2 shadow 或 tom-v1 archive 的可导入实现。DeepSeek speech-parser shadow 只生成独立审计工件，不是标签替换或训练数据来源。tom-v1 历史由 Git 保存。

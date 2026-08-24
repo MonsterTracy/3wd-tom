@@ -59,6 +59,7 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `werewolf/models/twd_tom/dataset.py`：唯一 tom-v2 Dataset；输出 7×7 target、observer alive mask 与 diagonal target mask。
 - `script/twd_tom/materialize_canonical_belief_dataset.py`：验证成功批次摘要链，将 canonical per-game snapshots 确定性分配为 game-level train/validation/test JSONL，并写入 split manifest。
 - `script/twd_tom/audit_canonical_belief_data.py`：在物化前验证成功批次摘要链和 canonical label 可训练性，并报告 support/sequence/truncation 统计。
+- `script/twd_tom/audit_shadow_speech_parser.py`：只读重解析既有公开发言，比较 DeepSeek 与原 parser 的状态、动作顺序和动作集合；结果写入独立目录，不能替换 canonical annotation。
 - `script/twd_tom/collection_budget.py`：执行正式采集的 gameplay、belief、total call 和单局墙钟预算。
 - `script/twd_tom/replay_canonical_trajectory.py`：不调用模型地重放 canonical submitted actions，并核对逐步状态、公开事件和 observer views。
 - `werewolf/models/twd_tom/belief_backbone.py`：公开历史与 observer query 编码；直接输出 7×7 belief logits。

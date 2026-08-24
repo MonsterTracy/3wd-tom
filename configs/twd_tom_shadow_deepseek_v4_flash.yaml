@@ -1,0 +1,16 @@
+backends:
+  deepseek_shadow:
+    type: openai_compatible
+    base_url: "https://api.deepseek.com"
+    api_key_env: "DEEPSEEK_API_KEY"
+    default_model: "deepseek-v4-flash"
+    supports_json_schema: false
+
+parser:
+  backend: deepseek_shadow
+  model: "deepseek-v4-flash"
+  model_params:
+    temperature: 0.0
+    request_extra_body:
+      thinking:
+        type: disabled

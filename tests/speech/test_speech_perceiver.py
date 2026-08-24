@@ -77,6 +77,38 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertIn("不输出 JSON、解释或 Markdown 代码块", prompt)
         self.assertIn(speech, prompt)
 
+    def test_uses_explicit_provider_request_body_without_mutating_it(self):
+        backend = FakeBackend("NONE")
+        request_extra_body = {"thinking": {"type": "disabled"}}
+        perceiver = SpeechPerceiver(
+            backend=backend,
+            model_name="deepseek-v4-flash",
+            request_extra_body=request_extra_body,
+        )
+
+        perceiver.parse(2, "我暂时没有明确判断。", 1, "speech")
+        self.assertEqual(
+            backend.calls[0]["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
+        backend.calls[0]["extra_body"]["thinking"]["type"] = "enabled"
+        self.assertEqual(
+            perceiver.request_extra_body,
+            {"thinking": {"type": "disabled"}},
+        )
+        self.assertEqual(
+            request_extra_body,
+            {"thinking": {"type": "disabled"}},
+        )
+
+    def test_rejects_non_mapping_provider_request_body(self):
+        with self.assertRaisesRegex(TypeError, "request_extra_body"):
+            SpeechPerceiver(
+                backend=FakeBackend("NONE"),
+                model_name="test-model",
+                request_extra_body="thinking=disabled",
+            )
+
     def test_prompt_freezes_formal_action_semantics(self):
         backend = FakeBackend("NONE")
         perceiver = SpeechPerceiver(backend=backend, model_name="test-model")

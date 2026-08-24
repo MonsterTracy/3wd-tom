@@ -35,6 +35,33 @@
 11. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；该命令会验证成功 batch 的 plan/summary/per-game digest、完整 PRE 覆盖与 snapshot SHA256 链，并拒绝 pilot、label failure 或任何含 fallback 的批次。只有 audit `status=PASS` 才能物化数据集。
 12. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
 
+## DeepSeek 发言解析器影子审计
+
+该步骤只用于比较不同模型对同一批公开发言的三元组解析，不是 canonical 采集、标签修补或数据物化。输入批次保持只读，输出必须位于独立的 `review` 目录。
+
+1. 在服务器 shell 中设置 `DEEPSEEK_API_KEY`，不要把密钥写入仓库、命令历史或输出工件。
+2. 使用 `configs/twd_tom_shadow_deepseek_v4_flash.yaml`。请求固定为 `temperature=0`、thinking disabled、最多 3 次完整生成；SDK retry 为 0，不接受部分响应或 fallback action。
+3. 对已完成 pilot 执行：
+
+```bash
+cd /home/dell/yuxiao/3wd-tom
+
+SOURCE_ROOT="/data/yuxiao/3wd-tom/canonical_data/<pilot_run_id>"
+SHADOW_ROOT="/data/yuxiao/3wd-tom/review/<pilot_run_id>_deepseek_v4_flash"
+
+test -f "${SOURCE_ROOT}/summary.json"
+test ! -e "${SHADOW_ROOT}"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.audit_shadow_speech_parser \
+  --input-root "${SOURCE_ROOT}" \
+  --config configs/twd_tom_shadow_deepseek_v4_flash.yaml \
+  --output-root "${SHADOW_ROOT}" \
+  --env-file /home/dell/yuxiao/3wd-tom/.env
+```
+
+4. 审阅 `${SHADOW_ROOT}/summary.json` 的 parser error、retry、exact-order match、action-set match 和 disagreement 计数，再查看逐局 `shadow_speech_comparisons.jsonl`。shadow 输出永不被 canonical validator、materializer 或训练入口读取。
+
 ## 数据物化、训练与评估
 
 1. 用 `script.twd_tom.materialize_canonical_belief_dataset` 按 game-level split 直接物化 raw belief snapshots；输出目录必须同时包含 `split_manifest.json`，当前主线没有 C1、D 或 `split_offline_d_training_data` 阶段。不要手工移动、改名或拼接三份 JSONL。

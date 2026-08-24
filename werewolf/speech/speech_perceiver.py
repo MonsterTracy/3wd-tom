@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -90,9 +91,28 @@ class SpeechPerceiver:
     private subjective guesses and never receives the game's true roles.
     """
 
-    def __init__(self, backend=None, model_name=None):
+    def __init__(
+        self,
+        backend=None,
+        model_name=None,
+        request_extra_body: Mapping[str, Any] | None = None,
+    ):
+        if request_extra_body is not None and not isinstance(
+            request_extra_body,
+            Mapping,
+        ):
+            raise TypeError("request_extra_body must be a mapping or null")
         self.backend = backend
         self.model_name = model_name
+        self.request_extra_body = deepcopy(
+            dict(request_extra_body)
+            if request_extra_body is not None
+            else {
+                "chat_template_kwargs": {
+                    "enable_thinking": False,
+                }
+            }
+        )
 
     def parse(
         self,
@@ -284,11 +304,7 @@ class SpeechPerceiver:
             max_tokens=(
                 SPEECH_PARSER_MAX_TOKENS
             ),
-            extra_body={
-                "chat_template_kwargs": {
-                    "enable_thinking": False,
-                }
-            },
+            extra_body=deepcopy(self.request_extra_body),
         )
 
         try:
