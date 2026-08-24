@@ -26,7 +26,7 @@
 
 - YAML `pipeline` 的 schema/projection 版本与当前代码常量完全一致；
 - CLI 的连续 seed 范围与 game count 和 `pipeline.collection` 完全一致；
-- `target_game_count` 是必须达到的成功局数；正式 50 局配置预声明 4201--4260 共 60 个种子并在取得 50 个成功局时停止。剩余种子是冻结 plan 的 reserve，不是失败后临时生成的 replacement seed；60 个种子耗尽仍不足 50 局则 batch incomplete；
+- `target_game_count` 是必须达到的成功局数；正式 60 局配置预声明 4201--4320 共 120 个种子并在取得 60 个成功局时停止。剩余种子是冻结 plan 的 reserve，不是失败后临时生成的 replacement seed；120 个种子耗尽仍不足 60 局则 batch incomplete；
 - 每个实际 backend dispatch 都计入 gameplay 或 belief 调用预算，speech parser 等未显式包裹的调用计入 gameplay；
 - 每次 strict 公开发言通常包含 day cognition、自然语言 realization 和 1–3 次 speech parsing dispatch；
 - 达到 category/total call 上限后，在下一次请求发送前失败；每次请求前后检查单局 wall-clock 上限；

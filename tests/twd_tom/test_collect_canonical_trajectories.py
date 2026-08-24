@@ -105,12 +105,12 @@ def _write_config(tmp_path, config=None):
     return path
 
 
-def test_canonical_50_server_config_freezes_collection_and_split():
+def test_canonical_60_server_config_freezes_collection_and_split():
     project_root = Path(__file__).resolve().parents[2]
     config_path = (
         project_root
         / "configs"
-        / "twd_tom_server_qwen35_9b_canonical_50.yaml"
+        / "twd_tom_server_qwen35_9b_canonical_60.yaml"
     )
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     pilot_config = yaml.safe_load(
@@ -118,21 +118,21 @@ def test_canonical_50_server_config_freezes_collection_and_split():
             encoding="utf-8"
         )
     )
-    seeds = list(range(4201, 4261))
+    seeds = list(range(4201, 4321))
 
     contract = batch_module._pipeline_collection_contract(
         config,
         seeds=seeds,
     )
 
-    assert contract["game_count"] == 60
-    assert contract["target_game_count"] == 50
+    assert contract["game_count"] == 120
+    assert contract["target_game_count"] == 60
     assert contract["seeds"] == seeds
     assert config["pipeline"]["split"] == {
         "seed": 42,
-        "train_game_count": 40,
-        "validation_game_count": 5,
-        "test_game_count": 5,
+        "train_game_count": 48,
+        "validation_game_count": 6,
+        "test_game_count": 6,
     }
     canonical_runtime = deepcopy(config)
     pilot_runtime = deepcopy(pilot_config)
