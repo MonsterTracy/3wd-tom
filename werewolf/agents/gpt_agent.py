@@ -4,6 +4,8 @@ import time
 from werewolf.agents.llm_agent import (
     BeliefValidationError,
     GameplayActionValidationError,
+    GameplayGenerationExhausted,
+    GameplaySpeechQualityError,
     LLMAgent,
     RoleReportValidationError,
     belief_response_format,
@@ -37,6 +39,12 @@ _CONSTRAINED_NIGHT_PHASES = (
     "skill_wolf",
     "skill_seer",
     "skill_witch",
+)
+GAMEPLAY_GENERATION_MAX_ATTEMPTS = 3
+_GAMEPLAY_GENERATION_ERRORS = (
+    BeliefValidationError,
+    GameplayActionValidationError,
+    GameplaySpeechQualityError,
 )
 
 
@@ -154,19 +162,29 @@ class GPTAgent(LLMAgent):
 
         if is_speech:
             prompt = self.format_observation(observation)
-            content, metadata = self._chat_with_metadata(
-                [{"role": "user", "content": prompt}],
-                player_log_context={"stage": "speech", "observation": observation},
-                temperature=temperature,
-                max_tokens=max_tokens,
+            def generate_speech(attempt):
+                content, metadata = self._chat_with_metadata(
+                    [{"role": "user", "content": prompt}],
+                    player_log_context={
+                        "stage": "speech",
+                        "observation": observation,
+                        "gen_times": attempt - 1,
+                    },
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                validate_gameplay_public_speech(
+                    content,
+                    finish_reason=metadata["finish_reason"],
+                    player_id=observation.get("current_act_idx"),
+                    phase=phase,
+                )
+                return speech_kind, self.extract_answer(content.strip())
+
+            return self._retry_validated_generation(
+                stage="speech",
+                generate=generate_speech,
             )
-            validate_gameplay_public_speech(
-                content,
-                finish_reason=metadata["finish_reason"],
-                player_id=observation.get("current_act_idx"),
-                phase=phase,
-            )
-            return (speech_kind, self.extract_answer(content.strip()))
 
         if is_vote:
             raise BackendError(
@@ -182,7 +200,38 @@ class GPTAgent(LLMAgent):
             max_tokens = 32000
         return temperature, max_tokens
 
+    def _retry_validated_generation(self, *, stage, generate):
+        last_error = None
+        for attempt in range(1, GAMEPLAY_GENERATION_MAX_ATTEMPTS + 1):
+            try:
+                return generate(attempt)
+            except _GAMEPLAY_GENERATION_ERRORS as exc:
+                last_error = exc
+        raise GameplayGenerationExhausted(
+            stage=stage,
+            attempts=GAMEPLAY_GENERATION_MAX_ATTEMPTS,
+            last_error=last_error,
+        ) from last_error
+
     def _generate_belief(self, observation, *, temperature, max_tokens):
+        return self._retry_validated_generation(
+            stage="belief",
+            generate=lambda attempt: self._generate_belief_once(
+                observation,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                attempt=attempt,
+            ),
+        )
+
+    def _generate_belief_once(
+        self,
+        observation,
+        *,
+        temperature,
+        max_tokens,
+        attempt,
+    ):
         player_id = observation.get("current_act_idx")
         phase = observation.get("phase")
         exact_roles, role_options = derive_belief_constraints(observation)
@@ -193,7 +242,11 @@ class GPTAgent(LLMAgent):
         )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
-            player_log_context={"stage": "belief", "observation": observation},
+            player_log_context={
+                "stage": "belief",
+                "observation": observation,
+                "gen_times": attempt - 1,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=belief_response_format(
@@ -236,6 +289,26 @@ class GPTAgent(LLMAgent):
         temperature,
         max_tokens,
     ):
+        return self._retry_validated_generation(
+            stage="day_cognition",
+            generate=lambda attempt: self._generate_day_cognition_once(
+                observation,
+                pre_speech_belief=pre_speech_belief,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                attempt=attempt,
+            ),
+        )
+
+    def _generate_day_cognition_once(
+        self,
+        observation,
+        *,
+        pre_speech_belief,
+        temperature,
+        max_tokens,
+        attempt,
+    ):
         player_id = observation.get("current_act_idx")
         phase = observation.get("phase")
         exact_roles, role_options = derive_belief_constraints(observation)
@@ -252,7 +325,11 @@ class GPTAgent(LLMAgent):
         )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
-            player_log_context={"stage": "belief", "observation": observation},
+            player_log_context={
+                "stage": "belief",
+                "observation": observation,
+                "gen_times": attempt - 1,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=day_cognition_response_format_v3(
@@ -307,6 +384,30 @@ class GPTAgent(LLMAgent):
     ):
         """Generate public natural language from a frozen communication intent."""
 
+        return self._retry_validated_generation(
+            stage="speech_realization",
+            generate=lambda attempt: self._generate_public_speech_once(
+                observation,
+                discussion_acts=discussion_acts,
+                claim_catalog=claim_catalog,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                attempt=attempt,
+            ),
+        )
+
+    def _generate_public_speech_once(
+        self,
+        observation,
+        *,
+        discussion_acts,
+        claim_catalog,
+        temperature,
+        max_tokens,
+        attempt,
+    ):
+        """Generate one public realization from a frozen communication intent."""
+
         phase = observation.get("phase")
         player_id = observation.get("current_act_idx")
         prompt = build_public_speech_realization_prompt(
@@ -319,6 +420,7 @@ class GPTAgent(LLMAgent):
             player_log_context={
                 "stage": "speech_realization",
                 "observation": observation,
+                "gen_times": attempt - 1,
             },
             temperature=temperature,
             max_tokens=max_tokens,
@@ -340,6 +442,26 @@ class GPTAgent(LLMAgent):
         temperature,
         max_tokens,
     ):
+        return self._retry_validated_generation(
+            stage="vote",
+            generate=lambda attempt: self._generate_vote_once(
+                observation,
+                belief=belief,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                attempt=attempt,
+            ),
+        )
+
+    def _generate_vote_once(
+        self,
+        observation,
+        *,
+        belief,
+        temperature,
+        max_tokens,
+        attempt,
+    ):
         phase = observation.get("phase")
         candidates = self.freeze_legal_vote_candidates(
             observation["valid_action"],
@@ -354,7 +476,11 @@ class GPTAgent(LLMAgent):
         )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
-            player_log_context={"stage": "vote", "observation": observation},
+            player_log_context={
+                "stage": "vote",
+                "observation": observation,
+                "gen_times": attempt - 1,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=vote_response_format(
@@ -377,6 +503,24 @@ class GPTAgent(LLMAgent):
         temperature,
         max_tokens,
     ):
+        return self._retry_validated_generation(
+            stage="night_action",
+            generate=lambda attempt: self._generate_night_action_once(
+                observation,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                attempt=attempt,
+            ),
+        )
+
+    def _generate_night_action_once(
+        self,
+        observation,
+        *,
+        temperature,
+        max_tokens,
+        attempt,
+    ):
         phase = observation.get("phase")
         candidate_snapshot = self.freeze_authoritative_action_candidates(
             observation["valid_action"]
@@ -384,7 +528,11 @@ class GPTAgent(LLMAgent):
         prompt = self.format_observation(observation, action_candidates=candidate_snapshot)
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
-            player_log_context={"stage": "night", "observation": observation},
+            player_log_context={
+                "stage": "night",
+                "observation": observation,
+                "gen_times": attempt - 1,
+            },
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=night_action_response_format(

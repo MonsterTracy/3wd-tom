@@ -98,7 +98,9 @@ realization prompt 可以得到冻结 intent 和此前公开历史用于自然�
 
 “确定性复现”指使用记录的角色分配、environment seed 和 submitted actions，在不调用 LLM/parser 的条件下逐步复现 simulator 状态、公开事件、observer views、winner 与 digests。它不要求重新采样得到同一句 LLM 发言，也不在 replay 时重新解析原文。
 
-正式采集遇到 realization 失败会在发言提交前停止；parser 失败可以让环境留下原文和错误 annotation，但该局随后必须在 canonical artifact validation 中失败并保留审计工件。禁止 retry、fallback action、从 generator intent 回填 annotation 或 replacement seed。
+realization 遇到截断或确定性质量校验失败时，只重生成 realization，最多 3 次；不会重新生成已经冻结的 day cognition intent。独立 speech parser 的语义解析只执行一次，parser 失败可以让环境留下原文和错误 annotation，但该局随后必须在 canonical artifact validation 中失败并保留审计工件。两类请求的底层 backend 瞬时异常均可做最多 3 次显式且计入预算的传输尝试。
+
+`--mode canonical` 在 realization 三次生成仍失败时停在发言提交前，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言继续游戏，但 plan/summary/call audit 必须标记其为非 canonical；canonical validator 和 materializer 必须拒绝整批 pilot 数据，而不只拒绝实际触发 fallback 的那一局。
 
 ## 8. 验收条件
 

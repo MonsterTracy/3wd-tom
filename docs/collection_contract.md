@@ -11,7 +11,14 @@
 - 副作用：query 前后 playing agent 状态必须相同；
 - 同源行动：当前 speaker 的同一份成功 PRE report 以冻结输入进入随后 strict day cognition；
 - 公开发言：冻结 intent 后单独生成自然中文，再由只看公开原文的 parser 生成 `speech_annotations.jsonl`；
-- 禁止：真实角色注入、未来信息、external reporter、public-only reporter、PBM、概率标签、repair、retry 或 fallback；任何身份都不得生成指向自己的 `point_as_werewolf`。
+- 禁止：真实角色注入、未来信息、external reporter、public-only reporter、PBM、概率标签，以及 label 语义 repair、重新生成、fallback、补猜；任何身份都不得生成指向自己的 `point_as_werewolf`。
+
+## 有界重试与运行模式
+
+- backend 客户端的 SDK retry 固定为 0；预算代理只对 `BackendError` 做最多 3 次显式尝试。每个实际 dispatch 都计入调用预算，失败尝试和下一次尝试写入 `call_audit.json`。
+- strict gameplay 的 belief/day cognition、vote、night action 和 speech realization 若发生截断、结构解析、非法动作或发言质量错误，只重生成当前阶段，最多 3 次。不会因为一个阶段失败而重跑整局；纯 backend 连续失败在第 3 次 dispatch 后直接抛出，不会再进入语义重生成。若每次逻辑生成都先经历瞬时 backend 失败、随后成功返回但语义仍非法，单阶段理论上最多可产生 9 次实际 dispatch，全部受 call budget 约束并进入审计。
+- PRE readonly label self-report 仍只生成一次；独立 speech parser 的语义解析也只执行一次。二者仅共享底层最多 3 次的传输尝试，不做语义 repair 或重新生成，因此 label 与 annotation 来源不变。
+- `--mode pilot` 允许 gameplay 三次生成耗尽后提交确定性的合法 fallback，并将整批标记为 `canonical_eligible=false`。`--mode canonical` 不允许 fallback；canonical validator/materializer 同时拒绝 pilot 批次和任何 fallback count 非零的游戏。
 
 正式 canonical batch 还必须满足：
 

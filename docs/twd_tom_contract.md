@@ -43,7 +43,7 @@ R ⊆ S
 S ∩ F = ∅
 ```
 
-因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。不进行修复、重试、fallback、补猜或概率化；任一存活观察者的报告非 `ok` 时立即终止当前局，失败 snapshot 不写入 raw JSONL。
+因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。label self-report 只做一次语义生成，不进行修复、重新生成、fallback、补猜或概率化；底层 `BackendError` 最多进行 3 次显式、计入预算的传输尝试。任一存活观察者的报告非 `ok` 时立即终止当前局，失败 snapshot 不写入 raw JSONL。
 
 在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个非 `ok` 报告后不再请求其余 observer，batch 随即停止。失败目录、`call_audit.json` 和包含异常类型与消息的 `batch_failure.json` 保留，不能用 replacement seed 补位。
 
@@ -77,7 +77,7 @@ day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过�
 
 ## Canonical materialization
 
-`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链且不存在 `batch_failure.json` 的 canonical batch。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受 `collection_mode=canonical`、`canonical_eligible=true`、所有 fallback count 为 0，且具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链并不存在 `batch_failure.json` 的 canonical batch。`--mode pilot` 产生的批次即使没有实际 fallback 也不能进入物化。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
 
 物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口先验证上述成功批次摘要链，再验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。物化目录原子生成 `train.jsonl`、`validation.jsonl`、`test.jsonl` 和 `split_manifest.json`；manifest 绑定来源批次摘要、game-level split、输出文件 SHA256 与自身 digest。
 

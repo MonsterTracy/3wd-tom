@@ -27,10 +27,12 @@
 3. 使用项目环境运行 `python -m pytest -q`。
 4. 使用 `configs/twd_tom_server_qwen35_9b.yaml`；CLI 的 seed 范围和 game count 必须与其中 `pipeline.collection` 完全相同。
 5. 为每次尝试选择全新的 `run_id` 和不存在的输出目录，例如 `/data/yuxiao/3wd-tom/canonical_data/<run_id>`。
-6. 运行 `python -m script.twd_tom.collect_canonical_trajectories ...`。不启用自动重试、replacement seed 或 provider fallback。
-7. 逐局确认存在 `speech_annotations.jsonl`；每条公开发言都必须是 `annotation_source=llm_parser` 且不能是 `status=error`。生成器 intent 不能替代独立 parser 标注。
-8. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；该命令会验证成功 batch 的 plan/summary/per-game digest 与 snapshot SHA256 链，只有 audit `status=PASS` 才能物化数据集。
-9. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
+6. 先用 `--mode pilot` 跑小批诊断。每次 backend 瞬时异常最多执行 3 次显式、计数的尝试；每个 gameplay 生成阶段遇到截断、JSON/动作解析或发言质量失败时最多生成 3 次。SDK 内部 retry 保持为 0，不启用 provider fallback 或 replacement seed。
+7. pilot 在 gameplay 三次生成都失败后可以选择确定性的合法 fallback action；其 plan、summary 和 call audit 会标记 `collection_mode=pilot`、`canonical_eligible=false` 与 fallback 事件，因此即使没有实际触发 fallback，整批也不能物化为 canonical 数据。
+8. 正式采集必须显式使用 `--mode canonical`。canonical 允许上述两类有界重试，但三次 gameplay 生成仍失败时立即终止，永不提交 fallback action。
+9. 逐局确认存在 `speech_annotations.jsonl`；每条公开发言都必须是 `annotation_source=llm_parser` 且不能是 `status=error`。生成器 intent 不能替代独立 parser 标注。
+10. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；该命令会验证成功 batch 的 plan/summary/per-game digest 与 snapshot SHA256 链，并拒绝 pilot 或任何含 fallback 的批次。只有 audit `status=PASS` 才能物化数据集。
+11. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
 
 ## 数据物化、训练与评估
 

@@ -5,6 +5,11 @@ from copy import deepcopy
 import pytest
 
 from run_random import eval
+from script.twd_tom.collection_budget import GameCallBudgetAudit
+from werewolf.agents.llm_agent import (
+    GameplayActionValidationError,
+    GameplayGenerationExhausted,
+)
 from werewolf.helper.log_utils import Log
 from werewolf.models.twd_tom.public_events import (
     normalize_public_events,
@@ -221,6 +226,28 @@ class TrajectoryEnvironment:
         self.steps = 2
         self.phase = "end_game"
         return self._observation(2, marker="terminal"), 0, True, {"Werewolf": -1}
+
+
+class FallbackVoteEnvironment:
+    def __init__(self):
+        self.phase = "vote"
+        self.public_events = []
+        self.submitted_action = None
+
+    def reset(self, roles):
+        assert list(roles) == ROLES
+        return {
+            "current_act_idx": 1,
+            "identity": ROLES[0],
+            "phase": "1_day_vote",
+            "game_log": [],
+            "valid_action": [("vote", 2), ("vote", 0)],
+        }
+
+    def step(self, action):
+        self.submitted_action = action
+        assert action == ("vote", 0)
+        return {}, 0, True, {"Werewolf": -1}
 
 
 def _agents(*, first=None, second=None):
@@ -443,6 +470,55 @@ def test_agent_failure_writes_longest_committed_prefix(tmp_path):
     assert "api_key_env=VLLM_API_KEY" in failure_context["exception_message"]
     assert "token_env=TOKEN_ENV" in failure_context["exception_message"]
     assert len(provenance["boundaries"]) == 2
+
+
+def test_pilot_fallback_uses_deterministic_legal_action_and_is_audited():
+    exhausted = GameplayGenerationExhausted(
+        stage="vote",
+        attempts=3,
+        last_error=GameplayActionValidationError("invalid vote"),
+    )
+    env = FallbackVoteEnvironment()
+    audit = GameCallBudgetAudit(
+        game_id="pilot-fallback",
+        max_gameplay_calls=2,
+        max_belief_calls=1,
+        max_total_calls=3,
+        max_wall_seconds=60,
+    )
+
+    result = eval(
+        env,
+        _agents(first=ScriptedAgent(error=exhausted)),
+        ROLES,
+        call_audit=audit,
+        allow_gameplay_fallback=True,
+    )
+
+    assert result == "Villager win"
+    assert env.submitted_action == ("vote", 0)
+    snapshot = audit.snapshot()
+    assert snapshot["gameplay_fallback_count"] == 1
+    assert snapshot["gameplay_fallback_events"][0]["action"] == ["vote", 0]
+    assert snapshot["gameplay_fallback_events"][0]["step_idx"] == 0
+
+
+def test_canonical_default_rejects_gameplay_fallback():
+    exhausted = GameplayGenerationExhausted(
+        stage="vote",
+        attempts=3,
+        last_error=GameplayActionValidationError("invalid vote"),
+    )
+    env = FallbackVoteEnvironment()
+
+    with pytest.raises(GameplayGenerationExhausted):
+        eval(
+            env,
+            _agents(first=ScriptedAgent(error=exhausted)),
+            ROLES,
+        )
+
+    assert env.submitted_action is None
 
 
 def test_env_step_failure_does_not_commit_failed_step(tmp_path):

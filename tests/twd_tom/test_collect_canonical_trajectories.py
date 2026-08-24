@@ -292,6 +292,7 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
         "backend": [],
         "build": [],
         "game": [],
+        "allow_gameplay_fallback": [],
     }
 
     def fake_provenance(_repo_root):
@@ -334,10 +335,12 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
         sample_collector,
         call_audit,
         trajectory_recorder,
+        allow_gameplay_fallback,
     ):
         assert call_audit.game_id == trajectory_recorder._base["game_id"]
         seed = trajectory_recorder._base["environment_seed"]
         calls["game"].append(seed)
+        calls["allow_gameplay_fallback"].append(allow_gameplay_fallback)
         if seed == fail_seed:
             raise RuntimeError("synthetic gameplay failure")
         winner = "Villager" if seed % 2 else "Werewolf"
@@ -404,6 +407,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     )
 
     assert calls["game"] == [1001, 1002, 1003]
+    assert calls["allow_gameplay_fallback"] == [False, False, False]
     assert [call["seed"] for call in calls["build"]] == [1001, 1002, 1003]
     assert calls["backend"][0]["max_retries"] == 0
     assert calls["backend"][0]["env_file"] == tmp_path / ".env"
@@ -415,7 +419,12 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["planned_game_count"] == 3
     assert plan["collection_contract"]["seeds"] == [1001, 1002, 1003]
     assert plan["collectors_enabled"] is True
-    assert plan["backend_max_retries"] == 0
+    assert plan["collection_mode"] == "canonical"
+    assert plan["canonical_eligible"] is True
+    assert plan["backend_max_attempts"] == 3
+    assert plan["backend_sdk_max_retries"] == 0
+    assert plan["gameplay_generation_max_attempts"] == 3
+    assert plan["label_generation_max_attempts"] == 1
     assert plan["stop_on_first_failure"] is True
     assert plan["rerun_on_failure"] is False
     assert plan["replacement_seed_on_failure"] is False
@@ -429,6 +438,9 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
 
     assert summary["schema_version"] == batch_module.BATCH_SUMMARY_SCHEMA_VERSION
     assert summary["completed_game_count"] == 3
+    assert summary["collection_mode"] == "canonical"
+    assert summary["canonical_eligible"] is True
+    assert summary["total_gameplay_fallback_count"] == 0
     assert summary["total_belief_snapshot_count"] == 3
     assert summary["deterministic_replay_match_count"] == 3
     assert summary["game_ids"] == [
@@ -459,10 +471,13 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert '"winner"' not in serialized_belief
         game_summary = json.loads((game_dir / "summary.json").read_text())
         assert game_summary["environment_seed"] == seed
+        assert game_summary["collection_mode"] == "canonical"
+        assert game_summary["canonical_eligible"] is True
         assert game_summary["completion_status"] == "COMPLETE"
         assert game_summary["belief_snapshot_count"] == 1
         assert game_summary["speech_annotation_count"] == 1
         assert game_summary["call_audit"]["within_budget"] is True
+        assert game_summary["call_audit"]["gameplay_fallback_count"] == 0
         assert (game_dir / "call_audit.json").is_file()
         assert game_summary["belief_snapshots_sha256"] == batch_module._sha256(
             belief_path
@@ -510,6 +525,72 @@ def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch)
     payload = deepcopy(failure)
     digest = payload.pop("failure_digest")
     assert digest == canonical_digest(payload)
+
+
+def test_pilot_mode_is_explicitly_noncanonical_and_cannot_materialize(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = _write_config(tmp_path)
+    output_root = tmp_path / "diagnostic-pilot"
+    calls = _install_fake_runtime(monkeypatch, output_root)
+
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="diagnostic-pilot",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+        collection_mode="pilot",
+    )
+
+    assert calls["allow_gameplay_fallback"] == [True, True, True]
+    assert summary["collection_mode"] == "pilot"
+    assert summary["canonical_eligible"] is False
+    plan = json.loads((output_root / "plan.json").read_text())
+    assert plan["collection_mode"] == "pilot"
+    assert plan["canonical_eligible"] is False
+    with pytest.raises(ValueError, match="not in canonical mode"):
+        batch_module.validate_canonical_belief_batch(output_root)
+
+
+def test_canonical_validator_rejects_embedded_gameplay_fallback(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = _write_config(tmp_path)
+    output_root = tmp_path / "canonical-with-fallback"
+    _install_fake_runtime(monkeypatch, output_root)
+    batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="canonical-with-fallback",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
+
+    game_summary_path = (
+        output_root / "games" / "game_0001_seed_1001" / "summary.json"
+    )
+    game_summary = json.loads(game_summary_path.read_text())
+    game_summary["call_audit"]["gameplay_fallback_count"] = 1
+    game_summary.pop("summary_digest")
+    game_summary["summary_digest"] = canonical_digest(game_summary)
+    game_summary_path.write_text(canonical_json(game_summary) + "\n")
+
+    summary_path = output_root / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["game_summary_digests"][game_summary["game_id"]] = (
+        game_summary["summary_digest"]
+    )
+    summary.pop("summary_digest")
+    summary["summary_digest"] = canonical_digest(summary)
+    summary_path.write_text(canonical_json(summary) + "\n")
+
+    with pytest.raises(ValueError, match="contains gameplay fallback"):
+        batch_module.validate_canonical_belief_batch(output_root)
 
 
 def test_batch_failure_message_redacts_secrets():

@@ -6,10 +6,16 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Mapping
 
-from werewolf.trajectory import canonical_digest
+from werewolf.backends import BackendError
+from werewolf.trajectory import (
+    canonical_digest,
+    sanitize_exception_message,
+    serialize_json_value,
+)
 
 
-CALL_AUDIT_SCHEMA_VERSION = "classic7_collection_call_audit_v1"
+CALL_AUDIT_SCHEMA_VERSION = "classic7_collection_call_audit_v2"
+BACKEND_MAX_ATTEMPTS = 3
 
 
 def _positive_integer(value: Any, *, field_name: str) -> int:
@@ -43,6 +49,7 @@ class GameCallBudgetAudit:
         max_belief_calls: int,
         max_total_calls: int,
         max_wall_seconds: float,
+        max_backend_attempts: int = BACKEND_MAX_ATTEMPTS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not isinstance(game_id, str) or not game_id.strip():
@@ -71,6 +78,10 @@ class GameCallBudgetAudit:
             max_wall_seconds,
             field_name="max_wall_seconds",
         )
+        self.max_backend_attempts = _positive_integer(
+            max_backend_attempts,
+            field_name="max_backend_attempts",
+        )
         self._clock = clock
         self._started_at = float(clock())
         self._active_category: str | None = None
@@ -78,6 +89,8 @@ class GameCallBudgetAudit:
         self._belief_calls = 0
         self._unscoped_gameplay_calls = 0
         self._report_sequence = 0
+        self._backend_retry_events: list[dict[str, Any]] = []
+        self._gameplay_fallback_events: list[dict[str, Any]] = []
 
     def _elapsed_seconds(self) -> float:
         return max(0.0, float(self._clock()) - self._started_at)
@@ -145,6 +158,44 @@ class GameCallBudgetAudit:
     def after_backend_call(self) -> None:
         self.assert_wall_budget()
 
+    def record_backend_retry(
+        self,
+        *,
+        method_name: str,
+        failed_attempt: int,
+        exception: BackendError,
+    ) -> None:
+        self._backend_retry_events.append(
+            {
+                "category": self._active_category or "gameplay",
+                "method_name": method_name,
+                "failed_attempt": failed_attempt,
+                "next_attempt": failed_attempt + 1,
+                "exception_type": type(exception).__name__,
+                "exception_message": sanitize_exception_message(exception),
+            }
+        )
+
+    def record_gameplay_fallback(
+        self,
+        *,
+        step_idx: int,
+        acting_player_id: int,
+        phase: str,
+        action: Any,
+        exception: Exception,
+    ) -> None:
+        self._gameplay_fallback_events.append(
+            {
+                "step_idx": step_idx,
+                "acting_player_id": acting_player_id,
+                "phase": phase,
+                "action": serialize_json_value(action),
+                "exception_type": type(exception).__name__,
+                "exception_message": sanitize_exception_message(exception),
+            }
+        )
+
     def snapshot(self) -> dict[str, Any]:
         elapsed = self._elapsed_seconds()
         total_calls = self._gameplay_calls + self._belief_calls
@@ -160,6 +211,11 @@ class GameCallBudgetAudit:
             "max_belief_calls": self.max_belief_calls,
             "max_total_calls": self.max_total_calls,
             "max_wall_seconds": self.max_wall_seconds,
+            "max_backend_attempts": self.max_backend_attempts,
+            "backend_retry_count": len(self._backend_retry_events),
+            "backend_retry_events": list(self._backend_retry_events),
+            "gameplay_fallback_count": len(self._gameplay_fallback_events),
+            "gameplay_fallback_events": list(self._gameplay_fallback_events),
             "within_budget": (
                 self._gameplay_calls <= self.max_gameplay_calls
                 and self._belief_calls <= self.max_belief_calls
@@ -172,7 +228,7 @@ class GameCallBudgetAudit:
 
 
 class AuditedBackend:
-    """Transparent backend proxy that counts one call per public method."""
+    """Backend proxy with explicit, counted transient-error attempts."""
 
     def __init__(self, backend, audit: GameCallBudgetAudit) -> None:
         self._backend = backend
@@ -182,11 +238,20 @@ class AuditedBackend:
         return getattr(self._backend, name)
 
     def _dispatch(self, method_name: str, *args, **kwargs):
-        self._audit.before_backend_call()
-        try:
-            return getattr(self._backend, method_name)(*args, **kwargs)
-        finally:
-            self._audit.after_backend_call()
+        for attempt in range(1, self._audit.max_backend_attempts + 1):
+            self._audit.before_backend_call()
+            try:
+                return getattr(self._backend, method_name)(*args, **kwargs)
+            except BackendError as exc:
+                if attempt >= self._audit.max_backend_attempts:
+                    raise
+                self._audit.record_backend_retry(
+                    method_name=method_name,
+                    failed_attempt=attempt,
+                    exception=exc,
+                )
+            finally:
+                self._audit.after_backend_call()
 
     def chat(self, *args, **kwargs):
         return self._dispatch("chat", *args, **kwargs)
@@ -209,6 +274,7 @@ def audited_backends(
 
 __all__ = [
     "CALL_AUDIT_SCHEMA_VERSION",
+    "BACKEND_MAX_ATTEMPTS",
     "AuditedBackend",
     "CollectionBudgetExceeded",
     "GameCallBudgetAudit",

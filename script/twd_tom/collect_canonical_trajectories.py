@@ -22,6 +22,7 @@ from run_random import (
     eval as run_game,
 )
 from script.twd_tom.collection_budget import (
+    BACKEND_MAX_ATTEMPTS,
     GameCallBudgetAudit,
     audited_backends,
 )
@@ -29,6 +30,7 @@ from script.twd_tom.replay_canonical_trajectory import (
     replay_canonical_trajectory,
 )
 from werewolf.backends import load_named_backends
+from werewolf.agents.gpt_agent import GAMEPLAY_GENERATION_MAX_ATTEMPTS
 from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
@@ -68,13 +70,17 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v4"
-GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v4"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v4"
-BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v2"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v5"
+GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v5"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v5"
+BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v3"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
-BACKEND_MAX_RETRIES = 0
+BACKEND_SDK_MAX_RETRIES = 0
+LABEL_GENERATION_MAX_ATTEMPTS = 1
+CANONICAL_COLLECTION_MODE = "canonical"
+PILOT_COLLECTION_MODE = "pilot"
+COLLECTION_MODES = (CANONICAL_COLLECTION_MODE, PILOT_COLLECTION_MODE)
 STOP_ON_FIRST_FAILURE = True
 RERUN_ON_FAILURE = False
 REPLACEMENT_SEED_ON_FAILURE = False
@@ -248,6 +254,10 @@ def validate_canonical_belief_batch(
         digest_field="plan_digest",
         artifact_name="canonical batch plan",
     )
+    if plan.get("collection_mode") != CANONICAL_COLLECTION_MODE:
+        raise ValueError("canonical batch plan is not in canonical mode")
+    if plan.get("canonical_eligible") is not True:
+        raise ValueError("canonical batch plan is not canonical-eligible")
 
     summary_path = root / "summary.json"
     summary = _load_json_object(summary_path)
@@ -260,6 +270,12 @@ def validate_canonical_belief_batch(
     )
     if summary.get("plan_digest") != plan_digest:
         raise ValueError("canonical batch summary does not match plan")
+    if summary.get("collection_mode") != CANONICAL_COLLECTION_MODE:
+        raise ValueError("canonical batch summary is not in canonical mode")
+    if summary.get("canonical_eligible") is not True:
+        raise ValueError("canonical batch summary is not canonical-eligible")
+    if summary.get("total_gameplay_fallback_count") != 0:
+        raise ValueError("canonical batch contains gameplay fallback actions")
 
     planned_count = _positive_integer(
         summary.get("planned_game_count"),
@@ -315,6 +331,15 @@ def validate_canonical_belief_batch(
             raise ValueError(f"duplicate canonical game_id: {game_id}")
         if summary_digests.get(game_id) != game_summary_digest:
             raise ValueError(f"canonical game summary digest mismatch: {game_id}")
+        if game_summary.get("collection_mode") != CANONICAL_COLLECTION_MODE:
+            raise ValueError(f"canonical game is not in canonical mode: {game_id}")
+        if game_summary.get("canonical_eligible") is not True:
+            raise ValueError(f"canonical game is not canonical-eligible: {game_id}")
+        call_audit = game_summary.get("call_audit")
+        if not isinstance(call_audit, Mapping):
+            raise ValueError(f"canonical game has no call audit: {game_id}")
+        if call_audit.get("gameplay_fallback_count") != 0:
+            raise ValueError(f"canonical game contains gameplay fallback: {game_id}")
 
         belief_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
         belief_sha256 = _sha256(belief_path)
@@ -1158,11 +1183,25 @@ def validate_belief_snapshot_artifact(
 
 
 def _game_summary(
-    validation: Mapping[str, Any], *, summary_path: Path
+    validation: Mapping[str, Any],
+    *,
+    summary_path: Path,
+    collection_mode: str,
 ) -> dict[str, Any]:
+    call_audit = validation.get("call_audit")
+    fallback_count = (
+        call_audit.get("gameplay_fallback_count")
+        if isinstance(call_audit, Mapping)
+        else None
+    )
     summary = {
         "schema_version": GAME_SUMMARY_SCHEMA_VERSION,
         **dict(validation),
+        "collection_mode": collection_mode,
+        "canonical_eligible": (
+            collection_mode == CANONICAL_COLLECTION_MODE
+            and fallback_count == 0
+        ),
     }
     summary["summary_digest"] = canonical_digest(summary)
     _write_json_new(summary_path, summary)
@@ -1177,12 +1216,15 @@ def _batch_plan(
     normalized_runtime_config_digest: str,
     seeds: Sequence[int],
     collection_contract: Mapping[str, Any],
+    collection_mode: str,
 ) -> dict[str, Any]:
     plan = {
         "schema_version": BATCH_PLAN_SCHEMA_VERSION,
         "batch_code_commit": commit,
         "git_worktree_clean": True,
         "run_id": run_id,
+        "collection_mode": collection_mode,
+        "canonical_eligible": collection_mode == CANONICAL_COLLECTION_MODE,
         "simulator_baseline": SIMULATOR_BASELINE,
         "trajectory_schema_version": TRAJECTORY_SCHEMA_VERSION,
         "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
@@ -1204,7 +1246,13 @@ def _batch_plan(
         "deterministic_replay_required": True,
         "collectors_enabled": True,
         "collection_contract": dict(collection_contract),
-        "backend_max_retries": BACKEND_MAX_RETRIES,
+        "backend_max_attempts": BACKEND_MAX_ATTEMPTS,
+        "backend_sdk_max_retries": BACKEND_SDK_MAX_RETRIES,
+        "gameplay_generation_max_attempts": (
+            GAMEPLAY_GENERATION_MAX_ATTEMPTS
+        ),
+        "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
+        "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
         "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
         "rerun_on_failure": RERUN_ON_FAILURE,
         "replacement_seed_on_failure": REPLACEMENT_SEED_ON_FAILURE,
@@ -1222,11 +1270,14 @@ def _failure_record(
     failure_stage: str,
     exception: BaseException,
     completed_games: Sequence[Mapping[str, Any]],
+    collection_mode: str = CANONICAL_COLLECTION_MODE,
 ) -> dict[str, Any]:
     record = {
         "schema_version": BATCH_FAILURE_SCHEMA_VERSION,
         "batch_code_commit": commit,
         "run_id": run_id,
+        "collection_mode": collection_mode,
+        "canonical_eligible": False,
         "failed_seed": failed_seed,
         "failed_game_id": failed_game_id,
         "failure_stage": failure_stage,
@@ -1250,10 +1301,15 @@ def collect_canonical_trajectory_batch(
     game_count: int,
     output_root: str | Path,
     repo_root: Path = REPO_ROOT,
+    collection_mode: str = CANONICAL_COLLECTION_MODE,
 ) -> dict[str, Any]:
-    """Run one immutable no-retry Classic-7 canonical A/C0 batch."""
+    """Run one frozen Classic-7 A/C0 canonical or diagnostic pilot batch."""
 
     run_id = _run_id(run_id)
+    if collection_mode not in COLLECTION_MODES:
+        raise ValueError(
+            f"collection_mode must be one of {COLLECTION_MODES!r}"
+        )
     if isinstance(seed_start, bool) or not isinstance(seed_start, int):
         raise ValueError("seed_start must be an integer")
     game_count = _positive_integer(game_count, field_name="game_count")
@@ -1286,6 +1342,7 @@ def collect_canonical_trajectory_batch(
         normalized_runtime_config_digest=normalized_digest,
         seeds=seeds,
         collection_contract=collection_contract,
+        collection_mode=collection_mode,
     )
     _write_json_new(destination / "plan.json", plan)
 
@@ -1295,7 +1352,7 @@ def collect_canonical_trajectory_batch(
             backend_map = load_named_backends(
                 normalized,
                 env_file=Path(repo_root).resolve() / ".env",
-                max_retries=BACKEND_MAX_RETRIES,
+                max_retries=BACKEND_SDK_MAX_RETRIES,
             )
         except BaseException as exc:
             failure = _failure_record(
@@ -1306,6 +1363,7 @@ def collect_canonical_trajectory_batch(
                 failure_stage="backend_load",
                 exception=exc,
                 completed_games=completed_games,
+                collection_mode=collection_mode,
             )
             _write_json_new(destination / "batch_failure.json", failure)
             raise
@@ -1336,6 +1394,7 @@ def collect_canonical_trajectory_batch(
                 max_wall_seconds=collection_contract[
                     "max_wall_seconds_per_game"
                 ],
+                max_backend_attempts=BACKEND_MAX_ATTEMPTS,
             )
             stage = "build_runtime"
             try:
@@ -1377,6 +1436,9 @@ def collect_canonical_trajectory_batch(
                         sample_collector=belief_collector,
                         call_audit=call_audit,
                         trajectory_recorder=recorder,
+                        allow_gameplay_fallback=(
+                            collection_mode == PILOT_COLLECTION_MODE
+                        ),
                     )
                     call_audit.assert_wall_budget()
                 finally:
@@ -1431,7 +1493,11 @@ def collect_canonical_trajectory_batch(
                 )
                 validation["run_random_result"] = result
                 validation["call_audit"] = call_audit_record
-                game_summary = _game_summary(validation, summary_path=summary_path)
+                game_summary = _game_summary(
+                    validation,
+                    summary_path=summary_path,
+                    collection_mode=collection_mode,
+                )
                 completed_games.append(game_summary)
             except BaseException as exc:
                 if not call_audit_path.exists():
@@ -1444,6 +1510,7 @@ def collect_canonical_trajectory_batch(
                     failure_stage=stage,
                     exception=exc,
                     completed_games=completed_games,
+                    collection_mode=collection_mode,
                 )
                 _write_json_new(destination / "batch_failure.json", failure)
                 raise
@@ -1452,6 +1519,14 @@ def collect_canonical_trajectory_batch(
             "schema_version": BATCH_SUMMARY_SCHEMA_VERSION,
             "batch_code_commit": provenance["batch_code_commit"],
             "run_id": run_id,
+            "collection_mode": collection_mode,
+            "canonical_eligible": (
+                collection_mode == CANONICAL_COLLECTION_MODE
+                and all(
+                    game["call_audit"]["gameplay_fallback_count"] == 0
+                    for game in completed_games
+                )
+            ),
             "plan_digest": plan["plan_digest"],
             "planned_game_count": game_count,
             "completed_game_count": len(completed_games),
@@ -1507,7 +1582,21 @@ def collect_canonical_trajectory_batch(
                 game["call_audit"]["total_call_count"]
                 for game in completed_games
             ),
-            "backend_max_retries": BACKEND_MAX_RETRIES,
+            "total_backend_retry_count": sum(
+                game["call_audit"]["backend_retry_count"]
+                for game in completed_games
+            ),
+            "total_gameplay_fallback_count": sum(
+                game["call_audit"]["gameplay_fallback_count"]
+                for game in completed_games
+            ),
+            "backend_max_attempts": BACKEND_MAX_ATTEMPTS,
+            "backend_sdk_max_retries": BACKEND_SDK_MAX_RETRIES,
+            "gameplay_generation_max_attempts": (
+                GAMEPLAY_GENERATION_MAX_ATTEMPTS
+            ),
+            "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
+            "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
             "stop_on_first_failure": True,
             "rerun_on_failure": False,
             "replacement_seed_on_failure": False,
@@ -1521,13 +1610,19 @@ def collect_canonical_trajectory_batch(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Collect one strict canonical Classic-7 A/C0 batch."
+        description="Collect one strict Classic-7 A/C0 batch."
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--seed-start", required=True, type=int)
     parser.add_argument("--game-count", required=True, type=int)
     parser.add_argument("--output-root", required=True)
+    parser.add_argument(
+        "--mode",
+        dest="collection_mode",
+        choices=COLLECTION_MODES,
+        default=CANONICAL_COLLECTION_MODE,
+    )
     return parser
 
 
@@ -1539,9 +1634,11 @@ def main() -> int:
         seed_start=args.seed_start,
         game_count=args.game_count,
         output_root=args.output_root,
+        collection_mode=args.collection_mode,
     )
     print(
-        "CANONICAL_A_C0_BATCH_PASS "
+        "A_C0_BATCH_PASS "
+        f"mode={summary['collection_mode']} "
         f"run_id={summary['run_id']} games={summary['completed_game_count']}"
     )
     return 0

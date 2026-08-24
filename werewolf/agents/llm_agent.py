@@ -62,6 +62,20 @@ class BeliefValidationError(ValueError):
     """A transient gameplay belief response violates its contract."""
 
 
+class GameplayGenerationExhausted(RuntimeError):
+    """All semantic generation attempts for one gameplay stage failed."""
+
+    def __init__(self, *, stage: str, attempts: int, last_error: Exception):
+        self.stage = stage
+        self.attempts = attempts
+        self.last_error = last_error
+        super().__init__(
+            f"gameplay generation exhausted after {attempts} attempts "
+            f"(stage={stage!r}, last_error={type(last_error).__name__}: "
+            f"{last_error})"
+        )
+
+
 class RoleReportValidationError(ValueError):
     """A structured role report violates observer-authoritative semantics."""
 

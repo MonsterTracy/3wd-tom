@@ -13,6 +13,7 @@ from werewolf.agents.llm_agent import (
     DayCognitionReportV2,
     DayCognitionReportV3,
     GameplayActionValidationError,
+    GameplayGenerationExhausted,
     GameplaySpeechQualityError,
     RoleReportValidationError,
     belief_response_format,
@@ -1229,7 +1230,7 @@ class GameplayCognitionTest(unittest.TestCase):
         )[1].split("\n\nVOTE", 1)[0]
         self.assertNotIn('"roles"', gameplay_belief)
 
-    def test_malformed_belief_response_still_fails_fast(self):
+    def test_malformed_belief_response_exhausts_three_generations(self):
         malformed = (
             "not-json",
             json.dumps({"belief": "判断", "roles": {}}),
@@ -1237,14 +1238,14 @@ class GameplayCognitionTest(unittest.TestCase):
         )
         for response in malformed:
             with self.subTest(response=response):
-                backend = MetadataBackend([response])
+                backend = MetadataBackend([response] * 3)
                 agent = self._agent(backend)
 
-                with self.assertRaises(BeliefValidationError):
+                with self.assertRaises(GameplayGenerationExhausted):
                     agent.act(_observation())
-                self.assertEqual(len(backend.calls), 1)
+                self.assertEqual(len(backend.calls), 3)
 
-    def test_invalid_day_intent_or_evidence_fails_after_one_call(self):
+    def test_invalid_day_intent_or_evidence_exhausts_three_generations(self):
         observation = _observation()
         snapshot = freeze_discussion_candidates(observation)
         invalid_index = json.loads(_day_cognition(observation))
@@ -1264,11 +1265,11 @@ class GameplayCognitionTest(unittest.TestCase):
 
         for payload in (invalid_index, invalid_evidence, old_v1_payload):
             with self.subTest(payload=payload):
-                backend = MetadataBackend([json.dumps(payload)])
+                backend = MetadataBackend([json.dumps(payload)] * 3)
                 agent = self._agent(backend)
-                with self.assertRaises(BeliefValidationError):
+                with self.assertRaises(GameplayGenerationExhausted):
                     agent.act(observation)
-                self.assertEqual(len(backend.calls), 1)
+                self.assertEqual(len(backend.calls), 3)
 
     def test_dead_claims_and_witch_kill_target_constraints(self):
         claimed = _observation()
@@ -1731,25 +1732,27 @@ class GameplayCognitionTest(unittest.TestCase):
                 phase="1_day_vote",
             )
 
-    def test_malformed_or_illegal_vote_fails_without_retry_or_fallback(self):
+    def test_malformed_or_illegal_vote_exhausts_three_generations(self):
         for response in ("not-json", '{"target":3}', '{"target":2,"extra":1}'):
             with self.subTest(response=response):
-                backend = MetadataBackend([_belief(), response])
+                backend = MetadataBackend([_belief()] + [response] * 3)
                 agent = self._agent(backend)
-                with self.assertRaises(GameplayActionValidationError):
+                with self.assertRaises(GameplayGenerationExhausted):
                     agent.act(_observation("1_day_vote"))
-                self.assertEqual(len(backend.calls), 2)
+                self.assertEqual(len(backend.calls), 4)
 
-    def test_truncated_vote_fails_after_one_vote_generation(self):
+    def test_truncated_vote_exhausts_three_vote_generations(self):
         backend = MetadataBackend(
-            [_belief(), '{"target":2}'],
-            metadata=[{"finish_reason": "stop"}, {"finish_reason": "length"}],
+            [_belief()] + ['{"target":2}'] * 3,
+            metadata=[{"finish_reason": "stop"}] + [
+                {"finish_reason": "length"}
+            ] * 3,
         )
         agent = self._agent(backend)
 
-        with self.assertRaisesRegex(GameplayActionValidationError, "truncated"):
+        with self.assertRaisesRegex(GameplayGenerationExhausted, "truncated"):
             agent.act(_observation("1_day_vote"))
-        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(len(backend.calls), 4)
 
     def test_strict_night_prompt_uses_same_chinese_common_rule_contract(self):
         observation = {
@@ -1770,7 +1773,7 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertIn("所有存活玩家都参加PK投票", prompt)
         self.assertNotIn("Exactly 2 Werewolves", prompt)
 
-    def test_invalid_night_action_fails_after_one_generation(self):
+    def test_invalid_night_action_exhausts_three_generations(self):
         observation = {
             "phase": "1_night_skill_seer",
             "identity": "Seer",
@@ -1780,11 +1783,14 @@ class GameplayCognitionTest(unittest.TestCase):
         }
         for response in ('{"action_index":99}', "{'action_index':0}", "not-json"):
             with self.subTest(response=response):
-                backend = MetadataBackend([response])
+                backend = MetadataBackend([response] * 3)
                 agent = self._agent(backend)
-                with self.assertRaisesRegex(GameplayActionValidationError, "invalid night"):
+                with self.assertRaisesRegex(
+                    GameplayGenerationExhausted,
+                    "invalid night",
+                ):
                     agent.act(observation)
-                self.assertEqual(len(backend.calls), 1)
+                self.assertEqual(len(backend.calls), 3)
                 self.assertEqual(
                     backend.calls[0]["response_format"]["json_schema"]["name"],
                     "night_action_selection",
@@ -1851,16 +1857,26 @@ class GameplayCognitionTest(unittest.TestCase):
                 self.assertEqual(request["max_tokens"], 512)
                 self.assertNotIn("Guard", request["messages"][0]["content"])
 
-    def test_truncated_day_cognition_fails_without_regeneration(self):
+    def test_truncated_day_cognition_recovers_on_third_generation(self):
         backend = MetadataBackend(
-            [_day_cognition()],
-            [{"finish_reason": "length"}],
+            [_day_cognition()] * 3,
+            [
+                {"finish_reason": "length"},
+                {"finish_reason": "length"},
+                {"finish_reason": "stop"},
+            ],
         )
         agent = self._agent(backend)
 
-        with self.assertRaises(BeliefValidationError):
-            agent.act(_observation())
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(
+            agent.act(_observation()),
+            _structured_speech(
+                1,
+                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+                DiscussionAct("no_commitment", None),
+            ),
+        )
+        self.assertEqual(len(backend.calls), 4)
 
     def test_agent_has_no_persistent_belief_state(self):
         agent = self._agent(MetadataBackend([]))

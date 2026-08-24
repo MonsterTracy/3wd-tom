@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from werewolf.agents import agent_registry
+from werewolf.agents.llm_agent import GameplayGenerationExhausted
 from werewolf.backends import (
     create_backend,
     load_named_backends,
@@ -62,6 +63,36 @@ def _alive_observer_ids(env) -> list[int]:
     return observer_ids
 
 
+def _deterministic_legal_fallback_action(observation):
+    """Choose one auditable legal action after gameplay generation exhaustion."""
+
+    phase = observation.get("phase")
+    if not isinstance(phase, str) or not phase:
+        raise ValueError("fallback observation requires a non-empty phase")
+    if "speech" in phase:
+        speech_kind = "speech_pk" if "speech_pk" in phase else "speech"
+        return (
+            speech_kind,
+            "我本轮暂不作任何身份、查验、技能或投票表态。",
+        )
+
+    valid_actions = observation.get("valid_action")
+    if not isinstance(valid_actions, (list, tuple)) or not valid_actions:
+        raise ValueError("fallback observation has no legal action candidates")
+    for candidate in valid_actions:
+        if (
+            isinstance(candidate, (list, tuple))
+            and len(candidate) >= 2
+            and (
+                candidate[1] == 0
+                or "pass" in str(candidate[0]).lower()
+            )
+        ):
+            return tuple(candidate)
+    candidate = valid_actions[0]
+    return tuple(candidate) if isinstance(candidate, (list, tuple)) else candidate
+
+
 def eval(
     env,
     agent_list,
@@ -69,6 +100,7 @@ def eval(
     sample_collector=None,
     call_audit=None,
     trajectory_recorder=None,
+    allow_gameplay_fallback=False,
 ):
     """Run one game and optionally collect subjective ToM samples.
 
@@ -80,6 +112,11 @@ def eval(
     The optional trajectory recorder materializes PRE views before collection
     and POST views immediately after a successful environment step.
     """
+
+    if not isinstance(allow_gameplay_fallback, bool):
+        raise TypeError("allow_gameplay_fallback must be boolean")
+    if allow_gameplay_fallback and call_audit is None:
+        raise ValueError("gameplay fallback requires a call audit")
 
     for agent in agent_list:
         agent.reset()
@@ -167,6 +204,30 @@ def eval(
                         obs,
                         pre_speech_belief=pre_speech_belief,
                     )
+        except GameplayGenerationExhausted as exc:
+            if not allow_gameplay_fallback:
+                if trajectory_recorder is not None:
+                    trajectory_recorder.fail(
+                        failure_stage="agent_act",
+                        exception=exc,
+                    )
+                raise
+            try:
+                action = _deterministic_legal_fallback_action(obs)
+                call_audit.record_gameplay_fallback(
+                    step_idx=step_idx,
+                    acting_player_id=current_act_idx,
+                    phase=action_phase,
+                    action=action,
+                    exception=exc,
+                )
+            except Exception as fallback_exc:
+                if trajectory_recorder is not None:
+                    trajectory_recorder.fail(
+                        failure_stage="agent_act",
+                        exception=fallback_exc,
+                    )
+                raise
         except Exception as exc:
             if trajectory_recorder is not None:
                 if action is not None:

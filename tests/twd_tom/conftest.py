@@ -112,12 +112,15 @@ def canonical_belief_batch_factory():
             )
             game_summary = {
                 "schema_version": GAME_SUMMARY_SCHEMA_VERSION,
+                "collection_mode": "canonical",
+                "canonical_eligible": True,
                 "game_id": game_id,
                 "belief_snapshot_count": len(records),
                 "belief_report_count": sum(
                     len(record["observer_ids"]) for record in records
                 ),
                 "belief_snapshots_sha256": _sha256(belief_path),
+                "call_audit": {"gameplay_fallback_count": 0},
             }
             game_summary["summary_digest"] = canonical_digest(game_summary)
             _write_json(game_dir / "summary.json", game_summary)
@@ -126,12 +129,17 @@ def canonical_belief_batch_factory():
         game_ids = sorted(game_summaries)
         plan = {
             "schema_version": BATCH_PLAN_SCHEMA_VERSION,
+            "collection_mode": "canonical",
+            "canonical_eligible": True,
             "planned_game_count": len(game_ids),
         }
         plan["plan_digest"] = canonical_digest(plan)
         _write_json(root / "plan.json", plan)
         summary = {
             "schema_version": BATCH_SUMMARY_SCHEMA_VERSION,
+            "collection_mode": "canonical",
+            "canonical_eligible": True,
+            "total_gameplay_fallback_count": 0,
             "plan_digest": plan["plan_digest"],
             "planned_game_count": len(game_ids),
             "completed_game_count": len(game_ids),
