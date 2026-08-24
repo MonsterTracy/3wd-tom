@@ -12,6 +12,7 @@ from typing import Any
 from werewolf.models.twd_tom.schema import (
     PLAYER_NAMES,
     PLAYER_TO_ID,
+    normalize_player,
 )
 from werewolf.models.twd_tom.speech_annotations import (
     normalize_speech_annotations,
@@ -225,6 +226,33 @@ def normalize_public_events(events: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def completed_pre_speech_public_events(
+    events: Any,
+    *,
+    speaker_id: Any,
+) -> list[dict[str, Any]]:
+    """Return the completed history visible at one strict PRE boundary.
+
+    A raw PRE snapshot ends with the current speaker's ``turn_start`` so
+    collection can prove the scheduling boundary.  That terminal marker is
+    not a completed public event and therefore is not model input.
+    """
+
+    speaker = normalize_player(speaker_id)
+    normalized = normalize_public_events(events)
+    if not normalized:
+        raise ValueError("pre-speech public_events cannot be empty")
+    terminal = normalized[-1]
+    if (
+        terminal["event_type"] != "turn_start"
+        or terminal["speaker"] != speaker
+    ):
+        raise ValueError(
+            "pre-speech public_events must end with matching turn_start"
+        )
+    return normalized[:-1]
+
+
 def public_speech_actions(
     events: Any,
     speech_annotations: Any,
@@ -379,6 +407,7 @@ __all__ = [
     "PUBLIC_EVENT_SCHEMA_VERSION",
     "PUBLIC_EVENT_TYPES",
     "STRUCTURED_TOKEN_TO_ID",
+    "completed_pre_speech_public_events",
     "copy_public_events",
     "normalize_public_event",
     "normalize_public_events",

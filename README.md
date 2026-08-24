@@ -64,6 +64,8 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `werewolf/models/twd_tom/belief_backbone.py`：公开历史与 observer query 编码；直接输出 7×7 belief logits。
 - `werewolf/models/twd_tom/losses.py`：存活 observer、非对角 target 上的 masked belief distribution loss。
 - `werewolf/models/twd_tom/metrics.py`：soft-target support-hit 指标与 uniform non-self baseline。
+- `werewolf/models/twd_tom/checkpoint.py`：训练、评估和 gameplay 共用的严格 checkpoint 恢复契约。
+- `werewolf/models/twd_tom/inference.py`：按完整 strict-PRE 公开历史重算 `belief_logits[7,7]` 与行归一化 `belief_matrix[7,7]`，不维护 recurrent belief state。
 - `script/twd_tom/train.py` 与 `eval.py`：单一 tom-v2 objective 的训练、checkpoint 与评估入口。
 - `tests/twd_tom/`：采集、时间边界和只读性回归测试。
 

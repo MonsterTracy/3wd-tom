@@ -30,8 +30,13 @@ from werewolf.models.twd_tom.belief_backbone import (
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
+from werewolf.models.twd_tom.checkpoint import (
+    MODEL_OUTPUT,
+    OBJECTIVE,
+    checkpoint_task_contract,
+    result_model_config,
+)
 from werewolf.models.twd_tom.dataset import (
-    CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
@@ -46,12 +51,10 @@ from werewolf.models.twd_tom.public_events import (
     STRUCTURED_TOKEN_TO_ID,
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.schema import ACTION_NAMES, ACTION_TO_ID, NUM_PLAYERS
+from werewolf.models.twd_tom.schema import ACTION_NAMES, ACTION_TO_ID
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-OBJECTIVE = "observer_conditioned_belief_distribution_v1"
-MODEL_OUTPUT = "belief_logits"
 
 
 def _positive_integer(value: Any, *, field_name: str) -> int:
@@ -595,22 +598,6 @@ def evaluate_model(
     for raw_batch in data_loader:
         _loss_and_update(model, _move_batch_to_device(raw_batch, device), accumulator)
     return accumulator.finalize()
-
-
-def checkpoint_task_contract() -> dict[str, Any]:
-    return {
-        "objective": OBJECTIVE,
-        "model_input_scope": MODEL_INPUT_SCOPE,
-        "model_output": MODEL_OUTPUT,
-        "output_shape": [NUM_PLAYERS, NUM_PLAYERS],
-        "target_semantics": TARGET_SEMANTICS,
-        "target_conversion": TARGET_CONVERSION,
-        "train_player_augmentation": CYCLIC_ROTATION_VERSION,
-    }
-
-
-def result_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
-    return asdict(model.config)
 
 
 def checkpoint_payload(

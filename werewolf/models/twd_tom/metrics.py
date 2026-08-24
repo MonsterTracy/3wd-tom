@@ -47,6 +47,14 @@ def compute_belief_metrics(
         belief_logits,
         target_mask,
     )
+    target_entropy = torch.where(
+        targets > 0,
+        -targets * targets.clamp_min(
+            torch.finfo(belief_logits.dtype).tiny
+        ).log(),
+        torch.zeros_like(targets),
+    ).sum(dim=-1)
+    kl_divergence = per_observer_loss - target_entropy
     uniform_probabilities = target_mask.to(dtype=belief_logits.dtype)
     uniform_probabilities /= target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
 
@@ -82,6 +90,14 @@ def compute_belief_metrics(
         "valid_observer_count": int(valid_observers.sum().item()),
         "mean_belief_cross_entropy": _masked_mean(
             per_observer_loss,
+            valid_observers,
+        ),
+        "mean_belief_target_entropy": _masked_mean(
+            target_entropy,
+            valid_observers,
+        ),
+        "mean_belief_kl_divergence": _masked_mean(
+            kl_divergence,
             valid_observers,
         ),
         "mean_belief_total_variation": _masked_mean(

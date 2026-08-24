@@ -21,6 +21,8 @@ def test_uniform_prediction_matches_uniform_target():
     assert metrics == {
         "valid_observer_count": 1,
         "mean_belief_cross_entropy": pytest.approx(math.log(6)),
+        "mean_belief_target_entropy": pytest.approx(math.log(6)),
+        "mean_belief_kl_divergence": pytest.approx(0.0, abs=1e-7),
         "mean_belief_total_variation": pytest.approx(0.0, abs=1e-7),
         "mean_belief_absolute_error": pytest.approx(0.0, abs=1e-7),
         "mean_belief_top1_support_hit": pytest.approx(1.0),
@@ -80,3 +82,28 @@ def test_uniform_non_self_baseline_is_reported_for_sparse_target():
     assert metrics[
         "uniform_non_self_baseline_mean_absolute_error"
     ] == pytest.approx(5 / 18)
+
+
+def test_kl_is_cross_entropy_minus_target_entropy():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    targets[0, 0, 1] = 0.5
+    targets[0, 0, 2] = 0.5
+    logits[0, 0, 1] = math.log(0.5)
+    logits[0, 0, 2] = math.log(0.5)
+    logits[0, 0, 3:] = -100.0
+
+    metrics = compute_belief_metrics(logits, targets, alive, diagonal)
+    assert metrics["mean_belief_cross_entropy"] == pytest.approx(math.log(2))
+    assert metrics["mean_belief_target_entropy"] == pytest.approx(math.log(2))
+    assert metrics["mean_belief_kl_divergence"] == pytest.approx(0.0, abs=1e-7)
+
+
+def test_sparse_target_has_zero_entropy():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    targets[0, 0, 1] = 1.0
+
+    metrics = compute_belief_metrics(logits, targets, alive, diagonal)
+    assert metrics["mean_belief_target_entropy"] == pytest.approx(0.0)
+    assert metrics["mean_belief_kl_divergence"] == pytest.approx(math.log(6))

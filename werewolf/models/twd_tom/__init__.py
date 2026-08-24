@@ -30,6 +30,7 @@ from werewolf.models.twd_tom.losses import (
     masked_belief_distribution_loss,
     masked_belief_probabilities,
 )
+from werewolf.models.twd_tom.inference import PrefixBeliefPredictor
 from werewolf.models.twd_tom.metrics import (
     compute_belief_metrics,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "load_twd_tom_jsonl",
     "masked_belief_distribution_loss",
     "masked_belief_probabilities",
+    "PrefixBeliefPredictor",
     "compute_belief_metrics",
     "SAMPLE_SCHEMA_VERSION",
     "SpeakerPreSpeechBelief",

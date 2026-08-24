@@ -94,6 +94,11 @@ def test_one_train_and_evaluation_batch_use_direct_belief_contract(
     assert evaluation["valid_observer_count"] == 4
     assert training["mean_loss"] > 0
     assert evaluation["mean_loss"] > 0
+    assert evaluation["mean_belief_target_entropy"] >= 0
+    assert evaluation["mean_belief_kl_divergence"] == pytest.approx(
+        evaluation["mean_belief_cross_entropy"]
+        - evaluation["mean_belief_target_entropy"]
+    )
 
 
 def test_checkpoint_payload_contains_no_removed_objective_fields(tmp_path):

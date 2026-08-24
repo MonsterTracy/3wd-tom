@@ -18,6 +18,7 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 from werewolf.models.twd_tom.public_events import (
     PUBLIC_EVENT_SCHEMA_VERSION,
+    completed_pre_speech_public_events,
     normalize_public_events,
     parse_public_phase,
     public_event_digest,
@@ -326,13 +327,10 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         )
 
     public_events = normalize_public_events(sample.get("public_events"))
-    if not public_events:
-        raise ValueError("public_events cannot be empty")
-    if (
-        public_events[-1]["event_type"] != "turn_start"
-        or public_events[-1]["speaker"] != normalize_player(speaker_id)
-    ):
-        raise ValueError("pre-speech public_events must end with matching turn_start")
+    completed_pre_speech_public_events(
+        public_events,
+        speaker_id=speaker_id,
+    )
 
     step_idx = sample.get("step_idx")
     if isinstance(step_idx, bool) or not isinstance(step_idx, int) or step_idx < 0:
@@ -503,7 +501,10 @@ class TWDToMDataset(Dataset):
                     shift=shift,
                 )
             )
-        model_public_events = sample["public_events"][:-1]
+        model_public_events = completed_pre_speech_public_events(
+            sample["public_events"],
+            speaker_id=sample["speaker_id"],
+        )
         features = self.feature_builder.encode_events(
             model_public_events,
             sample["speech_annotations"],

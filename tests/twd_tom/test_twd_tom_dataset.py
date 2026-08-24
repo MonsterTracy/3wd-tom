@@ -23,6 +23,7 @@ from werewolf.models.twd_tom.dataset import (
     load_twd_tom_jsonl,
 )
 from werewolf.models.twd_tom.public_events import (
+    completed_pre_speech_public_events,
     public_event_digest,
     structured_input_digest,
 )
@@ -299,7 +300,10 @@ def test_model_features_exclude_only_the_terminal_pre_speech_turn_start(
     sample = suspicion_sample_factory()
     item = TWDToMDataset([sample])[0]
     expected = PublicEventFeatureBuilder().encode_events(
-        sample["public_events"][:-1],
+        completed_pre_speech_public_events(
+            sample["public_events"],
+            speaker_id=sample["speaker_id"],
+        ),
         sample["speech_annotations"],
     )
     complete = PublicEventFeatureBuilder().encode_events(

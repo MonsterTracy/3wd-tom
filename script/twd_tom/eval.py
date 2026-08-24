@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import torch
 from torch.utils.data import DataLoader
 
 from script.twd_tom.materialize_canonical_belief_dataset import (
@@ -17,31 +16,24 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
 )
 from script.twd_tom.train import (
     REPO_ROOT,
-    checkpoint_task_contract,
     count_supervised_observers,
     evaluate_model,
     resolve_device,
-    result_model_config,
     sha256_file,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
-from werewolf.models.twd_tom.belief_backbone import (
-    SUPPORTED_BACKBONE_NAMES,
-    ToMBeliefBackbone,
-    ToMBeliefBackboneConfig,
+from werewolf.models.twd_tom.checkpoint import (
+    build_model_from_checkpoint,
+    checkpoint_task_contract,
+    load_checkpoint,
+    result_model_config,
 )
 from werewolf.models.twd_tom.dataset import (
     TWDToMDataset,
     collate_twd_tom_samples,
     load_twd_tom_jsonl,
 )
-from werewolf.models.twd_tom.public_events import (
-    PHASE_TO_ID,
-    PUBLIC_EVENT_SCHEMA_VERSION,
-    STRUCTURED_TOKEN_TO_ID,
-)
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
-from werewolf.models.twd_tom.schema import ACTION_NAMES, ACTION_TO_ID
 
 
 @dataclass(frozen=True)
@@ -73,60 +65,6 @@ class EvaluationConfig:
             self.num_workers, int
         ) or self.num_workers < 0:
             raise ValueError("num_workers must be a non-negative integer")
-
-
-def load_checkpoint(checkpoint_path: str | Path) -> dict[str, Any]:
-    path = Path(checkpoint_path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"checkpoint not found: {path}")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(checkpoint, dict):
-        raise TypeError("checkpoint must contain a dictionary")
-    return checkpoint
-
-
-def build_model_from_checkpoint(
-    checkpoint: Mapping[str, Any],
-    *,
-    device: torch.device,
-) -> ToMBeliefBackbone:
-    backbone_name = checkpoint.get("backbone")
-    if backbone_name not in SUPPORTED_BACKBONE_NAMES:
-        raise ValueError(
-            "checkpoint backbone mismatch: expected one of "
-            f"{SUPPORTED_BACKBONE_NAMES!r}, got {backbone_name!r}"
-        )
-    expected = {
-        "schema_version": SAMPLE_SCHEMA_VERSION,
-        **checkpoint_task_contract(),
-        "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
-        "speech_action_count": len(ACTION_NAMES),
-        "speech_action_to_id": dict(ACTION_TO_ID),
-        "structured_token_to_id": dict(STRUCTURED_TOKEN_TO_ID),
-        "public_phase_to_id": dict(PHASE_TO_ID),
-    }
-    for field_name, expected_value in expected.items():
-        if checkpoint.get(field_name) != expected_value:
-            raise ValueError(
-                f"checkpoint {field_name} mismatch: expected {expected_value!r}, "
-                f"got {checkpoint.get(field_name)!r}"
-            )
-    raw_model_config = checkpoint.get("model_config")
-    if not isinstance(raw_model_config, Mapping):
-        raise TypeError("checkpoint has no valid model_config")
-    try:
-        model_config = ToMBeliefBackboneConfig(**dict(raw_model_config))
-    except TypeError as exc:
-        raise ValueError("checkpoint model_config is incompatible") from exc
-    state_dict = checkpoint.get("model_state_dict")
-    if not isinstance(state_dict, Mapping):
-        raise TypeError("checkpoint has no valid model_state_dict")
-    model = ToMBeliefBackbone(model_config, backbone_name=backbone_name)
-    try:
-        model.load_state_dict(state_dict, strict=True)
-    except RuntimeError as exc:
-        raise ValueError("checkpoint state_dict is incompatible") from exc
-    return model.to(device).eval()
 
 
 def collect_game_ids(samples: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
