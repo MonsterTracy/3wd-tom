@@ -239,7 +239,7 @@ def normalize_speech_annotation(value: Any) -> dict[str, Any]:
                     f"attempt field {field_name}"
                 )
 
-    normalized = deepcopy(dict(value))
+    normalized = dict(value)
     normalized["actions"] = actions
     normalized["generation_attempts"] = generation_attempts
     return normalized

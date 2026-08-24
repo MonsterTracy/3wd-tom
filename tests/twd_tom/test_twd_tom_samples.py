@@ -11,6 +11,7 @@ from werewolf.models.twd_tom.samples import (
     freeze_public_snapshot,
     make_twd_tom_sample,
 )
+from werewolf.models.twd_tom.speech_annotations import make_speech_annotation
 from tests.twd_tom.public_event_fixtures import make_speech_annotations
 
 
@@ -119,6 +120,63 @@ def test_sample_uses_same_frozen_history_and_does_not_save_raw_response():
     assert sample["label_prompt_version"] == LABEL_PROMPT_VERSION
     assert "target_distribution_is_reporter_probability" not in sample
     assert "target_distribution_is_deterministic_encoding" not in sample
+
+
+def test_sample_normalizes_frozen_nonempty_speech_parser_attempts():
+    events = _events(speaker="player1")
+    attempt = {
+        "generation_attempt": 1,
+        "status": "ok",
+        "raw_response": "NONE",
+        "error_type": None,
+        "error_message": None,
+    }
+    annotations = [
+        make_speech_annotation(
+            event_idx=1,
+            speaker="player1",
+            raw_text="earlier speech",
+            parser_model_id="synthetic_parser",
+            parser_call_id="synthetic_000001",
+            annotation_source="llm_parser",
+            status="no_action",
+            actions=[],
+            generation_attempts=[attempt],
+            raw_response="NONE",
+            error_type=None,
+            error_message=None,
+        )
+    ]
+    snapshot = freeze_public_snapshot(
+        game_id="game_001",
+        step_idx=1,
+        phase="1_day_speech",
+        speaker_id=1,
+        report_trigger="pre_public_speech",
+        observer_ids=[1],
+        public_events=events,
+        speech_annotations=annotations,
+    )
+    with pytest.raises(TypeError):
+        snapshot.speech_annotations[0]["generation_attempts"][0][
+            "status"
+        ] = "parser_error"
+
+    sample = make_twd_tom_sample(
+        public_snapshot=snapshot,
+        reports={
+            "player1": {
+                "status": "ok",
+                "suspected_werewolves": [],
+                "known_werewolves": [],
+                "known_non_werewolves": ["player1"],
+                "error": None,
+                "agent_backend_id": "backend_a",
+            }
+        },
+    )
+
+    assert sample["speech_annotations"][0]["generation_attempts"] == [attempt]
 
 
 def test_sample_requires_exact_observer_reports():
