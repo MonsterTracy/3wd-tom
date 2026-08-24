@@ -25,7 +25,7 @@
 1. 在 `/data/yuxiao/3wd-tom/envs/3wd-inference` 启动 OpenAI-compatible Qwen3.5 服务；模型权重保持在 `/data/yuxiao/3wd-tom/models`。
 2. 验证 `http://127.0.0.1:8000/v1/models`，再发出一次有 token 上限的 `/v1/chat/completions` 请求。
 3. 使用项目环境运行 `python -m pytest -q`。
-4. 使用 `configs/twd_tom_server_qwen35_9b.yaml`；CLI 的 seed 范围和 game count 必须与其中 `pipeline.collection` 完全相同。
+4. 三局诊断使用 `configs/twd_tom_server_qwen35_9b.yaml`（seeds 4101--4103）；50 局正式采集使用 `configs/twd_tom_server_qwen35_9b_canonical_50.yaml`（seeds 4201--4250，game-level split 40/5/5）。CLI 的 seed 范围和 game count 必须与所选配置的 `pipeline.collection` 完全相同。
 5. 为每次尝试选择全新的 `run_id` 和不存在的输出目录，例如 `/data/yuxiao/3wd-tom/canonical_data/<run_id>`。
 6. 先用 `--mode pilot` 跑小批诊断。每次 backend 瞬时异常最多执行 3 次显式、计数的尝试；每个 gameplay 生成阶段、PRE readonly label 和独立 speech parser 的完整生成都最多 3 次。speech parser 的后续尝试只携带上一次验证错误，不修补或部分接受旧响应。SDK 内部 retry 保持为 0，不启用 provider fallback 或 replacement seed。
 7. label 请求使用按 observer/hard knowledge 动态收窄的 JSON Schema，直接排除 observer 自身和已知非狼人，并令 `minItems` 等于必须包含的已知其他狼人数；具体成员与重复项仍由本地 parser 严格验证（不向 vLLM xgrammar 发送其不支持的 `uniqueItems`、`contains` 或 `minContains`）。后续 label 尝试只附加上一次本地验证错误并重新生成完整 JSON。每次原始响应、状态与错误都写入 `call_audit.json`，但不会删除非法成员、补猜或伪造标签。

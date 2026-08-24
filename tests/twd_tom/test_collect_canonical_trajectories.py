@@ -101,6 +101,46 @@ def _write_config(tmp_path, config=None):
     return path
 
 
+def test_canonical_50_server_config_freezes_collection_and_split():
+    project_root = Path(__file__).resolve().parents[2]
+    config_path = (
+        project_root
+        / "configs"
+        / "twd_tom_server_qwen35_9b_canonical_50.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    pilot_config = yaml.safe_load(
+        (project_root / "configs" / "twd_tom_server_qwen35_9b.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    seeds = list(range(4201, 4251))
+
+    contract = batch_module._pipeline_collection_contract(
+        config,
+        seeds=seeds,
+    )
+
+    assert contract["game_count"] == 50
+    assert contract["seeds"] == seeds
+    assert config["pipeline"]["split"] == {
+        "seed": 42,
+        "train_game_count": 40,
+        "validation_game_count": 5,
+        "test_game_count": 5,
+    }
+    canonical_runtime = deepcopy(config)
+    pilot_runtime = deepcopy(pilot_config)
+    for runtime in (canonical_runtime, pilot_runtime):
+        runtime["pipeline"].pop("collection")
+        runtime["pipeline"].pop("split")
+    assert canonical_runtime == pilot_runtime
+    assert config["parser"]["model_params"]["temperature"] == 0.0
+    candidate = config["agent_config"]["all_candidates"][0]
+    assert candidate["model_params"]["temperature"] == 1.0
+    assert candidate["backend"] == config["parser"]["backend"]
+
+
 def _write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(canonical_json(value), encoding="utf-8")

@@ -1,0 +1,111 @@
+backends:
+  server_qwen35_9b:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8000/v1"
+    default_model: "qwen3.5-9b"
+    supports_json_schema: true
+
+parser:
+  backend: server_qwen35_9b
+  model: "qwen3.5-9b"
+  model_params:
+    temperature: 0.0
+
+env_config:
+  n_player: 7
+  n_role: 4
+  n_werewolf: 2
+  n_seer: 1
+  n_guard: 0
+  n_witch: 1
+  n_hunter: 0
+  n_villager: 3
+
+agent_config:
+  allow_cross_team_profiles: true
+  must_include: []
+  all_candidates:
+    - profile_name: server_qwen35_9b
+      agent_type: gpt
+      backend: server_qwen35_9b
+      model: "qwen3.5-9b"
+      model_params:
+        temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
+        gameplay_max_tokens: 1024
+      sample_ratio: 1.0
+
+pipeline:
+  public_event_schema_version: classic7_public_event_sequence_v4
+  speech_annotation_schema_version: classic7_speech_annotation_v3
+  speech_action_ontology_version: classic7_speech_action_v1
+  speech_parser_prompt_version: classic7_speech_parser_v3
+  raw_schema_version: classic7_pre_speech_player_suspicion_v5
+  projected_schema_version: classic7_observer_conditioned_belief_matrix_v1
+  projection_version: hard_knowledge_consistent_sparse_suspicion_uniform_support_v2
+
+  collection:
+    game_count: 50
+    seeds:
+      - 4201
+      - 4202
+      - 4203
+      - 4204
+      - 4205
+      - 4206
+      - 4207
+      - 4208
+      - 4209
+      - 4210
+      - 4211
+      - 4212
+      - 4213
+      - 4214
+      - 4215
+      - 4216
+      - 4217
+      - 4218
+      - 4219
+      - 4220
+      - 4221
+      - 4222
+      - 4223
+      - 4224
+      - 4225
+      - 4226
+      - 4227
+      - 4228
+      - 4229
+      - 4230
+      - 4231
+      - 4232
+      - 4233
+      - 4234
+      - 4235
+      - 4236
+      - 4237
+      - 4238
+      - 4239
+      - 4240
+      - 4241
+      - 4242
+      - 4243
+      - 4244
+      - 4245
+      - 4246
+      - 4247
+      - 4248
+      - 4249
+      - 4250
+    max_gameplay_calls_per_game: 192
+    max_belief_calls_per_game: 448
+    max_total_calls_per_game: 640
+    max_wall_seconds_per_game: 3600.0
+
+  project: {}
+
+  split:
+    seed: 42
+    train_game_count: 40
+    validation_game_count: 5
+    test_game_count: 5
