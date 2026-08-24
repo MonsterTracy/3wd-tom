@@ -5,7 +5,7 @@
 ## 1. 冻结版本
 
 - public event：`classic7_public_event_sequence_v4`
-- speech annotation：`classic7_speech_annotation_v2`
+- speech annotation：`classic7_speech_annotation_v3`
 - speech action ontology：`classic7_speech_action_v1`
 - speech parser prompt：`classic7_speech_parser_v3`
 - PRE belief sample：`classic7_pre_speech_player_suspicion_v5`
@@ -34,8 +34,8 @@
 ```text
 schema_version, event_idx, speaker, raw_text_digest,
 ontology_version, parser_prompt_version, parser_model_id, parser_call_id,
-annotation_source, status, actions, raw_response,
-error_type, error_message
+annotation_source, status, actions, generation_attempts,
+raw_response, error_type, error_message
 ```
 
 绑定条件同时使用：
@@ -45,7 +45,7 @@ error_type, error_message
 3. `raw_text_digest = SHA256(public_speech.raw_text)`；
 4. annotation 按 `event_idx` 唯一升序，且完整覆盖所有公开发言。
 
-`status=ok` 必须至少有一个 action；`status=no_action` 表示 parser 成功但没有可表示命题；`status=error` 必须没有 action，并保存明确错误。`raw_response` 保留 parser 的原始响应，便于复核，而不是把清洗后的结果冒充原始输出。
+`status=ok` 必须至少有一个 action；`status=no_action` 表示 parser 成功但没有可表示命题；`status=error` 必须没有 action，并保存明确错误。实际调用模型时，`generation_attempts` 按 1 开始连续保存每次完整生成的原始响应、状态和错误，顶层 `raw_response/error_*` 必须与最后一次一致；仅解析前置条件在模型调用前失败时 attempts 可以为空。不得把清洗、删行或部分接受后的结果冒充原始输出。
 
 唯一合法的 annotation 来源是 `annotation_source=llm_parser`。环境只接受公开原文字符串，结构化动作必须由 speech parser 独立产生；parser `status=error` 的游戏不能进入正式 canonical 数据。
 
@@ -84,7 +84,7 @@ error_type, error_message
   -> speech_annotations.jsonl
 ```
 
-realization prompt 可以得到冻结 intent 和此前公开历史用于自然衔接，但不能增加新正式命题。parser 不接收冻结 intent、private belief、真实身份或生成器隐藏 reasoning。即使 realization 与 parser 使用同一基础模型，它们也是不同请求、不同 prompt 和单向信息边界；canonical annotation 必须来自 parser 实际读到的公开原文。
+realization prompt 可以得到冻结 intent 和此前公开历史用于自然衔接，但不能增加新正式命题。strict realization 提交前拒绝除 `player1`–`player7` 外的拉丁文本，并确认每个冻结的具体目标玩家都在原文中明示；失败只重生成 realization。parser 不接收冻结 intent、private belief、真实身份或生成器隐藏 reasoning。canonical annotation 必须来自 parser 实际读到的公开原文。
 
 ## 6. 模型输入和 memory
 
@@ -98,9 +98,9 @@ realization prompt 可以得到冻结 intent 和此前公开历史用于自然�
 
 “确定性复现”指使用记录的角色分配、environment seed 和 submitted actions，在不调用 LLM/parser 的条件下逐步复现 simulator 状态、公开事件、observer views、winner 与 digests。它不要求重新采样得到同一句 LLM 发言，也不在 replay 时重新解析原文。
 
-realization 遇到截断或确定性质量校验失败时，只重生成 realization，最多 3 次；不会重新生成已经冻结的 day cognition intent。独立 speech parser 的语义解析只执行一次，parser 失败可以让环境留下原文和错误 annotation，但该局随后必须在 canonical artifact validation 中失败并保留审计工件。两类请求的底层 backend 瞬时异常均可做最多 3 次显式且计入预算的传输尝试。
+realization 遇到截断或确定性质量校验失败时，只重生成 realization，最多 3 次；不会重新生成已经冻结的 day cognition intent。独立 speech parser 也最多生成 3 份完整响应；后一次得到前一次的严格验证错误，但不得修补或部分接受旧响应。每份输出都完整保留在 annotation v3。底层 backend 瞬时异常仍可做最多 3 次显式且计入预算的传输尝试。
 
-`--mode canonical` 在 realization 或 PRE label 三次生成仍失败时停在发言提交前，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言；若 PRE label 三次仍失败，则跳过整条 PRE snapshot 并提交同一固定无承诺发言继续游戏。plan/summary/call audit 必须记录缺失 PRE、label failure 与 fallback，并将整批标记为非 canonical；canonical validator 和 materializer 必须拒绝整批 pilot 数据，而不只拒绝实际触发 fallback 的那一局。
+`--mode canonical` 在 realization、PRE label 或 speech parser 三次生成仍失败时 fail closed，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言；PRE label 失败时跳过整条 snapshot；speech parser 失败时保留 `status=error` 和全部 attempts 并继续后续游戏和局数。pilot 中的错误不会被修复或伪造为 action，整批始终非 canonical。
 
 ## 8. 验收条件
 
@@ -109,5 +109,5 @@ realization 遇到截断或确定性质量校验失败时，只重生成 realiza
 - ontology、parser prompt、raw sample 和 public event 版本写入配置及 artifact。
 - PRE sample 的 structured-input digest 同时覆盖 public events 与 annotation prefix。
 - Dataset 和 backbone 不读取 `raw_text`。
-- canonical validator 拒绝缺失、重复、错 speaker、错原文 digest 和 parser error annotation。
+- canonical validator 拒绝缺失、重复、错 speaker、错原文 digest、缺失尝试记录和 parser error annotation；pilot validator 可保留显式 parser error。
 - deterministic replay 不调用 agent、realization 或 speech parser。

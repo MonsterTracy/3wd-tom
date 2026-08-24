@@ -431,6 +431,12 @@ class GPTAgent(LLMAgent):
             finish_reason=metadata["finish_reason"],
             player_id=player_id,
             phase=phase,
+            strict_chinese=True,
+            required_player_ids=(
+                act.target
+                for act in discussion_acts
+                if act.target is not None
+            ),
         )
         return content.strip()
 

@@ -386,6 +386,7 @@ class WerewolfTextEnvV0(gym.Env):
                 annotation_source="llm_parser",
                 status=status,
                 actions=sp_actions,
+                generation_attempts=audit.generation_attempts,
                 raw_response=audit.raw_response,
                 error_type=error_type,
                 error_message=error_message,

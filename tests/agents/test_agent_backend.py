@@ -1980,6 +1980,49 @@ class GameplayCognitionTest(unittest.TestCase):
             agent.act(observation)
         self.assertEqual(len(backend.calls), 4)
 
+    def test_strict_chinese_speech_rejects_latin_damage_and_missing_targets(self):
+        with self.assertRaisesRegex(
+            GameplaySpeechQualityError,
+            "non-player Latin text",
+        ):
+            validate_gameplay_public_speech(
+                "我是好人玩家 2，今天我必须站ritte。",
+                finish_reason="stop",
+                player_id=2,
+                phase="1_day_speech",
+                strict_chinese=True,
+            )
+
+        with self.assertRaisesRegex(
+            GameplaySpeechQualityError,
+            "omitted frozen discussion target",
+        ):
+            validate_gameplay_public_speech(
+                "我今天先保留意见。",
+                finish_reason="stop",
+                player_id=1,
+                phase="1_day_speech",
+                strict_chinese=True,
+                required_player_ids=(2,),
+            )
+
+    def test_latin_damaged_speech_retries_public_realization(self):
+        observation = _observation()
+        backend = ScriptedRealizationBackend(
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("support", 2),),
+            ),
+            (
+                "我是好人玩家 1，今天我必须站ritte。",
+                "我支持 player2。",
+            ),
+        )
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(observation), ("speech", "我支持 player2。"))
+        self.assertEqual(len(backend.calls), 3)
+
     def test_active_prompt_control_markers_cannot_be_public_speech(self):
         for marker in (
             "GAME / ROLE",

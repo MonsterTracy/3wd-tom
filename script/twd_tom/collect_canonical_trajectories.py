@@ -61,6 +61,9 @@ from werewolf.models.twd_tom.schema import (
 from werewolf.speech.private_belief_perceiver import (
     LABEL_GENERATION_MAX_ATTEMPTS,
 )
+from werewolf.speech.speech_perceiver import (
+    SPEECH_PARSER_GENERATION_MAX_ATTEMPTS,
+)
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.trajectory import (
     CanonicalGameInteractionTrajectoryRecorder,
@@ -76,9 +79,9 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v6"
-GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v6"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v6"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v7"
+GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v7"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v7"
 BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v3"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
@@ -89,6 +92,8 @@ COLLECTION_MODES = (CANONICAL_COLLECTION_MODE, PILOT_COLLECTION_MODE)
 STOP_ON_FIRST_FAILURE = True
 RERUN_ON_FAILURE = False
 REPLACEMENT_SEED_ON_FAILURE = False
+SPEECH_PARSER_RETRY_POLICY = "full_response_strict_validation_feedback_v1"
+SPEECH_PARSER_FAILURE_POLICY = "canonical_fail_closed_pilot_record_error"
 BELIEF_SNAPSHOTS_FILENAME = "belief_snapshots.jsonl"
 SPEECH_ANNOTATIONS_FILENAME = "speech_annotations.jsonl"
 
@@ -285,6 +290,8 @@ def validate_canonical_belief_batch(
         raise ValueError("canonical batch contains missing PRE belief snapshots")
     if summary.get("total_label_snapshot_failure_count") != 0:
         raise ValueError("canonical batch contains failed label snapshots")
+    if summary.get("total_speech_annotation_error_count") != 0:
+        raise ValueError("canonical batch contains failed speech annotations")
 
     planned_count = _positive_integer(
         summary.get("planned_game_count"),
@@ -355,6 +362,10 @@ def validate_canonical_belief_batch(
             raise ValueError(f"canonical game has incomplete PRE labels: {game_id}")
         if game_summary.get("belief_snapshot_missing_pre_boundary_count") != 0:
             raise ValueError(f"canonical game has missing PRE labels: {game_id}")
+        if game_summary.get("speech_annotation_error_count") != 0:
+            raise ValueError(
+                f"canonical game contains failed speech annotations: {game_id}"
+            )
 
         belief_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
         belief_sha256 = _sha256(belief_path)
@@ -985,10 +996,14 @@ def validate_complete_game_artifacts(
 def validate_speech_annotation_artifact(
     speech_annotations_path: str | Path,
     trajectory_path: str | Path,
+    *,
+    require_success: bool = True,
 ) -> dict[str, Any]:
-    """Bind every parser annotation to the immutable canonical speech text."""
+    """Bind every parser annotation and enforce the selected mode policy."""
 
     speech_annotations_path = Path(speech_annotations_path)
+    if not isinstance(require_success, bool):
+        raise TypeError("require_success must be boolean")
     trajectory = _load_json_object(Path(trajectory_path))
     public_events = list(trajectory["initial_public_events"])
     for transition in trajectory["transitions"]:
@@ -999,12 +1014,33 @@ def validate_speech_annotation_artifact(
         public_events=public_events,
         require_complete=True,
     )
+    missing_attempts = [
+        annotation["event_idx"]
+        for annotation in annotations
+        if not annotation["generation_attempts"]
+    ]
+    if missing_attempts:
+        raise ValueError(
+            "collected speech annotations require parser generation attempts; "
+            f"event_indices={missing_attempts}"
+        )
+    excess_attempts = [
+        annotation["event_idx"]
+        for annotation in annotations
+        if len(annotation["generation_attempts"])
+        > SPEECH_PARSER_GENERATION_MAX_ATTEMPTS
+    ]
+    if excess_attempts:
+        raise ValueError(
+            "speech parser generation attempt limit exceeded; "
+            f"event_indices={excess_attempts}"
+        )
     failed = [
         annotation["event_idx"]
         for annotation in annotations
         if annotation["status"] == STATUS_ERROR
     ]
-    if failed:
+    if require_success and failed:
         raise ValueError(
             "canonical speech annotations require successful parsing; "
             f"error_event_indices={failed}"
@@ -1016,6 +1052,12 @@ def validate_speech_annotation_artifact(
         "speech_annotation_count": len(annotations),
         "speech_annotation_action_count": sum(
             len(annotation["actions"]) for annotation in annotations
+        ),
+        "speech_annotation_error_count": len(failed),
+        "speech_annotation_error_event_indices": failed,
+        "speech_parser_generation_attempt_count": sum(
+            len(annotation["generation_attempts"])
+            for annotation in annotations
         ),
         "speech_no_action_count": sum(
             annotation["status"] == "no_action" for annotation in annotations
@@ -1224,6 +1266,7 @@ def _game_summary(
             collection_mode == CANONICAL_COLLECTION_MODE
             and fallback_count == 0
             and validation.get("belief_snapshot_complete") is True
+            and validation.get("speech_annotation_error_count") == 0
         ),
     }
     summary["summary_digest"] = canonical_digest(summary)
@@ -1274,6 +1317,11 @@ def _batch_plan(
         "gameplay_generation_max_attempts": (
             GAMEPLAY_GENERATION_MAX_ATTEMPTS
         ),
+        "speech_parser_generation_max_attempts": (
+            SPEECH_PARSER_GENERATION_MAX_ATTEMPTS
+        ),
+        "speech_parser_retry_policy": SPEECH_PARSER_RETRY_POLICY,
+        "speech_parser_failure_policy": SPEECH_PARSER_FAILURE_POLICY,
         "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
         "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
         "label_failure_policy": (
@@ -1495,6 +1543,9 @@ def collect_canonical_trajectory_batch(
                     validate_speech_annotation_artifact(
                         speech_annotations_path,
                         trajectory_path,
+                        require_success=(
+                            collection_mode == CANONICAL_COLLECTION_MODE
+                        ),
                     )
                 )
                 validation.update(
@@ -1559,6 +1610,7 @@ def collect_canonical_trajectory_batch(
                 and all(
                     game["call_audit"]["gameplay_fallback_count"] == 0
                     and game["belief_snapshot_complete"] is True
+                    and game["speech_annotation_error_count"] == 0
                     for game in completed_games
                 )
             ),
@@ -1609,6 +1661,13 @@ def collect_canonical_trajectory_batch(
             "total_speech_annotation_action_count": sum(
                 game["speech_annotation_action_count"] for game in completed_games
             ),
+            "total_speech_annotation_error_count": sum(
+                game["speech_annotation_error_count"] for game in completed_games
+            ),
+            "total_speech_parser_generation_attempt_count": sum(
+                game["speech_parser_generation_attempt_count"]
+                for game in completed_games
+            ),
             "total_gameplay_call_count": sum(
                 game["call_audit"]["gameplay_call_count"]
                 for game in completed_games
@@ -1648,6 +1707,11 @@ def collect_canonical_trajectory_batch(
             "gameplay_generation_max_attempts": (
                 GAMEPLAY_GENERATION_MAX_ATTEMPTS
             ),
+            "speech_parser_generation_max_attempts": (
+                SPEECH_PARSER_GENERATION_MAX_ATTEMPTS
+            ),
+            "speech_parser_retry_policy": SPEECH_PARSER_RETRY_POLICY,
+            "speech_parser_failure_policy": SPEECH_PARSER_FAILURE_POLICY,
             "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
             "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
             "label_failure_policy": (

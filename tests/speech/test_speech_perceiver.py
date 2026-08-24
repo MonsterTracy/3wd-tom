@@ -2,6 +2,7 @@ import unittest
 
 from werewolf.models import SpeechPerceiver
 from werewolf.speech.speech_perceiver import (
+    SPEECH_PARSER_GENERATION_MAX_ATTEMPTS,
     SPEECH_PARSER_MAX_TOKENS,
     SpeechActionValidationError,
 )
@@ -10,6 +11,7 @@ from werewolf.speech.speech_perceiver import (
 class FakeBackend:
     def __init__(self, content=None, error=None):
         self.content = content
+        self.contents = list(content) if isinstance(content, tuple) else None
         self.error = error
         self.calls = []
 
@@ -34,6 +36,8 @@ class FakeBackend:
         )
         if self.error is not None:
             raise self.error
+        if self.contents is not None:
+            return self.contents.pop(0)
         return self.content
 
 
@@ -300,6 +304,8 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertEqual(result.parse_status, "ok")
         self.assertIsNone(result.error_type)
         self.assertIsNone(result.error_message)
+        self.assertEqual(len(result.generation_attempts), 1)
+        self.assertEqual(result.generation_attempts[0]["status"], "ok")
 
     def test_parse_with_audit_fails_closed_without_repair(self):
         raw_response = '[["player1", "support", "player2"]]'
@@ -312,6 +318,46 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertEqual(result.raw_response, raw_response)
         self.assertEqual(result.parse_status, "parser_error")
         self.assertEqual(result.error_type, "SpeechActionValidationError")
+        self.assertEqual(
+            len(result.generation_attempts),
+            SPEECH_PARSER_GENERATION_MAX_ATTEMPTS,
+        )
+        self.assertTrue(
+            all(
+                attempt["status"] == "parser_error"
+                for attempt in result.generation_attempts
+            )
+        )
+
+    def test_parse_with_audit_retries_the_entire_response_with_feedback(self):
+        invalid_response = (
+            "player2 | point_as_non_werewolf | player2\n"
+            "player2 | support | NONE"
+        )
+        valid_response = "player2 | point_as_non_werewolf | player2"
+        backend = FakeBackend((invalid_response, valid_response))
+        perceiver = SpeechPerceiver(backend=backend, model_name="test-model")
+
+        result = perceiver.parse_with_audit(
+            2,
+            "我是好人玩家 2，今天我必须站ritte。",
+            1,
+            "speech",
+        )
+
+        self.assertEqual(
+            result.normalized_actions,
+            [["player2", "point_as_non_werewolf", "player2"]],
+        )
+        self.assertEqual(len(backend.calls), 2)
+        self.assertEqual(
+            [attempt["status"] for attempt in result.generation_attempts],
+            ["parser_error", "ok"],
+        )
+        retry_prompt = backend.calls[1]["messages"][0]["content"]
+        self.assertIn("必须重新生成整份输出", retry_prompt)
+        self.assertIn("support requires a canonical player object", retry_prompt)
+        self.assertIn("不得部分修补", retry_prompt)
 
     def test_parse_with_audit_records_backend_failure(self):
         perceiver = SpeechPerceiver(
@@ -324,6 +370,10 @@ class SpeechPerceiverTest(unittest.TestCase):
         self.assertEqual(result.parse_status, "parser_error")
         self.assertEqual(result.error_type, "RuntimeError")
         self.assertEqual(result.error_message, "backend unavailable")
+        self.assertEqual(
+            len(result.generation_attempts),
+            SPEECH_PARSER_GENERATION_MAX_ATTEMPTS,
+        )
 
     def test_parse_exposes_backend_and_precondition_failures(self):
         perceiver = SpeechPerceiver(

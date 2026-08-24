@@ -14,7 +14,7 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-SPEECH_ANNOTATION_SCHEMA_VERSION = "classic7_speech_annotation_v2"
+SPEECH_ANNOTATION_SCHEMA_VERSION = "classic7_speech_annotation_v3"
 SPEECH_ACTION_ONTOLOGY_VERSION = "classic7_speech_action_v1"
 SPEECH_PARSER_PROMPT_VERSION = "classic7_speech_parser_v3"
 
@@ -37,11 +37,22 @@ ANNOTATION_FIELDS = frozenset(
         "annotation_source",
         "status",
         "actions",
+        "generation_attempts",
         "raw_response",
         "error_type",
         "error_message",
     }
 )
+GENERATION_ATTEMPT_FIELDS = frozenset(
+    {
+        "generation_attempt",
+        "status",
+        "raw_response",
+        "error_type",
+        "error_message",
+    }
+)
+GENERATION_ATTEMPT_STATUSES = frozenset({"ok", "parser_error"})
 
 
 def _canonical_json(value: Any) -> str:
@@ -73,6 +84,7 @@ def make_speech_annotation(
     raw_response: str | None,
     error_type: str | None,
     error_message: str | None,
+    generation_attempts: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Build and validate one annotation for an immutable speech event."""
 
@@ -88,11 +100,55 @@ def make_speech_annotation(
         "annotation_source": annotation_source,
         "status": status,
         "actions": list(actions),
+        "generation_attempts": list(generation_attempts),
         "raw_response": raw_response,
         "error_type": error_type,
         "error_message": error_message,
     }
     return normalize_speech_annotation(candidate)
+
+
+def _normalize_generation_attempts(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("speech parser generation_attempts must be a sequence")
+
+    normalized = []
+    for expected_index, raw_attempt in enumerate(value, start=1):
+        if not isinstance(raw_attempt, Mapping):
+            raise TypeError("speech parser generation attempt must be a mapping")
+        if set(raw_attempt) != GENERATION_ATTEMPT_FIELDS:
+            raise ValueError("speech parser generation attempt field set mismatch")
+        if raw_attempt.get("generation_attempt") != expected_index:
+            raise ValueError(
+                "speech parser generation attempts must be contiguous from one"
+            )
+        status = raw_attempt.get("status")
+        if status not in GENERATION_ATTEMPT_STATUSES:
+            raise ValueError("unsupported speech parser generation attempt status")
+        raw_response = raw_attempt.get("raw_response")
+        if raw_response is not None and not isinstance(raw_response, str):
+            raise TypeError(
+                "speech parser generation attempt raw_response must be text or null"
+            )
+        error_type = raw_attempt.get("error_type")
+        error_message = raw_attempt.get("error_message")
+        if status == "parser_error":
+            if not isinstance(error_type, str) or not error_type:
+                raise ValueError("failed speech parser attempt requires error_type")
+            if not isinstance(error_message, str) or not error_message:
+                raise ValueError("failed speech parser attempt requires error_message")
+        elif error_type is not None or error_message is not None:
+            raise ValueError("successful speech parser attempt requires null errors")
+        normalized.append(deepcopy(dict(raw_attempt)))
+
+    successful_indices = [
+        index
+        for index, attempt in enumerate(normalized, start=1)
+        if attempt["status"] == "ok"
+    ]
+    if successful_indices and successful_indices != [len(normalized)]:
+        raise ValueError("speech parser generation must stop after first success")
+    return normalized
 
 
 def normalize_speech_annotation(value: Any) -> dict[str, Any]:
@@ -150,6 +206,10 @@ def normalize_speech_annotation(value: Any) -> dict[str, Any]:
     if status in {STATUS_NO_ACTION, STATUS_ERROR} and actions:
         raise ValueError(f"status={status} requires an empty action list")
 
+    generation_attempts = _normalize_generation_attempts(
+        value.get("generation_attempts")
+    )
+
     raw_response = value.get("raw_response")
     if raw_response is not None and not isinstance(raw_response, str):
         raise TypeError("speech annotation raw_response must be text or null")
@@ -163,8 +223,25 @@ def normalize_speech_annotation(value: Any) -> dict[str, Any]:
     elif error_type is not None or error_message is not None:
         raise ValueError("non-error annotation requires null error fields")
 
+    if generation_attempts:
+        final_attempt = generation_attempts[-1]
+        expected_attempt_status = (
+            "parser_error" if status == STATUS_ERROR else "ok"
+        )
+        if final_attempt["status"] != expected_attempt_status:
+            raise ValueError(
+                "speech annotation status differs from final generation attempt"
+            )
+        for field_name in ("raw_response", "error_type", "error_message"):
+            if final_attempt[field_name] != value.get(field_name):
+                raise ValueError(
+                    "speech annotation final result differs from final generation "
+                    f"attempt field {field_name}"
+                )
+
     normalized = deepcopy(dict(value))
     normalized["actions"] = actions
+    normalized["generation_attempts"] = generation_attempts
     return normalized
 
 
@@ -227,6 +304,8 @@ __all__ = [
     "ANNOTATION_FIELDS",
     "ANNOTATION_SOURCES",
     "ANNOTATION_STATUSES",
+    "GENERATION_ATTEMPT_FIELDS",
+    "GENERATION_ATTEMPT_STATUSES",
     "SPEECH_ACTION_ONTOLOGY_VERSION",
     "SPEECH_ANNOTATION_SCHEMA_VERSION",
     "SPEECH_PARSER_PROMPT_VERSION",

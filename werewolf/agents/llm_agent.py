@@ -840,6 +840,7 @@ _SPEAKER_SELF_REFERENCE = re.compile(
     r"|(?<!他)(?<!她)(?<!它)(?<!你)(?<!您)"
     r"(?<!他们)(?<!她们)(?<!它们)(?<!你们)(?<!您们)自己"
 )
+_LATIN_TEXT = re.compile(r"[A-Za-z]+")
 
 
 def _extract_explicit_player_references(content, *, speaker_id, context):
@@ -889,6 +890,8 @@ def validate_gameplay_public_speech(
     finish_reason=None,
     player_id=None,
     phase=None,
+    strict_chinese=False,
+    required_player_ids=(),
 ):
     """Validate only high-confidence gameplay speech failures."""
 
@@ -902,11 +905,38 @@ def validate_gameplay_public_speech(
             f"truncated gameplay public speech ({context})"
         )
 
-    _extract_explicit_player_references(
+    referenced_players = _extract_explicit_player_references(
         content,
         speaker_id=player_id,
         context=context,
     )
+    if not isinstance(strict_chinese, bool):
+        raise TypeError("strict_chinese must be boolean")
+    if strict_chinese:
+        residual_text = _CANONICAL_ENGLISH_PLAYER_REFERENCE.sub("", content)
+        latin_match = _LATIN_TEXT.search(residual_text)
+        if latin_match is not None:
+            raise GameplaySpeechQualityError(
+                "non-player Latin text in strict Chinese gameplay speech: "
+                f"{latin_match.group(0)!r} ({context})"
+            )
+
+    if isinstance(required_player_ids, (str, bytes)):
+        raise TypeError("required_player_ids must be a player sequence")
+    required_players = set(required_player_ids)
+    if any(
+        isinstance(player, bool)
+        or not isinstance(player, int)
+        or not 1 <= player <= 7
+        for player in required_players
+    ):
+        raise ValueError("required_player_ids must contain players in [1, 7]")
+    missing_players = sorted(required_players - referenced_players)
+    if missing_players:
+        raise GameplaySpeechQualityError(
+            "gameplay public speech omitted frozen discussion target(s): "
+            f"{missing_players} ({context})"
+        )
 
     stripped = content.lstrip()
     if stripped.startswith(("{", "[", "```", "# ")):

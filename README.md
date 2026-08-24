@@ -30,7 +30,7 @@ Classic-7 simulator
   -> playing-agent readonly private belief query
   -> 同一份 speaker PRE belief 只读交给紧随其后的 day cognition
   -> 冻结公开表达意图并由第二次 LLM 调用生成自然中文
-  -> 独立 speech parser 只从公开原文生成版本化 annotation sidecar
+  -> 独立 speech parser 只从公开原文做最多 3 次完整严格解析
   -> raw belief snapshot JSONL
   -> canonical game-level train/validation/test materialization
   -> deterministic sparse suspicion-set conversion
@@ -41,7 +41,7 @@ Classic-7 simulator
 
 public-only reporter、external offline annotation、PBM、ToM1/ToM2 双任务和旧 formal reporter 不属于 tom-v2 主线。
 
-公开事件与发言标注采用分层契约：`public_events` 的 `public_speech` 只保存 `event_idx`、`speaker` 和自然语言 `raw_text`；人工定义的 14 类语义动作、解析器版本、原始解析响应和错误状态单独保存到 `speech_annotations.jsonl`。两者通过 `event_idx`、speaker 和原文 SHA256 完整绑定。canonical 数据要求每条公开发言都由独立 parser 成功标注；不允许把生成器的冻结 intent 直接当成训练输入。当前 belief backbone 只编码结构化动作，不编码 `raw_text`，但原文永久保留，未来更换 ontology/parser 时可以重新标注而无需重跑游戏。
+公开事件与发言标注采用分层契约：`public_events` 的 `public_speech` 只保存 `event_idx`、`speaker` 和自然语言 `raw_text`；人工定义的 14 类语义动作、解析器版本、逐次原始响应和错误状态单独保存到 `speech_annotations.jsonl`。两者通过 `event_idx`、speaker 和原文 SHA256 完整绑定。canonical 数据要求每条公开发言都由独立 parser 成功标注；pilot 可保留显式 `status=error` 继续诊断，但整批永不可物化。不允许把生成器的冻结 intent 直接当成训练输入。
 
 raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_start`；Dataset 张量化时只删除这个调度标记，模型看到的是该发言发生前已经完成的公开事件。train、validation、test 必须来自同一个经过 digest 和文件 SHA256 校验的 `split_manifest.json`；evaluation 只接受该 manifest 的 test split，并同时与 train、validation 保持 game-level 不相交。
 
@@ -69,7 +69,7 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `script/twd_tom/train.py` 与 `eval.py`：单一 tom-v2 objective 的训练、checkpoint 与评估入口。
 - `tests/twd_tom/`：采集、时间边界和只读性回归测试。
 
-当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v2`、`classic7_speech_action_v1` 和 `classic7_pre_speech_player_suspicion_v5`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
+当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1` 和 `classic7_pre_speech_player_suspicion_v5`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
 
 训练 Dataset 默认启用通用座位循环旋转；验证与 evaluation 保持原始座位。旋转同时覆盖 observer、target、公开事件玩家引用、belief matrix 和 masks。
 

@@ -40,6 +40,15 @@ def _annotation(raw_text="player2 的公开原文"):
         annotation_source="llm_parser",
         status="ok",
         actions=[["player2", "oppose", "player4"]],
+        generation_attempts=[
+            {
+                "generation_attempt": 1,
+                "status": "ok",
+                "raw_response": "player2 | oppose | player4",
+                "error_type": None,
+                "error_message": None,
+            }
+        ],
         raw_response="player2 | oppose | player4",
         error_type=None,
         error_message=None,
@@ -85,4 +94,12 @@ def test_annotation_rejects_action_from_a_different_speaker():
     annotation["actions"] = [["player3", "oppose", "player4"]]
 
     with pytest.raises(ValueError, match="subject must equal"):
+        normalize_speech_annotations([annotation])
+
+
+def test_annotation_attempts_must_match_the_final_result():
+    annotation = deepcopy(_annotation())
+    annotation["generation_attempts"][0]["raw_response"] = "different"
+
+    with pytest.raises(ValueError, match="final generation attempt"):
         normalize_speech_annotations([annotation])

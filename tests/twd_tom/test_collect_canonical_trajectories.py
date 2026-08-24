@@ -287,7 +287,13 @@ def _belief_snapshot(game_id):
     }
 
 
-def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
+def _install_fake_runtime(
+    monkeypatch,
+    output_root,
+    *,
+    fail_seed=None,
+    speech_error=False,
+):
     calls = {
         "backend": [],
         "build": [],
@@ -357,6 +363,35 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
             for event in env.public_events
             if event["event_type"] == "public_speech"
         )
+        if speech_error:
+            raw_response = "player2 | support | NONE"
+            error_type = "SpeechActionValidationError"
+            error_message = "support requires a canonical player object"
+            generation_attempts = [
+                {
+                    "generation_attempt": attempt,
+                    "status": "parser_error",
+                    "raw_response": raw_response,
+                    "error_type": error_type,
+                    "error_message": error_message,
+                }
+                for attempt in range(1, 4)
+            ]
+            status = "error"
+        else:
+            raw_response = "NONE"
+            error_type = None
+            error_message = None
+            generation_attempts = [
+                {
+                    "generation_attempt": 1,
+                    "status": "ok",
+                    "raw_response": raw_response,
+                    "error_type": None,
+                    "error_message": None,
+                }
+            ]
+            status = "no_action"
         env.speech_annotations = [
             make_speech_annotation(
                 event_idx=speech_event["event_idx"],
@@ -365,11 +400,12 @@ def _install_fake_runtime(monkeypatch, output_root, *, fail_seed=None):
                 parser_model_id="synthetic-parser",
                 parser_call_id="synthetic-parser-call-000001",
                 annotation_source="llm_parser",
-                status="no_action",
+                status=status,
                 actions=[],
-                raw_response="NONE",
-                error_type=None,
-                error_message=None,
+                generation_attempts=generation_attempts,
+                raw_response=raw_response,
+                error_type=error_type,
+                error_message=error_message,
             )
         ]
         return f"{winner} win"
@@ -424,6 +460,13 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["backend_max_attempts"] == 3
     assert plan["backend_sdk_max_retries"] == 0
     assert plan["gameplay_generation_max_attempts"] == 3
+    assert plan["speech_parser_generation_max_attempts"] == 3
+    assert plan["speech_parser_retry_policy"] == (
+        "full_response_strict_validation_feedback_v1"
+    )
+    assert plan["speech_parser_failure_policy"] == (
+        "canonical_fail_closed_pilot_record_error"
+    )
     assert plan["label_generation_max_attempts"] == 3
     assert plan["stop_on_first_failure"] is True
     assert plan["rerun_on_failure"] is False
@@ -443,6 +486,8 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert summary["total_gameplay_fallback_count"] == 0
     assert summary["total_missing_pre_belief_snapshot_count"] == 0
     assert summary["total_label_snapshot_failure_count"] == 0
+    assert summary["total_speech_annotation_error_count"] == 0
+    assert summary["total_speech_parser_generation_attempt_count"] == 3
     assert summary["total_belief_snapshot_count"] == 3
     assert summary["deterministic_replay_match_count"] == 3
     assert summary["game_ids"] == [
@@ -478,6 +523,8 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert game_summary["completion_status"] == "COMPLETE"
         assert game_summary["belief_snapshot_count"] == 1
         assert game_summary["speech_annotation_count"] == 1
+        assert game_summary["speech_annotation_error_count"] == 0
+        assert game_summary["speech_parser_generation_attempt_count"] == 1
         assert game_summary["call_audit"]["within_budget"] is True
         assert game_summary["call_audit"]["gameplay_fallback_count"] == 0
         assert (game_dir / "call_audit.json").is_file()
@@ -555,6 +602,36 @@ def test_pilot_mode_is_explicitly_noncanonical_and_cannot_materialize(
     assert plan["canonical_eligible"] is False
     with pytest.raises(ValueError, match="not in canonical mode"):
         batch_module.validate_canonical_belief_batch(output_root)
+
+
+def test_pilot_records_failed_speech_annotations_and_completes_batch(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = _write_config(tmp_path)
+    output_root = tmp_path / "speech-error-pilot"
+    calls = _install_fake_runtime(
+        monkeypatch,
+        output_root,
+        speech_error=True,
+    )
+
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="speech-error-pilot",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+        collection_mode="pilot",
+    )
+
+    assert calls["game"] == [1001, 1002, 1003]
+    assert summary["completed_game_count"] == 3
+    assert summary["canonical_eligible"] is False
+    assert summary["total_speech_annotation_error_count"] == 3
+    assert summary["total_speech_parser_generation_attempt_count"] == 9
+    assert not (output_root / "batch_failure.json").exists()
 
 
 def test_canonical_validator_rejects_embedded_gameplay_fallback(
@@ -1094,6 +1171,15 @@ def test_canonical_speech_annotation_artifact_fails_closed(
         annotation_source="llm_parser",
         status="error",
         actions=[],
+        generation_attempts=[
+            {
+                "generation_attempt": 1,
+                "status": "parser_error",
+                "raw_response": "malformed",
+                "error_type": "SyntheticParserError",
+                "error_message": "synthetic failure",
+            }
+        ],
         raw_response="malformed",
         error_type="SyntheticParserError",
         error_message="synthetic failure",
@@ -1109,3 +1195,13 @@ def test_canonical_speech_annotation_artifact_fails_closed(
             annotation_path,
             tmp_path / "trajectory.json",
         )
+
+    pilot_validation = batch_module.validate_speech_annotation_artifact(
+        annotation_path,
+        tmp_path / "trajectory.json",
+        require_success=False,
+    )
+    assert pilot_validation["speech_annotation_error_count"] == 1
+    assert pilot_validation["speech_annotation_error_event_indices"] == [
+        speech["event_idx"]
+    ]

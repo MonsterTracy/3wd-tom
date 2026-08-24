@@ -10,6 +10,7 @@ from typing import Any
 
 
 SPEECH_PARSER_MAX_TOKENS = 256
+SPEECH_PARSER_GENERATION_MAX_ATTEMPTS = 3
 
 _PIPE_TRIPLET_PATTERN = re.compile(
     r"^(?P<subject>player[1-7]) \| "
@@ -66,6 +67,7 @@ class SpeechParseAuditResult:
     parse_status: str
     error_type: str | None
     error_message: str | None
+    generation_attempts: tuple[dict[str, Any], ...] = ()
 
 
 class SpeechPerceiver:
@@ -117,7 +119,7 @@ class SpeechPerceiver:
         day: int,
         phase: str,
     ) -> SpeechParseAuditResult:
-        """Parse once through the formal protocol and retain audit data."""
+        """Run bounded full-response parsing and retain every attempt."""
 
         precondition_error = None
         if self.backend is None or not self.model_name:
@@ -137,33 +139,71 @@ class SpeechPerceiver:
                 parse_status="parser_error",
                 error_type=type(precondition_error).__name__,
                 error_message=str(precondition_error),
+                generation_attempts=(),
             )
 
-        try:
-            actions, raw_response = self.parse_strict_with_response(
-                speaker=speaker,
-                speech=speech,
-                day=day,
-                phase=phase,
-            )
-            return SpeechParseAuditResult(
-                normalized_actions=actions,
-                raw_response=raw_response,
-                parse_status="ok",
-                error_type=None,
-                error_message=None,
-            )
-        except Exception as exc:
-            raw_response = getattr(exc, "raw_response", None)
-            if not isinstance(raw_response, str):
-                raw_response = None
-            return SpeechParseAuditResult(
-                normalized_actions=[],
-                raw_response=raw_response,
-                parse_status="parser_error",
-                error_type=type(exc).__name__,
-                error_message=str(exc),
-            )
+        attempts: list[dict[str, Any]] = []
+        validation_feedback = None
+        last_error: Exception | None = None
+        for attempt_index in range(
+            1,
+            SPEECH_PARSER_GENERATION_MAX_ATTEMPTS + 1,
+        ):
+            try:
+                actions, raw_response = self._parse_configured_with_response(
+                    speaker=speaker,
+                    speech=speech,
+                    day=day,
+                    phase=phase,
+                    validation_feedback=validation_feedback,
+                )
+                attempts.append(
+                    {
+                        "generation_attempt": attempt_index,
+                        "status": "ok",
+                        "raw_response": raw_response,
+                        "error_type": None,
+                        "error_message": None,
+                    }
+                )
+                return SpeechParseAuditResult(
+                    normalized_actions=actions,
+                    raw_response=raw_response,
+                    parse_status="ok",
+                    error_type=None,
+                    error_message=None,
+                    generation_attempts=tuple(attempts),
+                )
+            except Exception as exc:
+                last_error = exc
+                raw_response = getattr(exc, "raw_response", None)
+                if not isinstance(raw_response, str):
+                    raw_response = None
+                attempts.append(
+                    {
+                        "generation_attempt": attempt_index,
+                        "status": "parser_error",
+                        "raw_response": raw_response,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+                if raw_response is not None:
+                    validation_feedback = f"{type(exc).__name__}: {exc}"
+
+        if last_error is None:
+            raise AssertionError("speech parser attempt loop produced no result")
+        raw_response = getattr(last_error, "raw_response", None)
+        if not isinstance(raw_response, str):
+            raw_response = None
+        return SpeechParseAuditResult(
+            normalized_actions=[],
+            raw_response=raw_response,
+            parse_status="parser_error",
+            error_type=type(last_error).__name__,
+            error_message=str(last_error),
+            generation_attempts=tuple(attempts),
+        )
 
     def parse_strict(
         self,
@@ -222,12 +262,14 @@ class SpeechPerceiver:
         speech: str,
         day: int,
         phase: str,
+        validation_feedback: str | None = None,
     ) -> tuple[list[list[str | None]], str]:
         prompt = self._build_prompt(
             speaker=speaker,
             speech=speech,
             day=day,
             phase=phase,
+            validation_feedback=validation_feedback,
         )
 
         response_text = self.backend.chat(
@@ -278,6 +320,7 @@ class SpeechPerceiver:
         speech: str,
         day: int,
         phase: str,
+        validation_feedback: str | None = None,
     ) -> str:
         """Build the formal public-speech parsing prompt."""
 
@@ -287,7 +330,7 @@ class SpeechPerceiver:
             for action_name in action_names
         )
 
-        return f"""你是狼人杀公开发言的结构化动作解析器。
+        prompt = f"""你是狼人杀公开发言的结构化动作解析器。
 
 只抽取当前发言者在下面公开发言中明确表达的命题。不要判断真假，不读取隐藏身份，不推测私下想法。
 
@@ -420,6 +463,15 @@ player{speaker} | vote_intent | player4
 
 待解析的玩家发言：
 player{speaker}: {speech}"""
+        if validation_feedback is None:
+            return prompt
+        return (
+            prompt
+            + "\n\n上一轮完整输出未通过严格验证，必须重新生成整份输出。"
+            + f"\n验证错误：{validation_feedback}"
+            + "\n不得删除某一错误行后保留其余行，不得部分修补；"
+            + "请重新审阅原始发言并输出一份完整结果。"
+        )
 
     @classmethod
     def _extract_response_actions(
@@ -543,6 +595,7 @@ player{speaker}: {speech}"""
 
 
 __all__ = [
+    "SPEECH_PARSER_GENERATION_MAX_ATTEMPTS",
     "SPEECH_PARSER_MAX_TOKENS",
     "SpeechParseAuditResult",
     "SpeechPerceiver",

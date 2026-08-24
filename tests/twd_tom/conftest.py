@@ -122,6 +122,7 @@ def canonical_belief_batch_factory():
                 "belief_snapshot_complete": True,
                 "belief_snapshot_missing_pre_boundary_count": 0,
                 "belief_snapshot_missing_pre_step_indices": [],
+                "speech_annotation_error_count": 0,
                 "belief_snapshots_sha256": _sha256(belief_path),
                 "call_audit": {
                     "gameplay_fallback_count": 0,
@@ -148,6 +149,7 @@ def canonical_belief_batch_factory():
             "total_gameplay_fallback_count": 0,
             "total_missing_pre_belief_snapshot_count": 0,
             "total_label_snapshot_failure_count": 0,
+            "total_speech_annotation_error_count": 0,
             "plan_digest": plan["plan_digest"],
             "planned_game_count": len(game_ids),
             "completed_game_count": len(game_ids),
