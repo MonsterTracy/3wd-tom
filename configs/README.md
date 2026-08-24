@@ -6,8 +6,9 @@ OpenAI-compatible service on `127.0.0.1:8000`; the repository does not start or
 download that model.
 
 - `twd_tom_server_qwen35_9b.yaml`: three-game pilot with seeds 4101--4103.
-- `twd_tom_server_qwen35_9b_canonical_50.yaml`: 50-game canonical collection
-  with seeds 4201--4250 and a frozen 40/5/5 game-level split declaration.
+- `twd_tom_server_qwen35_9b_canonical_50.yaml`: a predeclared 60-seed pool
+  (4201--4260) that stops after 50 successful canonical games and uses a
+  frozen 40/5/5 game-level split declaration.
 
 Use these profiles through the explicit-stage pipeline. The collector
 consumes and enforces every `pipeline.collection` field: the CLI seed range and

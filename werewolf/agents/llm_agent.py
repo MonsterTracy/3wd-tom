@@ -840,7 +840,12 @@ _SPEAKER_SELF_REFERENCE = re.compile(
     r"|(?<!他)(?<!她)(?<!它)(?<!你)(?<!您)"
     r"(?<!他们)(?<!她们)(?<!它们)(?<!你们)(?<!您们)自己"
 )
-_LATIN_TEXT = re.compile(r"[A-Za-z]+")
+_CANONICAL_DAY_PHASE = re.compile(r"(?P<day>[0-9]+)_day_")
+_EXPLICIT_DAY_REFERENCE = re.compile(
+    r"(?<![A-Za-z])day\s*(?P<english>[0-9]+)"
+    r"|第\s*(?P<chinese>[0-9]+|[一二三四五六七八九])\s*天",
+    re.IGNORECASE,
+)
 
 
 def _extract_explicit_player_references(content, *, speaker_id, context):
@@ -884,13 +889,33 @@ def _extract_explicit_player_references(content, *, speaker_id, context):
     return referenced_players
 
 
+def _validate_current_day_references(content, *, phase, context):
+    if not isinstance(phase, str):
+        return
+    phase_match = _CANONICAL_DAY_PHASE.search(phase)
+    if phase_match is None:
+        return
+    current_day = int(phase_match.group("day"))
+    for match in _EXPLICIT_DAY_REFERENCE.finditer(content):
+        value = match.group("english") or match.group("chinese")
+        referenced_day = (
+            int(value)
+            if value.isdigit()
+            else _CHINESE_PLAYER_NUMBERS[value]
+        )
+        if referenced_day != current_day:
+            raise GameplaySpeechQualityError(
+                "gameplay public speech references day "
+                f"{referenced_day} but current day is {current_day} ({context})"
+            )
+
+
 def validate_gameplay_public_speech(
     content,
     *,
     finish_reason=None,
     player_id=None,
     phase=None,
-    strict_chinese=False,
     required_player_ids=(),
 ):
     """Validate only high-confidence gameplay speech failures."""
@@ -910,16 +935,11 @@ def validate_gameplay_public_speech(
         speaker_id=player_id,
         context=context,
     )
-    if not isinstance(strict_chinese, bool):
-        raise TypeError("strict_chinese must be boolean")
-    if strict_chinese:
-        residual_text = _CANONICAL_ENGLISH_PLAYER_REFERENCE.sub("", content)
-        latin_match = _LATIN_TEXT.search(residual_text)
-        if latin_match is not None:
-            raise GameplaySpeechQualityError(
-                "non-player Latin text in strict Chinese gameplay speech: "
-                f"{latin_match.group(0)!r} ({context})"
-            )
+    _validate_current_day_references(
+        content,
+        phase=phase,
+        context=context,
+    )
 
     if isinstance(required_player_ids, (str, bytes)):
         raise TypeError("required_player_ids must be a player sequence")

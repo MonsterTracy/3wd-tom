@@ -31,6 +31,9 @@ from script.twd_tom.replay_canonical_trajectory import (
 )
 from werewolf.backends import load_named_backends
 from werewolf.agents.gpt_agent import GAMEPLAY_GENERATION_MAX_ATTEMPTS
+from werewolf.agents.prompt_template_v0 import (
+    PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION,
+)
 from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
 from werewolf.models.twd_tom.belief_snapshot import (
     BeliefSnapshotCollectionError,
@@ -79,17 +82,20 @@ from werewolf.trajectory import (
 )
 
 
-BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v7"
+BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v8"
 GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v7"
-BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v7"
-BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v3"
+BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v8"
+BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v4"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
 BACKEND_SDK_MAX_RETRIES = 0
 CANONICAL_COLLECTION_MODE = "canonical"
 PILOT_COLLECTION_MODE = "pilot"
 COLLECTION_MODES = (CANONICAL_COLLECTION_MODE, PILOT_COLLECTION_MODE)
-STOP_ON_FIRST_FAILURE = True
+STOP_ON_FIRST_FAILURE = False
+CONTINUE_ON_GAME_FAILURE = True
+RESUME_SUPPORTED = True
+RESUME_REQUIRES_EXACT_PLAN = True
 RERUN_ON_FAILURE = False
 REPLACEMENT_SEED_ON_FAILURE = False
 SPEECH_PARSER_RETRY_POLICY = "full_response_strict_validation_feedback_v1"
@@ -183,6 +189,12 @@ _FORBIDDEN_BELIEF_ARTIFACT_KEYS = frozenset(
 def _positive_integer(value: Any, *, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _nonnegative_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{field_name} must be a non-negative integer")
     return value
 
 
@@ -280,6 +292,11 @@ def validate_canonical_belief_batch(
     )
     if summary.get("plan_digest") != plan_digest:
         raise ValueError("canonical batch summary does not match plan")
+    for field_name in ("batch_code_commit", "run_id"):
+        if summary.get(field_name) != plan.get(field_name):
+            raise ValueError(
+                f"canonical batch summary {field_name} does not match plan"
+            )
     if summary.get("collection_mode") != CANONICAL_COLLECTION_MODE:
         raise ValueError("canonical batch summary is not in canonical mode")
     if summary.get("canonical_eligible") is not True:
@@ -297,14 +314,87 @@ def validate_canonical_belief_batch(
         summary.get("planned_game_count"),
         field_name="planned_game_count",
     )
+    target_count = _positive_integer(
+        summary.get("target_game_count"),
+        field_name="target_game_count",
+    )
     completed_count = _positive_integer(
         summary.get("completed_game_count"),
         field_name="completed_game_count",
     )
-    if completed_count != planned_count:
-        raise ValueError("canonical batch is not complete")
+    failed_count = _nonnegative_integer(
+        summary.get("failed_game_count"),
+        field_name="failed_game_count",
+    )
+    attempted_count = _positive_integer(
+        summary.get("attempted_game_count"),
+        field_name="attempted_game_count",
+    )
+    if target_count > planned_count:
+        raise ValueError("canonical batch target exceeds its seed plan")
+    if completed_count != target_count or summary.get("target_reached") is not True:
+        raise ValueError("canonical batch did not reach its successful-game target")
+    if attempted_count != completed_count + failed_count:
+        raise ValueError("canonical batch attempted-game count mismatch")
     if plan.get("planned_game_count") != planned_count:
         raise ValueError("canonical batch plan and summary game counts differ")
+    if plan.get("target_game_count") != target_count:
+        raise ValueError("canonical batch plan and summary targets differ")
+
+    planned_seeds = plan.get("seeds")
+    if (
+        not isinstance(planned_seeds, list)
+        or len(planned_seeds) != planned_count
+        or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in planned_seeds)
+        or len(set(planned_seeds)) != planned_count
+    ):
+        raise ValueError("canonical batch plan has invalid seeds")
+    if summary.get("seeds") != planned_seeds:
+        raise ValueError("canonical batch summary seed plan mismatch")
+
+    completed_seeds = summary.get("completed_seeds")
+    failed_seeds = summary.get("failed_seeds")
+    attempted_seeds = summary.get("attempted_seeds")
+    unattempted_seeds = summary.get("unattempted_seeds")
+    seed_lists = {
+        "completed_seeds": (completed_seeds, completed_count),
+        "failed_seeds": (failed_seeds, failed_count),
+        "attempted_seeds": (attempted_seeds, attempted_count),
+        "unattempted_seeds": (
+            unattempted_seeds,
+            planned_count - attempted_count,
+        ),
+    }
+    for field_name, (values, expected_count) in seed_lists.items():
+        if (
+            not isinstance(values, list)
+            or len(values) != expected_count
+            or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in values)
+            or len(set(values)) != len(values)
+        ):
+            raise ValueError(f"canonical batch {field_name} is invalid")
+    completed_seed_set = set(completed_seeds)
+    failed_seed_set = set(failed_seeds)
+    unattempted_seed_set = set(unattempted_seeds)
+    if completed_seed_set & failed_seed_set:
+        raise ValueError("canonical batch has both success and failure for one seed")
+    if (completed_seed_set | failed_seed_set) & unattempted_seed_set:
+        raise ValueError("canonical batch attempted/unattempted seed sets overlap")
+    if completed_seed_set | failed_seed_set | unattempted_seed_set != set(planned_seeds):
+        raise ValueError("canonical batch seed outcomes do not partition the plan")
+    expected_attempted = [
+        seed for seed in planned_seeds if seed in completed_seed_set | failed_seed_set
+    ]
+    if attempted_seeds != expected_attempted:
+        raise ValueError("canonical batch attempted seeds are not in plan order")
+    if completed_seeds != [seed for seed in planned_seeds if seed in completed_seed_set]:
+        raise ValueError("canonical batch completed seeds are not in plan order")
+    if failed_seeds != [seed for seed in planned_seeds if seed in failed_seed_set]:
+        raise ValueError("canonical batch failed seeds are not in plan order")
+    if unattempted_seeds != [
+        seed for seed in planned_seeds if seed in unattempted_seed_set
+    ]:
+        raise ValueError("canonical batch unattempted seeds are not in plan order")
 
     game_ids = summary.get("game_ids")
     if not isinstance(game_ids, list) or len(game_ids) != completed_count:
@@ -319,6 +409,10 @@ def validate_canonical_belief_batch(
         or set(summary_digests) != set(game_ids)
     ):
         raise ValueError("canonical batch game summary digest set mismatch")
+
+    failure_digests = summary.get("failure_digests")
+    if not isinstance(failure_digests, Mapping) or len(failure_digests) != failed_count:
+        raise ValueError("canonical batch failure digest count mismatch")
 
     games_root = root / "games"
     if not games_root.is_dir():
@@ -351,6 +445,13 @@ def validate_canonical_belief_batch(
             raise ValueError(f"canonical game is not in canonical mode: {game_id}")
         if game_summary.get("canonical_eligible") is not True:
             raise ValueError(f"canonical game is not canonical-eligible: {game_id}")
+        environment_seed = game_summary.get("environment_seed")
+        if environment_seed not in completed_seed_set:
+            raise ValueError(f"canonical game has unplanned completed seed: {game_id}")
+        seed_position = planned_seeds.index(environment_seed) + 1
+        expected_directory_name = f"game_{seed_position:04d}_seed_{environment_seed}"
+        if game_dir.name != expected_directory_name:
+            raise ValueError(f"canonical game directory/seed mismatch: {game_id}")
         call_audit = game_summary.get("call_audit")
         if not isinstance(call_audit, Mapping):
             raise ValueError(f"canonical game has no call audit: {game_id}")
@@ -396,6 +497,43 @@ def validate_canonical_belief_batch(
     if summary.get("total_belief_report_count") != total_report_count:
         raise ValueError("canonical batch belief report total mismatch")
 
+    failures_root = root / "failures"
+    failure_directories = (
+        sorted(path for path in failures_root.iterdir() if path.is_dir())
+        if failures_root.is_dir()
+        else []
+    )
+    if len(failure_directories) != failed_count:
+        raise ValueError("canonical failed-game directory count mismatch")
+    verified_failure_ids: set[str] = set()
+    run_id = plan.get("run_id")
+    commit = plan.get("batch_code_commit")
+    if not isinstance(run_id, str) or not isinstance(commit, str):
+        raise ValueError("canonical batch plan has invalid provenance")
+    for failure_dir in failure_directories:
+        failure = _load_json_object(failure_dir / "failure.json")
+        failed_seed = failure.get("failed_seed")
+        if failed_seed not in failed_seed_set:
+            raise ValueError("canonical failure has unplanned failed seed")
+        seed_position = planned_seeds.index(failed_seed) + 1
+        expected_directory_name = f"game_{seed_position:04d}_seed_{failed_seed}"
+        expected_game_id = _game_id(run_id, seed_position, failed_seed)
+        if failure_dir.name != expected_directory_name:
+            raise ValueError("canonical failure directory/seed mismatch")
+        failure = _load_failure_record(
+            failure_dir / "failure.json",
+            run_id=run_id,
+            commit=commit,
+            collection_mode=CANONICAL_COLLECTION_MODE,
+            expected_seed=failed_seed,
+            expected_game_id=expected_game_id,
+        )
+        if failure_digests.get(expected_game_id) != failure["failure_digest"]:
+            raise ValueError("canonical failed-game digest mismatch")
+        verified_failure_ids.add(expected_game_id)
+    if verified_failure_ids != set(failure_digests):
+        raise ValueError("canonical failure directories do not match batch summary")
+
     return {
         "canonical_root": str(root),
         "plan_digest": plan_digest,
@@ -403,6 +541,7 @@ def validate_canonical_belief_batch(
         "batch_summary_sha256": _sha256(summary_path),
         "game_ids": list(game_ids),
         "games": [verified_by_id[game_id] for game_id in game_ids],
+        "failed_seeds": list(failed_seeds),
     }
 
 
@@ -550,6 +689,9 @@ def _pipeline_collection_contract(
         "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
         "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
         "speech_parser_prompt_version": SPEECH_PARSER_PROMPT_VERSION,
+        "public_speech_realization_prompt_version": (
+            PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION
+        ),
         "raw_schema_version": SAMPLE_SCHEMA_VERSION,
         "projected_schema_version": PROJECTED_SCHEMA_VERSION,
         "projection_version": TARGET_CONVERSION,
@@ -593,8 +735,18 @@ def _pipeline_collection_contract(
             "CLI seed range/game_count must exactly match pipeline.collection"
         )
 
+    target_game_count = _positive_integer(
+        collection.get("target_game_count"),
+        field_name="pipeline.collection.target_game_count",
+    )
+    if target_game_count > configured_game_count:
+        raise ValueError(
+            "pipeline.collection.target_game_count cannot exceed game_count"
+        )
+
     contract = {
         "game_count": configured_game_count,
+        "target_game_count": target_game_count,
         "seeds": configured_seeds,
         "max_gameplay_calls_per_game": _positive_integer(
             collection.get("max_gameplay_calls_per_game"),
@@ -1299,10 +1451,17 @@ def _batch_plan(
         "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
         "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
         "speech_parser_prompt_version": SPEECH_PARSER_PROMPT_VERSION,
+        "public_speech_realization_prompt_version": (
+            PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION
+        ),
         "config_sha256": config_sha256,
         "normalized_runtime_config_digest": normalized_runtime_config_digest,
         "seeds": list(seeds),
         "planned_game_count": len(seeds),
+        "target_game_count": collection_contract["target_game_count"],
+        "predeclared_reserve_seed_count": (
+            len(seeds) - collection_contract["target_game_count"]
+        ),
         "canonical_runtime_builder": "run_random.build_runtime",
         "canonical_game_driver": "run_random.eval",
         "canonical_replay_validator": (
@@ -1328,6 +1487,9 @@ def _batch_plan(
             "canonical_fail_closed_pilot_skip_pre_and_no_commitment"
         ),
         "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
+        "continue_on_game_failure": CONTINUE_ON_GAME_FAILURE,
+        "resume_supported": RESUME_SUPPORTED,
+        "resume_requires_exact_plan": RESUME_REQUIRES_EXACT_PLAN,
         "rerun_on_failure": RERUN_ON_FAILURE,
         "replacement_seed_on_failure": REPLACEMENT_SEED_ON_FAILURE,
     }
@@ -1359,12 +1521,208 @@ def _failure_record(
         "exception_message": sanitize_exception_message(exception),
         "completed_game_count": len(completed_games),
         "completed_game_ids": [game["game_id"] for game in completed_games],
-        "stop_on_first_failure": True,
-        "rerun_on_failure": False,
-        "replacement_seed_on_failure": False,
+        "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
+        "continue_on_game_failure": CONTINUE_ON_GAME_FAILURE,
+        "rerun_on_failure": RERUN_ON_FAILURE,
+        "replacement_seed_on_failure": REPLACEMENT_SEED_ON_FAILURE,
     }
     record["failure_digest"] = canonical_digest(record)
     return record
+
+
+def _load_failure_record(
+    path: Path,
+    *,
+    run_id: str,
+    commit: str,
+    collection_mode: str,
+    expected_seed: int,
+    expected_game_id: str,
+) -> dict[str, Any]:
+    failure = _load_json_object(path)
+    if failure.get("schema_version") != BATCH_FAILURE_SCHEMA_VERSION:
+        raise ValueError(f"game failure schema version mismatch: {path}")
+    _validate_embedded_digest(
+        failure,
+        digest_field="failure_digest",
+        artifact_name=f"game failure {expected_game_id}",
+    )
+    expected = {
+        "batch_code_commit": commit,
+        "run_id": run_id,
+        "collection_mode": collection_mode,
+        "failed_seed": expected_seed,
+        "failed_game_id": expected_game_id,
+    }
+    mismatches = {
+        field: (failure.get(field), value)
+        for field, value in expected.items()
+        if failure.get(field) != value
+    }
+    if mismatches:
+        raise ValueError(
+            f"game failure provenance mismatch: {expected_game_id}; "
+            f"mismatches={mismatches}"
+        )
+    return failure
+
+
+def _load_completed_game_summary(
+    game_dir: Path,
+    *,
+    run_id: str,
+    commit: str,
+    collection_mode: str,
+    expected_seed: int,
+    expected_game_id: str,
+) -> dict[str, Any]:
+    summary = _load_json_object(game_dir / "summary.json")
+    if summary.get("schema_version") != GAME_SUMMARY_SCHEMA_VERSION:
+        raise ValueError(f"game summary schema version mismatch: {expected_game_id}")
+    _validate_embedded_digest(
+        summary,
+        digest_field="summary_digest",
+        artifact_name=f"game summary {expected_game_id}",
+    )
+    expected = {
+        "game_id": expected_game_id,
+        "run_id": run_id,
+        "collection_mode": collection_mode,
+        "environment_seed": expected_seed,
+    }
+    mismatches = {
+        field: (summary.get(field), value)
+        for field, value in expected.items()
+        if summary.get(field) != value
+    }
+    if mismatches:
+        raise ValueError(
+            f"completed game provenance mismatch: {expected_game_id}; "
+            f"mismatches={mismatches}"
+        )
+    trajectory = _load_json_object(game_dir / "trajectory.json")
+    if trajectory.get("source_commit") != commit:
+        raise ValueError(
+            f"completed game source commit mismatch: {expected_game_id}"
+        )
+    belief_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
+    if summary.get("belief_snapshots_sha256") != _sha256(belief_path):
+        raise ValueError(
+            f"completed game belief SHA-256 mismatch: {expected_game_id}"
+        )
+    return summary
+
+
+def _load_resume_state(
+    destination: Path,
+    *,
+    plan: Mapping[str, Any],
+    run_id: str,
+    commit: str,
+    collection_mode: str,
+    seeds: Sequence[int],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Load immutable successes and failures; quarantine interrupted games."""
+
+    stored_plan = _load_json_object(destination / "plan.json")
+    if stored_plan != dict(plan):
+        raise ValueError(
+            "resume requires the exact same commit, config, run_id, mode, and seed plan"
+        )
+    if (destination / "batch_failure.json").exists():
+        raise ValueError("cannot resume a batch-level terminal failure")
+    if (destination / "summary.json").exists():
+        summary = _load_json_object(destination / "summary.json")
+        _validate_embedded_digest(
+            summary,
+            digest_field="summary_digest",
+            artifact_name="existing batch summary",
+        )
+        raise FileExistsError("batch already has a completed summary")
+
+    games_root = destination / "games"
+    failures_root = destination / "failures"
+    planned_names = {
+        f"game_{number:04d}_seed_{seed}"
+        for number, seed in enumerate(seeds, start=1)
+    }
+    for root in (games_root, failures_root):
+        if root.is_dir():
+            unexpected = {
+                path.name
+                for path in root.iterdir()
+                if path.is_dir() and path.name not in planned_names
+            }
+            if unexpected:
+                raise ValueError(
+                    f"resume found unplanned game directories: {sorted(unexpected)}"
+                )
+
+    completed_games: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for game_number, seed in enumerate(seeds, start=1):
+        directory_name = f"game_{game_number:04d}_seed_{seed}"
+        game_id = _game_id(run_id, game_number, seed)
+        game_dir = games_root / directory_name
+        failure_dir = failures_root / directory_name
+        if game_dir.exists() and failure_dir.exists():
+            raise ValueError(f"resume found duplicate game outcome: {game_id}")
+        if failure_dir.exists():
+            failures.append(
+                _load_failure_record(
+                    failure_dir / "failure.json",
+                    run_id=run_id,
+                    commit=commit,
+                    collection_mode=collection_mode,
+                    expected_seed=seed,
+                    expected_game_id=game_id,
+                )
+            )
+            continue
+        if not game_dir.exists():
+            continue
+        if (game_dir / "summary.json").is_file():
+            completed_games.append(
+                _load_completed_game_summary(
+                    game_dir,
+                    run_id=run_id,
+                    commit=commit,
+                    collection_mode=collection_mode,
+                    expected_seed=seed,
+                    expected_game_id=game_id,
+                )
+            )
+            continue
+
+        failure_path = game_dir / "failure.json"
+        if failure_path.is_file():
+            failure = _load_failure_record(
+                failure_path,
+                run_id=run_id,
+                commit=commit,
+                collection_mode=collection_mode,
+                expected_seed=seed,
+                expected_game_id=game_id,
+            )
+        else:
+            failure = _failure_record(
+                run_id=run_id,
+                commit=commit,
+                failed_seed=seed,
+                failed_game_id=game_id,
+                failure_stage="interrupted_previous_process",
+                exception=InterruptedError(
+                    "previous collection process ended before game publication"
+                ),
+                completed_games=completed_games,
+                collection_mode=collection_mode,
+            )
+            _write_json_new(failure_path, failure)
+        failures_root.mkdir(parents=True, exist_ok=True)
+        game_dir.rename(failure_dir)
+        failures.append(failure)
+
+    return completed_games, failures
 
 
 def collect_canonical_trajectory_batch(
@@ -1376,6 +1734,7 @@ def collect_canonical_trajectory_batch(
     output_root: str | Path,
     repo_root: Path = REPO_ROOT,
     collection_mode: str = CANONICAL_COLLECTION_MODE,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run one frozen Classic-7 A/C0 canonical or diagnostic pilot batch."""
 
@@ -1387,14 +1746,18 @@ def collect_canonical_trajectory_batch(
     if isinstance(seed_start, bool) or not isinstance(seed_start, int):
         raise ValueError("seed_start must be an integer")
     game_count = _positive_integer(game_count, field_name="game_count")
+    if not isinstance(resume, bool):
+        raise TypeError("resume must be boolean")
     seeds = list(range(seed_start, seed_start + game_count))
 
     config_path = Path(config_path).resolve()
     if not config_path.is_file():
         raise FileNotFoundError(f"runtime config not found: {config_path}")
     destination = Path(output_root).resolve()
-    if destination.exists():
+    if destination.exists() and not resume:
         raise FileExistsError(f"output root already exists: {destination}")
+    if not destination.exists() and resume:
+        raise FileNotFoundError(f"resume output root not found: {destination}")
 
     provenance = _read_code_provenance(Path(repo_root))
     parsed_yaml = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -1408,7 +1771,6 @@ def collect_canonical_trajectory_batch(
     )
     normalized_digest = canonical_digest(normalized)
 
-    destination.mkdir(parents=True)
     plan = _batch_plan(
         run_id=run_id,
         commit=provenance["batch_code_commit"],
@@ -1418,9 +1780,22 @@ def collect_canonical_trajectory_batch(
         collection_contract=collection_contract,
         collection_mode=collection_mode,
     )
-    _write_json_new(destination / "plan.json", plan)
+    if destination.exists():
+        completed_games, failed_games = _load_resume_state(
+            destination,
+            plan=plan,
+            run_id=run_id,
+            commit=provenance["batch_code_commit"],
+            collection_mode=collection_mode,
+            seeds=seeds,
+        )
+    else:
+        destination.mkdir(parents=True)
+        _write_json_new(destination / "plan.json", plan)
+        completed_games = []
+        failed_games = []
 
-    completed_games: list[dict[str, Any]] = []
+    target_game_count = collection_contract["target_game_count"]
     try:
         try:
             backend_map = load_named_backends(
@@ -1428,7 +1803,7 @@ def collect_canonical_trajectory_batch(
                 env_file=Path(repo_root).resolve() / ".env",
                 max_retries=BACKEND_SDK_MAX_RETRIES,
             )
-        except BaseException as exc:
+        except Exception as exc:
             failure = _failure_record(
                 run_id=run_id,
                 commit=provenance["batch_code_commit"],
@@ -1442,9 +1817,19 @@ def collect_canonical_trajectory_batch(
             _write_json_new(destination / "batch_failure.json", failure)
             raise
 
+        processed_seeds = {
+            game["environment_seed"] for game in completed_games
+        } | {
+            failure["failed_seed"] for failure in failed_games
+        }
         for game_number, seed in enumerate(seeds, start=1):
+            if len(completed_games) >= target_game_count:
+                break
+            if seed in processed_seeds:
+                continue
             game_id = _game_id(run_id, game_number, seed)
-            game_dir = destination / "games" / f"game_{game_number:04d}_seed_{seed}"
+            directory_name = f"game_{game_number:04d}_seed_{seed}"
+            game_dir = destination / "games" / directory_name
             log_dir = game_dir / "game_logs"
             game_dir.mkdir(parents=True)
             log_dir.mkdir()
@@ -1579,7 +1964,8 @@ def collect_canonical_trajectory_batch(
                     collection_mode=collection_mode,
                 )
                 completed_games.append(game_summary)
-            except BaseException as exc:
+                processed_seeds.add(seed)
+            except Exception as exc:
                 if not call_audit_path.exists():
                     _write_json_new(call_audit_path, call_audit.snapshot())
                 failure_stage = (
@@ -1597,9 +1983,34 @@ def collect_canonical_trajectory_batch(
                     completed_games=completed_games,
                     collection_mode=collection_mode,
                 )
-                _write_json_new(destination / "batch_failure.json", failure)
-                raise
+                _write_json_new(game_dir / "failure.json", failure)
+                failures_root = destination / "failures"
+                failures_root.mkdir(parents=True, exist_ok=True)
+                failure_dir = failures_root / directory_name
+                if failure_dir.exists():
+                    raise FileExistsError(
+                        f"failure output already exists: {failure_dir}"
+                    )
+                game_dir.rename(failure_dir)
+                failed_games.append(failure)
+                processed_seeds.add(seed)
+                continue
 
+        completed_seeds = [game["environment_seed"] for game in completed_games]
+        failed_seeds = [failure["failed_seed"] for failure in failed_games]
+        completed_seed_set = set(completed_seeds)
+        failed_seed_set = set(failed_seeds)
+        attempted_seeds = [
+            seed
+            for seed in seeds
+            if seed in completed_seed_set or seed in failed_seed_set
+        ]
+        unattempted_seeds = [
+            seed
+            for seed in seeds
+            if seed not in completed_seed_set and seed not in failed_seed_set
+        ]
+        target_reached = len(completed_games) == target_game_count
         summary = {
             "schema_version": BATCH_SUMMARY_SCHEMA_VERSION,
             "batch_code_commit": provenance["batch_code_commit"],
@@ -1607,6 +2018,7 @@ def collect_canonical_trajectory_batch(
             "collection_mode": collection_mode,
             "canonical_eligible": (
                 collection_mode == CANONICAL_COLLECTION_MODE
+                and target_reached
                 and all(
                     game["call_audit"]["gameplay_fallback_count"] == 0
                     and game["belief_snapshot_complete"] is True
@@ -1616,11 +2028,24 @@ def collect_canonical_trajectory_batch(
             ),
             "plan_digest": plan["plan_digest"],
             "planned_game_count": game_count,
+            "target_game_count": target_game_count,
+            "predeclared_reserve_seed_count": game_count - target_game_count,
+            "attempted_game_count": len(attempted_seeds),
             "completed_game_count": len(completed_games),
+            "failed_game_count": len(failed_games),
+            "target_reached": target_reached,
             "seeds": seeds,
+            "attempted_seeds": attempted_seeds,
+            "completed_seeds": completed_seeds,
+            "failed_seeds": failed_seeds,
+            "unattempted_seeds": unattempted_seeds,
             "game_ids": [game["game_id"] for game in completed_games],
             "game_summary_digests": {
                 game["game_id"]: game["summary_digest"] for game in completed_games
+            },
+            "failure_digests": {
+                failure["failed_game_id"]: failure["failure_digest"]
+                for failure in failed_games
             },
             "winner_counts": {
                 "Werewolf": sum(game["winner"] == "Werewolf" for game in completed_games),
@@ -1712,14 +2137,20 @@ def collect_canonical_trajectory_batch(
             ),
             "speech_parser_retry_policy": SPEECH_PARSER_RETRY_POLICY,
             "speech_parser_failure_policy": SPEECH_PARSER_FAILURE_POLICY,
+            "public_speech_realization_prompt_version": (
+                PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION
+            ),
             "label_generation_max_attempts": LABEL_GENERATION_MAX_ATTEMPTS,
             "gameplay_fallback_policy": "pilot_only_deterministic_legal_action",
             "label_failure_policy": (
                 "canonical_fail_closed_pilot_skip_pre_and_no_commitment"
             ),
-            "stop_on_first_failure": True,
-            "rerun_on_failure": False,
-            "replacement_seed_on_failure": False,
+            "stop_on_first_failure": STOP_ON_FIRST_FAILURE,
+            "continue_on_game_failure": CONTINUE_ON_GAME_FAILURE,
+            "resume_supported": RESUME_SUPPORTED,
+            "resume_requires_exact_plan": RESUME_REQUIRES_EXACT_PLAN,
+            "rerun_on_failure": RERUN_ON_FAILURE,
+            "replacement_seed_on_failure": REPLACEMENT_SEED_ON_FAILURE,
         }
         summary["summary_digest"] = canonical_digest(summary)
         _write_json_new(destination / "summary.json", summary)
@@ -1738,6 +2169,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--game-count", required=True, type=int)
     parser.add_argument("--output-root", required=True)
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an incomplete batch only when its frozen plan matches exactly.",
+    )
+    parser.add_argument(
         "--mode",
         dest="collection_mode",
         choices=COLLECTION_MODES,
@@ -1755,7 +2191,17 @@ def main() -> int:
         game_count=args.game_count,
         output_root=args.output_root,
         collection_mode=args.collection_mode,
+        resume=args.resume,
     )
+    if not summary["target_reached"]:
+        print(
+            "A_C0_BATCH_INCOMPLETE "
+            f"mode={summary['collection_mode']} "
+            f"run_id={summary['run_id']} "
+            f"games={summary['completed_game_count']} "
+            f"target={summary['target_game_count']}"
+        )
+        return 1
     print(
         "A_C0_BATCH_PASS "
         f"mode={summary['collection_mode']} "

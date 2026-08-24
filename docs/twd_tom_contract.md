@@ -17,7 +17,8 @@
 - public event：`classic7_public_event_sequence_v4`；
 - speech annotation：`classic7_speech_annotation_v3`；
 - speech action ontology：`classic7_speech_action_v1`；
-- speech parser prompt：`classic7_speech_parser_v3`。
+- speech parser prompt：`classic7_speech_parser_v3`；
+- public speech realization prompt：`classic7_public_speech_realization_prompt_v1`。
 
 旧版本不做兼容读取或隐式迁移；需要重新采集。
 
@@ -47,7 +48,7 @@ S ∩ F = ∅
 
 纯解析或语义失败时，系统保持同一个冻结 base prompt、observation 和 hard knowledge，只在下一次请求末尾附加上一次本地验证错误，并重新生成完整 JSON，最多 3 次；接受首个完全合法的原始集合。反馈不包含修复后的候选响应，也不改变 hard knowledge。每次尝试的原始响应、状态和错误写入 `call_audit.json`。这属于可审计的 rejection generation，不会修复响应、删除非法成员、强制补入 `R`、补猜或概率化。底层 `BackendError` 另有最多 3 次显式、计入预算的传输尝试；纯 backend 连续失败不会再启动语义重生成。
 
-在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个三次生成后仍非 `ok` 的报告，不再请求其余 observer，batch 随即停止。失败 snapshot 不写入 raw JSONL；失败目录、逐次响应所在的 `call_audit.json` 和包含异常类型与消息的 `batch_failure.json` 保留，不能用 replacement seed 补位。
+在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个三次生成后仍非 `ok` 的报告，不再请求其余 observer，当前局立即失败。失败 snapshot 不写入 raw JSONL；该局目录及逐次响应所在的 `call_audit.json` 移入 `failures/`，并保存带 digest 的 `failure.json`。collector 随后继续下一个预声明种子；这不是动态 replacement seed，失败种子也不会被重跑。
 
 pilot 模式下，同样的 label failure 会跳过整条 PRE snapshot，而不是保存部分 observer 或伪造失败行；当前 speaker 随后直接提交固定 `no_commitment` 发言使游戏继续。per-game summary 记录缺失 PRE step，call audit 记录 label failure 与 fallback。pilot 始终 `canonical_eligible=false`，其不完整标签只能用于诊断，不能训练或物化。
 
@@ -75,15 +76,15 @@ collector 返回 sample 后，从该 sample 中提取当前 speaker 的同一行
 
 speaker report 非 `ok`、边界不匹配、agent 不支持专用入口或非 strict gameplay 时，必须在公开发言生成前失败。非 speaker 的报告不进入其行动上下文。
 
-day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过独立的自然语言 realization 调用生成 1–4 句中文公开原文。该原文进入 immutable `public_speech`；随后 speech parser 只接收公开原文、speaker、day 和 phase，解析到独立的 `speech_annotations.jsonl`。生成器 intent 不能直接成为 canonical annotation 或模型输入。所有身份都禁止 cognition 候选生成 `point_as_werewolf(observer)`；公开原文若明确自称狼人，parser 仍应忠实记录，因为 parser 不做真值过滤。
+day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过独立的自然语言 realization 调用生成 1–4 句中文为主的公开原文；自然出现的常见英文词允许保留。该原文进入 immutable `public_speech`；随后 speech parser 只接收公开原文、speaker、day 和 phase，解析到独立的 `speech_annotations.jsonl`。生成器 intent 不能直接成为 canonical annotation 或模型输入。所有身份都禁止 cognition 候选生成 `point_as_werewolf(observer)`；公开原文若明确自称狼人，parser 仍应忠实记录，因为 parser 不做真值过滤。
 
-strict realization 会拒绝除 canonical `playerN` 外的拉丁文本及遗漏冻结具体目标的原文，并进入已有三次 realization 生成。speech parser 对同一原文最多生成三份完整响应，逐次保存原始响应与错误；不删行、不部分接受、不猜测目标。canonical 三次失败则拒绝；pilot 保留 `status=error` 后继续，但永不可物化。
+strict realization 会拒绝空白/截断、非法 `playerN`、结构或控制文本泄漏、遗漏冻结具体目标，以及显式把当前 phase 说成其他天数的原文；普通英文不单独构成失败。realization 最多完整生成三次，后一次只追加上一次本地验证错误并保持同一冻结 intent，不修补或部分接收旧原文。speech parser 对同一原文最多生成三份完整响应，逐次保存原始响应与错误；不删行、不部分接受、不猜测目标。canonical 三次失败则拒绝当前局；pilot 保留 `status=error` 后继续，但永不可物化。
 
 模型侧使用 14 类冻结 ontology，其中 `point_as_non_werewolf` 表示泛化的非狼/好人判断，`point_as_villager` 只表示具体村民身份判断，查验非狼使用 `check_as_non_werewolf`。`abstain_intent` 与 `no_commitment` 使用空 target。完整事件、annotation、失败和重解析契约见 `public_speech_event_contract.md`。
 
 ## Canonical materialization
 
-`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受 `collection_mode=canonical`、`canonical_eligible=true`、所有 fallback/label snapshot failure/speech annotation error count 为 0、每个 PRE boundary 都有完整成功 snapshot，且具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链并不存在 `batch_failure.json` 的 canonical batch。`--mode pilot` 产生的批次即使没有实际 fallback 也不能进入物化。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受 `collection_mode=canonical`、成功局数量达到冻结 target、所有成功局 fallback/label snapshot failure/speech annotation error count 为 0、每个 PRE boundary 都有完整成功 snapshot，且具有合法 `plan.json`、成功 `summary.json`、完整 per-game/per-failure digest、seed outcome 分区和 snapshot SHA256 链，并不存在 batch-level `batch_failure.json` 的 canonical batch。预声明池中的失败局保留在 `failures/` 供审计，但永不进入物化。`--mode pilot` 产生的批次即使没有实际 fallback 也不能进入物化。随后按稳定 SHA256 排名将成功 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
 
 物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口先验证上述成功批次摘要链，再验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。物化目录原子生成 `train.jsonl`、`validation.jsonl`、`test.jsonl` 和 `split_manifest.json`；manifest 绑定来源批次摘要、game-level split、输出文件 SHA256 与自身 digest。
 

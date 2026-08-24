@@ -99,7 +99,8 @@ def canonical_belief_batch_factory():
             items.reverse()
         game_summaries = {}
         for index, (game_id, records) in enumerate(items, start=1):
-            game_dir = root / "games" / f"game_{index:04d}"
+            seed = 1000 + index
+            game_dir = root / "games" / f"game_{index:04d}_seed_{seed}"
             game_dir.mkdir(parents=True)
             ordered_records = list(reversed(records)) if reverse else list(records)
             belief_path = game_dir / "belief_snapshots.jsonl"
@@ -115,6 +116,8 @@ def canonical_belief_batch_factory():
                 "collection_mode": "canonical",
                 "canonical_eligible": True,
                 "game_id": game_id,
+                "run_id": "fixture-run",
+                "environment_seed": seed,
                 "belief_snapshot_count": len(records),
                 "belief_report_count": sum(
                     len(record["observer_ids"]) for record in records
@@ -134,16 +137,23 @@ def canonical_belief_batch_factory():
             game_summaries[game_id] = game_summary
 
         game_ids = sorted(game_summaries)
+        planned_seeds = [1000 + index for index in range(1, len(items) + 1)]
         plan = {
             "schema_version": BATCH_PLAN_SCHEMA_VERSION,
+            "batch_code_commit": "a" * 40,
+            "run_id": "fixture-run",
             "collection_mode": "canonical",
             "canonical_eligible": True,
             "planned_game_count": len(game_ids),
+            "target_game_count": len(game_ids),
+            "seeds": planned_seeds,
         }
         plan["plan_digest"] = canonical_digest(plan)
         _write_json(root / "plan.json", plan)
         summary = {
             "schema_version": BATCH_SUMMARY_SCHEMA_VERSION,
+            "batch_code_commit": plan["batch_code_commit"],
+            "run_id": plan["run_id"],
             "collection_mode": "canonical",
             "canonical_eligible": True,
             "total_gameplay_fallback_count": 0,
@@ -152,12 +162,22 @@ def canonical_belief_batch_factory():
             "total_speech_annotation_error_count": 0,
             "plan_digest": plan["plan_digest"],
             "planned_game_count": len(game_ids),
+            "target_game_count": len(game_ids),
+            "attempted_game_count": len(game_ids),
             "completed_game_count": len(game_ids),
+            "failed_game_count": 0,
+            "target_reached": True,
+            "seeds": planned_seeds,
+            "attempted_seeds": planned_seeds,
+            "completed_seeds": planned_seeds,
+            "failed_seeds": [],
+            "unattempted_seeds": [],
             "game_ids": game_ids,
             "game_summary_digests": {
                 game_id: game_summaries[game_id]["summary_digest"]
                 for game_id in game_ids
             },
+            "failure_digests": {},
             "total_belief_snapshot_count": sum(
                 game_summaries[game_id]["belief_snapshot_count"]
                 for game_id in game_ids

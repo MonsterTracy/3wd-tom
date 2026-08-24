@@ -82,7 +82,12 @@ def test_audit_rejects_snapshot_changed_after_game_summary(
     root = tmp_path / "canonical"
     sample = suspicion_sample_factory(game_id="game_1")
     canonical_belief_batch_factory(root, {"game_1": [sample]})
-    belief_path = root / "games" / "game_0001" / "belief_snapshots.jsonl"
+    belief_path = (
+        root
+        / "games"
+        / "game_0001_seed_1001"
+        / "belief_snapshots.jsonl"
+    )
     belief_path.write_text(belief_path.read_text() + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="SHA-256 mismatch"):

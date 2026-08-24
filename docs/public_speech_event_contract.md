@@ -78,13 +78,13 @@ raw_response, error_type, error_message
 合法 PRE private belief
   -> strict day cognition 选择结构化 communication intent
   -> intent 冻结
-  -> 独立 realization 调用生成 1–4 句自然中文
+  -> 独立 realization 调用生成 1–4 句中文为主的自然发言
   -> raw_text 作为 public_speech 提交给环境
   -> 独立 parser 只读取 raw_text + speaker/day/phase
   -> speech_annotations.jsonl
 ```
 
-realization prompt 可以得到冻结 intent 和此前公开历史用于自然衔接，但不能增加新正式命题。strict realization 提交前拒绝除 `player1`–`player7` 外的拉丁文本，并确认每个冻结的具体目标玩家都在原文中明示；失败只重生成 realization。parser 不接收冻结 intent、private belief、真实身份或生成器隐藏 reasoning。canonical annotation 必须来自 parser 实际读到的公开原文。
+realization prompt 可以得到冻结 intent 和此前公开历史用于自然衔接，但不能增加新正式命题。strict realization 提交前拒绝空白/截断、非法玩家引用、结构或控制文本泄漏、遗漏冻结目标，以及与当前 phase 冲突的显式天数；自然出现的常见英文词不单独构成失败。失败只重生成 realization，后续尝试追加上一次本地验证错误并基于同一冻结 intent 生成完整新原文，不修改或拼接旧响应。parser 不接收冻结 intent、private belief、真实身份或生成器隐藏 reasoning。canonical annotation 必须来自 parser 实际读到的公开原文。
 
 ## 6. 模型输入和 memory
 
@@ -100,7 +100,7 @@ realization prompt 可以得到冻结 intent 和此前公开历史用于自然�
 
 realization 遇到截断或确定性质量校验失败时，只重生成 realization，最多 3 次；不会重新生成已经冻结的 day cognition intent。独立 speech parser 也最多生成 3 份完整响应；后一次得到前一次的严格验证错误，但不得修补或部分接受旧响应。每份输出都完整保留在 annotation v3。底层 backend 瞬时异常仍可做最多 3 次显式且计入预算的传输尝试。
 
-`--mode canonical` 在 realization、PRE label 或 speech parser 三次生成仍失败时 fail closed，禁止 fallback action、从 generator intent 回填 annotation 或 replacement seed。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言；PRE label 失败时跳过整条 snapshot；speech parser 失败时保留 `status=error` 和全部 attempts 并继续后续游戏和局数。pilot 中的错误不会被修复或伪造为 action，整批始终非 canonical。
+`--mode canonical` 在 realization、PRE label 或 speech parser 三次生成仍失败时对当前局 fail closed，禁止 fallback action 或从 generator intent 回填 annotation；失败局移入 `failures/`，collector 继续下一个预声明种子。预声明 reserve seed 不是运行时生成的 replacement seed，失败种子不得重跑。`--mode pilot` 可以在 gameplay 生成耗尽后提交确定性的 `no_commitment` 发言；PRE label 失败时跳过整条 snapshot；speech parser 失败时保留 `status=error` 和全部 attempts 并继续后续游戏和局数。pilot 中的错误不会被修复或伪造为 action，整批始终非 canonical。
 
 ## 8. 验收条件
 

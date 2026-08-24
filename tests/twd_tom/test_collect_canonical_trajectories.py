@@ -77,11 +77,15 @@ def runtime_config():
             "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
             "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
             "speech_parser_prompt_version": batch_module.SPEECH_PARSER_PROMPT_VERSION,
+            "public_speech_realization_prompt_version": (
+                batch_module.PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION
+            ),
             "raw_schema_version": batch_module.SAMPLE_SCHEMA_VERSION,
             "projected_schema_version": batch_module.PROJECTED_SCHEMA_VERSION,
             "projection_version": batch_module.TARGET_CONVERSION,
             "collection": {
                 "game_count": 3,
+                "target_game_count": 3,
                 "seeds": [1001, 1002, 1003],
                 "max_gameplay_calls_per_game": 10,
                 "max_belief_calls_per_game": 10,
@@ -114,14 +118,15 @@ def test_canonical_50_server_config_freezes_collection_and_split():
             encoding="utf-8"
         )
     )
-    seeds = list(range(4201, 4251))
+    seeds = list(range(4201, 4261))
 
     contract = batch_module._pipeline_collection_contract(
         config,
         seeds=seeds,
     )
 
-    assert contract["game_count"] == 50
+    assert contract["game_count"] == 60
+    assert contract["target_game_count"] == 50
     assert contract["seeds"] == seeds
     assert config["pipeline"]["split"] == {
         "seed": 42,
@@ -332,6 +337,7 @@ def _install_fake_runtime(
     output_root,
     *,
     fail_seed=None,
+    interrupt_seed=None,
     speech_error=False,
 ):
     calls = {
@@ -387,6 +393,8 @@ def _install_fake_runtime(
         seed = trajectory_recorder._base["environment_seed"]
         calls["game"].append(seed)
         calls["allow_gameplay_fallback"].append(allow_gameplay_fallback)
+        if seed == interrupt_seed:
+            raise KeyboardInterrupt("synthetic interrupted process")
         if seed == fail_seed:
             raise RuntimeError("synthetic gameplay failure")
         winner = "Villager" if seed % 2 else "Werewolf"
@@ -493,6 +501,7 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
     assert plan["batch_code_commit"] == COMMIT
     assert plan["seeds"] == [1001, 1002, 1003]
     assert plan["planned_game_count"] == 3
+    assert plan["target_game_count"] == 3
     assert plan["collection_contract"]["seeds"] == [1001, 1002, 1003]
     assert plan["collectors_enabled"] is True
     assert plan["collection_mode"] == "canonical"
@@ -508,7 +517,10 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         "canonical_fail_closed_pilot_record_error"
     )
     assert plan["label_generation_max_attempts"] == 3
-    assert plan["stop_on_first_failure"] is True
+    assert plan["stop_on_first_failure"] is False
+    assert plan["continue_on_game_failure"] is True
+    assert plan["resume_supported"] is True
+    assert plan["resume_requires_exact_plan"] is True
     assert plan["rerun_on_failure"] is False
     assert plan["replacement_seed_on_failure"] is False
     assert plan["deterministic_replay_required"] is True
@@ -521,6 +533,10 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
 
     assert summary["schema_version"] == batch_module.BATCH_SUMMARY_SCHEMA_VERSION
     assert summary["completed_game_count"] == 3
+    assert summary["target_game_count"] == 3
+    assert summary["attempted_game_count"] == 3
+    assert summary["failed_game_count"] == 0
+    assert summary["unattempted_seeds"] == []
     assert summary["collection_mode"] == "canonical"
     assert summary["canonical_eligible"] is True
     assert summary["total_gameplay_fallback_count"] == 0
@@ -576,44 +592,234 @@ def test_successful_batch_freezes_plan_before_first_game_and_preserves_seed_cont
         assert game_digest == canonical_digest(game_payload)
 
 
-def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch):
+def test_game_failure_is_recorded_and_collection_continues_to_target(
+    tmp_path,
+    monkeypatch,
+):
     config = runtime_config()
     config["pipeline"]["collection"]["seeds"] = [2001, 2002, 2003]
+    config["pipeline"]["collection"]["target_game_count"] = 2
     config_path = _write_config(tmp_path, config)
     output_root = tmp_path / "failure-run"
     calls = _install_fake_runtime(monkeypatch, output_root, fail_seed=2002)
 
-    with pytest.raises(RuntimeError, match="synthetic gameplay failure"):
-        batch_module.collect_canonical_trajectory_batch(
-            config_path=config_path,
-            run_id="failure-run",
-            seed_start=2001,
-            game_count=3,
-            output_root=output_root,
-            repo_root=tmp_path,
-        )
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="failure-run",
+        seed_start=2001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
 
-    assert calls["game"] == [2001, 2002]
-    assert [call["seed"] for call in calls["build"]] == [2001, 2002]
-    assert not (output_root / "games" / "game_0003_seed_2003").exists()
-    assert not (output_root / "summary.json").exists()
-    failure = json.loads((output_root / "batch_failure.json").read_text())
+    assert calls["game"] == [2001, 2002, 2003]
+    assert [call["seed"] for call in calls["build"]] == [2001, 2002, 2003]
+    assert (output_root / "games" / "game_0003_seed_2003").is_dir()
+    assert (output_root / "summary.json").is_file()
+    failure_path = (
+        output_root
+        / "failures"
+        / "game_0002_seed_2002"
+        / "failure.json"
+    )
+    failure = json.loads(failure_path.read_text())
     assert failure["schema_version"] == batch_module.BATCH_FAILURE_SCHEMA_VERSION
     assert failure["failed_seed"] == 2002
     assert failure["failed_game_id"] == "failure-run_game_0002_seed_2002"
     assert failure["failure_stage"] == "gameplay"
     assert failure["exception_message"] == "synthetic gameplay failure"
-    assert failure["completed_game_count"] == 1
-    assert failure["completed_game_ids"] == ["failure-run_game_0001_seed_2001"]
-    assert failure["stop_on_first_failure"] is True
+    assert failure["stop_on_first_failure"] is False
     assert failure["rerun_on_failure"] is False
     assert failure["replacement_seed_on_failure"] is False
     assert (
-        output_root / "games" / "game_0002_seed_2002" / "call_audit.json"
+        output_root / "failures" / "game_0002_seed_2002" / "call_audit.json"
     ).is_file()
     payload = deepcopy(failure)
     digest = payload.pop("failure_digest")
     assert digest == canonical_digest(payload)
+    assert summary["canonical_eligible"] is True
+    assert summary["target_game_count"] == 2
+    assert summary["attempted_game_count"] == 3
+    assert summary["completed_game_count"] == 2
+    assert summary["failed_game_count"] == 1
+    assert summary["completed_seeds"] == [2001, 2003]
+    assert summary["failed_seeds"] == [2002]
+    assert summary["unattempted_seeds"] == []
+    assert summary["failure_digests"] == {
+        "failure-run_game_0002_seed_2002": failure["failure_digest"]
+    }
+    assert not (output_root / "batch_failure.json").exists()
+    verified = batch_module.validate_canonical_belief_batch(output_root)
+    assert verified["failed_seeds"] == [2002]
+
+
+def test_canonical_validator_rejects_tampered_failed_game_record(
+    tmp_path,
+    monkeypatch,
+):
+    config = runtime_config()
+    config["pipeline"]["collection"]["seeds"] = [2001, 2002, 2003]
+    config["pipeline"]["collection"]["target_game_count"] = 2
+    config_path = _write_config(tmp_path, config)
+    output_root = tmp_path / "tampered-failure-run"
+    _install_fake_runtime(monkeypatch, output_root, fail_seed=2002)
+    batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="tampered-failure-run",
+        seed_start=2001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
+
+    failure_path = (
+        output_root
+        / "failures"
+        / "game_0002_seed_2002"
+        / "failure.json"
+    )
+    failure = json.loads(failure_path.read_text())
+    failure["exception_message"] = "tampered"
+    failure_path.write_text(canonical_json(failure) + "\n")
+
+    with pytest.raises(ValueError, match="failure_digest mismatch"):
+        batch_module.validate_canonical_belief_batch(output_root)
+
+
+def test_target_completion_leaves_unused_reserve_seeds(tmp_path, monkeypatch):
+    config = runtime_config()
+    config["pipeline"]["collection"]["target_game_count"] = 2
+    config_path = _write_config(tmp_path, config)
+    output_root = tmp_path / "reserve-run"
+    calls = _install_fake_runtime(monkeypatch, output_root)
+
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="reserve-run",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
+
+    assert calls["game"] == [1001, 1002]
+    assert summary["completed_seeds"] == [1001, 1002]
+    assert summary["failed_seeds"] == []
+    assert summary["unattempted_seeds"] == [1003]
+    assert summary["canonical_eligible"] is True
+
+
+def test_resume_marks_interrupted_attempt_and_skips_processed_seeds(
+    tmp_path,
+    monkeypatch,
+):
+    config = runtime_config()
+    config["pipeline"]["collection"]["game_count"] = 4
+    config["pipeline"]["collection"]["target_game_count"] = 3
+    config["pipeline"]["collection"]["seeds"] = [1001, 1002, 1003, 1004]
+    config_path = _write_config(tmp_path, config)
+    output_root = tmp_path / "resume-run"
+    first_calls = _install_fake_runtime(
+        monkeypatch,
+        output_root,
+        interrupt_seed=1002,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic interrupted process"):
+        batch_module.collect_canonical_trajectory_batch(
+            config_path=config_path,
+            run_id="resume-run",
+            seed_start=1001,
+            game_count=4,
+            output_root=output_root,
+            repo_root=tmp_path,
+        )
+
+    assert first_calls["game"] == [1001, 1002]
+    second_calls = _install_fake_runtime(monkeypatch, output_root)
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="resume-run",
+        seed_start=1001,
+        game_count=4,
+        output_root=output_root,
+        repo_root=tmp_path,
+        resume=True,
+    )
+
+    assert second_calls["game"] == [1003, 1004]
+    assert summary["completed_seeds"] == [1001, 1003, 1004]
+    assert summary["failed_seeds"] == [1002]
+    assert summary["completed_game_count"] == 3
+    assert summary["canonical_eligible"] is True
+    interrupted_failure = json.loads(
+        (
+            output_root
+            / "failures"
+            / "game_0002_seed_1002"
+            / "failure.json"
+        ).read_text()
+    )
+    assert interrupted_failure["failure_stage"] == "interrupted_previous_process"
+    assert interrupted_failure["exception_type"] == "InterruptedError"
+
+
+def test_resume_rejects_any_changed_frozen_plan(tmp_path, monkeypatch):
+    config = runtime_config()
+    config["pipeline"]["collection"]["game_count"] = 4
+    config["pipeline"]["collection"]["target_game_count"] = 3
+    config["pipeline"]["collection"]["seeds"] = [1001, 1002, 1003, 1004]
+    config_path = _write_config(tmp_path, config)
+    output_root = tmp_path / "changed-plan-resume"
+    _install_fake_runtime(monkeypatch, output_root, interrupt_seed=1002)
+
+    with pytest.raises(KeyboardInterrupt):
+        batch_module.collect_canonical_trajectory_batch(
+            config_path=config_path,
+            run_id="changed-plan-resume",
+            seed_start=1001,
+            game_count=4,
+            output_root=output_root,
+            repo_root=tmp_path,
+        )
+
+    changed = deepcopy(config)
+    changed["pipeline"]["collection"]["max_total_calls_per_game"] += 1
+    _write_config(tmp_path, changed)
+    second_calls = _install_fake_runtime(monkeypatch, output_root)
+    with pytest.raises(ValueError, match="exact same commit, config"):
+        batch_module.collect_canonical_trajectory_batch(
+            config_path=config_path,
+            run_id="changed-plan-resume",
+            seed_start=1001,
+            game_count=4,
+            output_root=output_root,
+            repo_root=tmp_path,
+            resume=True,
+        )
+    assert second_calls["game"] == []
+
+
+def test_exhausted_seed_pool_is_explicitly_incomplete(tmp_path, monkeypatch):
+    config_path = _write_config(tmp_path)
+    output_root = tmp_path / "incomplete-run"
+    _install_fake_runtime(monkeypatch, output_root, fail_seed=1002)
+
+    summary = batch_module.collect_canonical_trajectory_batch(
+        config_path=config_path,
+        run_id="incomplete-run",
+        seed_start=1001,
+        game_count=3,
+        output_root=output_root,
+        repo_root=tmp_path,
+    )
+
+    assert summary["completed_game_count"] == 2
+    assert summary["failed_game_count"] == 1
+    assert summary["target_reached"] is False
+    assert summary["canonical_eligible"] is False
+    with pytest.raises(ValueError, match="not canonical-eligible"):
+        batch_module.validate_canonical_belief_batch(output_root)
 
 
 def test_pilot_mode_is_explicitly_noncanonical_and_cannot_materialize(

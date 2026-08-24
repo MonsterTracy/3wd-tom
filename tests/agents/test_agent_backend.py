@@ -30,6 +30,7 @@ from werewolf.agents.llm_agent import (
     vote_response_format,
 )
 from werewolf.agents.prompt_template_v0 import (
+    _PUBLIC_SPEECH_ACTION_LABELS,
     DiscussionAct,
     NO_STANCE,
     STRICT_CLASSIC7_GAME_DESCRIPTION,
@@ -101,16 +102,25 @@ class MetadataBackend:
             )[1].split("\n\n写作约束：", 1)[0]
             acts = []
             for line in intent_block.splitlines():
-                match = re.match(
-                    r"- (?P<action>[a-z_]+)(?:\(player(?P<target>[1-7])\))?:",
-                    line,
+                action = next(
+                    (
+                        action
+                        for action, label in _PUBLIC_SPEECH_ACTION_LABELS.items()
+                        if line.startswith(f"- {label}：")
+                    ),
+                    None,
                 )
-                if match is None:
+                if action is None:
                     continue
-                target = match.group("target")
+                target_match = re.search(r"player(?P<target>[1-7])", line)
+                target = (
+                    target_match.group("target")
+                    if target_match is not None
+                    else None
+                )
                 acts.append(
                     DiscussionAct(
-                        match.group("action"),
+                        action,
                         None if target is None else int(target),
                     )
                 )
@@ -1388,9 +1398,9 @@ class GameplayCognitionTest(unittest.TestCase):
         realization_call = backend.calls[1]
         self.assertNotIn("response_format", realization_call)
         realization_prompt = realization_call["messages"][0]["content"]
-        self.assertIn("当前天数：Day 1", realization_prompt)
+        self.assertIn("当前天数：第1天", realization_prompt)
         self.assertIn(
-            "- oppose(player2): publicly oppose / question player2",
+            "- 公开质疑：公开反对或质疑 player2",
             realization_prompt,
         )
         self.assertNotIn("playerX", realization_prompt)
@@ -1504,10 +1514,22 @@ class GameplayCognitionTest(unittest.TestCase):
             ) * len(evidence_selections),
         )
         self.assertEqual(len(backend.calls), 2 * len(evidence_selections))
-        for call in backend.calls:
+        cognition_calls = [
+            call for call in backend.calls if "response_format" in call
+        ]
+        realization_calls = [
+            call for call in backend.calls if "response_format" not in call
+        ]
+        for call in cognition_calls:
             prompt = call["messages"][0]["content"]
             self.assertIn("claim_000", prompt)
             self.assertIn("claim_001", prompt)
+            self.assertIn(raw_claim, prompt)
+            self.assertIn(nested_claim, prompt)
+        for call in realization_calls:
+            prompt = call["messages"][0]["content"]
+            self.assertNotIn("claim_000", prompt)
+            self.assertNotIn("claim_001", prompt)
             self.assertIn(raw_claim, prompt)
             self.assertIn(nested_claim, prompt)
         cognition_records = [
@@ -1980,18 +2002,29 @@ class GameplayCognitionTest(unittest.TestCase):
             agent.act(observation)
         self.assertEqual(len(backend.calls), 4)
 
-    def test_strict_chinese_speech_rejects_latin_damage_and_missing_targets(self):
-        with self.assertRaisesRegex(
-            GameplaySpeechQualityError,
-            "non-player Latin text",
-        ):
+    def test_public_speech_allows_ordinary_english_but_rejects_wrong_day(self):
+        speech = "Day1 我会直接把 target 放在 player2，他是 first speaker。"
+        self.assertEqual(
             validate_gameplay_public_speech(
-                "我是好人玩家 2，今天我必须站ritte。",
+                speech,
                 finish_reason="stop",
-                player_id=2,
+                player_id=1,
                 phase="1_day_speech",
-                strict_chinese=True,
-            )
+            ),
+            speech,
+        )
+
+        for content in ("Day3 我质疑 player2。", "第3天我质疑 player2。"):
+            with self.subTest(content=content), self.assertRaisesRegex(
+                GameplaySpeechQualityError,
+                "current day is 1",
+            ):
+                validate_gameplay_public_speech(
+                    content,
+                    finish_reason="stop",
+                    player_id=1,
+                    phase="1_day_speech",
+                )
 
         with self.assertRaisesRegex(
             GameplaySpeechQualityError,
@@ -2002,11 +2035,10 @@ class GameplayCognitionTest(unittest.TestCase):
                 finish_reason="stop",
                 player_id=1,
                 phase="1_day_speech",
-                strict_chinese=True,
                 required_player_ids=(2,),
             )
 
-    def test_latin_damaged_speech_retries_public_realization(self):
+    def test_wrong_day_retries_public_realization_with_validation_feedback(self):
         observation = _observation()
         backend = ScriptedRealizationBackend(
             _day_cognition(
@@ -2014,7 +2046,7 @@ class GameplayCognitionTest(unittest.TestCase):
                 content_actions=(DiscussionAct("support", 2),),
             ),
             (
-                "我是好人玩家 1，今天我必须站ritte。",
+                "Day3 我支持 player2。",
                 "我支持 player2。",
             ),
         )
@@ -2022,6 +2054,14 @@ class GameplayCognitionTest(unittest.TestCase):
 
         self.assertEqual(agent.act(observation), ("speech", "我支持 player2。"))
         self.assertEqual(len(backend.calls), 3)
+        first_prompt = backend.calls[1]["messages"][0]["content"]
+        retry_prompt = backend.calls[2]["messages"][0]["content"]
+        self.assertIn("当前天数：第1天", first_prompt)
+        self.assertIn("当前阶段：白天普通发言", first_prompt)
+        self.assertNotIn("当前天数：Day", first_prompt)
+        self.assertIn("current day is 1", retry_prompt)
+        self.assertIn("完整重新生成", retry_prompt)
+        self.assertNotIn("Day3 我支持 player2。", retry_prompt)
 
     def test_active_prompt_control_markers_cannot_be_public_speech(self):
         for marker in (

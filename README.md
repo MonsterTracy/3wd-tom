@@ -20,7 +20,7 @@ f(completed_public_history < t, observer_id=i) -> B_t(i, j)
 你当前怀疑哪些玩家是狼人？
 ```
 
-原始标签保存为 `suspected_werewolves` 符号集合。该集合必须包含观察者已知的其他狼人，且不得包含观察者自身或已知非狼人。请求使用按 observer/hard knowledge 动态收窄的 JSON Schema；重复项由本地 parser 拒绝。解析或语义失败最多重新生成 3 次并逐次审计；后续尝试只附加上一次本地验证错误并生成完整新响应，不修改旧响应、删除非法成员或补猜。canonical 在三次仍失败时终止；pilot 可跳过整条 PRE snapshot 并以固定 `no_commitment` 发言继续，但始终不能进入训练。采集阶段不生成概率分布、belief matrix、pair target 或 21 类投影。
+原始标签保存为 `suspected_werewolves` 符号集合。该集合必须包含观察者已知的其他狼人，且不得包含观察者自身或已知非狼人。请求使用按 observer/hard knowledge 动态收窄的 JSON Schema；重复项由本地 parser 拒绝。解析或语义失败最多重新生成 3 次并逐次审计；后续尝试只附加上一次本地验证错误并生成完整新响应，不修改旧响应、删除非法成员或补猜。canonical 在三次仍失败时终止当前局、保存失败审计并继续下一个预声明种子；失败局不进入 canonical 数据。pilot 可跳过整条 PRE snapshot 并以固定 `no_commitment` 发言继续，但始终不能进入训练。采集阶段不生成概率分布、belief matrix、pair target 或 21 类投影。
 
 ## 当前数据流
 
@@ -29,7 +29,7 @@ Classic-7 simulator
   -> 发言前冻结 public history
   -> playing-agent readonly private belief query
   -> 同一份 speaker PRE belief 只读交给紧随其后的 day cognition
-  -> 冻结公开表达意图并由第二次 LLM 调用生成自然中文
+  -> 冻结公开表达意图并由第二次 LLM 调用生成中文为主的自然发言
   -> 独立 speech parser 只从公开原文做最多 3 次完整严格解析
   -> raw belief snapshot JSONL
   -> canonical game-level train/validation/test materialization
@@ -70,7 +70,7 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `script/twd_tom/train.py` 与 `eval.py`：单一 tom-v2 objective 的训练、checkpoint 与评估入口。
 - `tests/twd_tom/`：采集、时间边界和只读性回归测试。
 
-当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1`、`classic7_pre_speech_player_suspicion_v5` 和 `classic7_pre_speech_player_suspicion_prompt_v6`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
+当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1`、`classic7_public_speech_realization_prompt_v1`、`classic7_pre_speech_player_suspicion_v5` 和 `classic7_pre_speech_player_suspicion_prompt_v6`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
 
 训练 Dataset 默认启用通用座位循环旋转；验证与 evaluation 保持原始座位。旋转同时覆盖 observer、target、公开事件玩家引用、belief matrix 和 masks。
 

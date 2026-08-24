@@ -40,12 +40,14 @@ pipeline:
   speech_annotation_schema_version: classic7_speech_annotation_v3
   speech_action_ontology_version: classic7_speech_action_v1
   speech_parser_prompt_version: classic7_speech_parser_v3
+  public_speech_realization_prompt_version: classic7_public_speech_realization_prompt_v1
   raw_schema_version: classic7_pre_speech_player_suspicion_v5
   projected_schema_version: classic7_observer_conditioned_belief_matrix_v1
   projection_version: hard_knowledge_consistent_sparse_suspicion_uniform_support_v2
 
   collection:
     game_count: 3
+    target_game_count: 3
     seeds: [4101, 4102, 4103]
     max_gameplay_calls_per_game: 192
     max_belief_calls_per_game: 448

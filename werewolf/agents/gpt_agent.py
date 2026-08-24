@@ -162,7 +162,7 @@ class GPTAgent(LLMAgent):
 
         if is_speech:
             prompt = self.format_observation(observation)
-            def generate_speech(attempt):
+            def generate_speech(attempt, _last_error):
                 content, metadata = self._chat_with_metadata(
                     [{"role": "user", "content": prompt}],
                     player_log_context={
@@ -204,7 +204,7 @@ class GPTAgent(LLMAgent):
         last_error = None
         for attempt in range(1, GAMEPLAY_GENERATION_MAX_ATTEMPTS + 1):
             try:
-                return generate(attempt)
+                return generate(attempt, last_error)
             except _GAMEPLAY_GENERATION_ERRORS as exc:
                 last_error = exc
         raise GameplayGenerationExhausted(
@@ -216,7 +216,7 @@ class GPTAgent(LLMAgent):
     def _generate_belief(self, observation, *, temperature, max_tokens):
         return self._retry_validated_generation(
             stage="belief",
-            generate=lambda attempt: self._generate_belief_once(
+            generate=lambda attempt, _last_error: self._generate_belief_once(
                 observation,
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -291,7 +291,7 @@ class GPTAgent(LLMAgent):
     ):
         return self._retry_validated_generation(
             stage="day_cognition",
-            generate=lambda attempt: self._generate_day_cognition_once(
+            generate=lambda attempt, _last_error: self._generate_day_cognition_once(
                 observation,
                 pre_speech_belief=pre_speech_belief,
                 temperature=temperature,
@@ -386,13 +386,14 @@ class GPTAgent(LLMAgent):
 
         return self._retry_validated_generation(
             stage="speech_realization",
-            generate=lambda attempt: self._generate_public_speech_once(
+            generate=lambda attempt, last_error: self._generate_public_speech_once(
                 observation,
                 discussion_acts=discussion_acts,
                 claim_catalog=claim_catalog,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 attempt=attempt,
+                validation_error=last_error,
             ),
         )
 
@@ -405,6 +406,7 @@ class GPTAgent(LLMAgent):
         temperature,
         max_tokens,
         attempt,
+        validation_error,
     ):
         """Generate one public realization from a frozen communication intent."""
 
@@ -415,6 +417,13 @@ class GPTAgent(LLMAgent):
             discussion_acts=discussion_acts,
             claim_catalog=claim_catalog,
         )
+        if validation_error is not None:
+            prompt += (
+                "\n\n上一次输出未通过本地严格验证：\n"
+                f"{validation_error}\n\n"
+                "必须基于同一组冻结意图完整重新生成一段发言。"
+                "不得修改、引用或解释上一次响应。"
+            )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={
@@ -431,7 +440,6 @@ class GPTAgent(LLMAgent):
             finish_reason=metadata["finish_reason"],
             player_id=player_id,
             phase=phase,
-            strict_chinese=True,
             required_player_ids=(
                 act.target
                 for act in discussion_acts
@@ -450,7 +458,7 @@ class GPTAgent(LLMAgent):
     ):
         return self._retry_validated_generation(
             stage="vote",
-            generate=lambda attempt: self._generate_vote_once(
+            generate=lambda attempt, _last_error: self._generate_vote_once(
                 observation,
                 belief=belief,
                 temperature=temperature,
@@ -511,7 +519,7 @@ class GPTAgent(LLMAgent):
     ):
         return self._retry_validated_generation(
             stage="night_action",
-            generate=lambda attempt: self._generate_night_action_once(
+            generate=lambda attempt, _last_error: self._generate_night_action_once(
                 observation,
                 temperature=temperature,
                 max_tokens=max_tokens,

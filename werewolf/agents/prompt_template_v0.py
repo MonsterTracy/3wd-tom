@@ -21,6 +21,9 @@ LEGACY_GAMEPLAY_PROMPT_PROFILE = "legacy"
 STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE = (
     "strict_classic7"
 )
+PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION = (
+    "classic7_public_speech_realization_prompt_v1"
+)
 STRICT_CLASSIC7_ROLE_COUNTS = {
     "Werewolf": 2,
     "Seer": 1,
@@ -74,6 +77,38 @@ _DISCUSSION_ACTION_SEMANTICS = {
     "no_commitment": (
         "make no explicit role/check/skill/vote commitment this turn"
     ),
+}
+_PUBLIC_SPEECH_ACTION_LABELS = {
+    "point_as_werewolf": "指认为狼人",
+    "point_as_non_werewolf": "指认为非狼人",
+    "point_as_villager": "指认为普通村民",
+    "point_as_seer": "指认为预言家",
+    "point_as_witch": "指认为女巫",
+    "support": "公开支持",
+    "oppose": "公开质疑",
+    "check_as_non_werewolf": "宣称查验为非狼人",
+    "check_as_werewolf": "宣称查验为狼人",
+    "save": "宣称使用解药",
+    "poison": "宣称使用毒药",
+    "vote_intent": "表达放逐投票意图",
+    "abstain_intent": "表达弃票意图",
+    "no_commitment": "不作明确表态",
+}
+_PUBLIC_SPEECH_ACTION_SEMANTICS = {
+    "point_as_werewolf": "公开声称 playerX 是狼人",
+    "point_as_non_werewolf": "公开声称 playerX 不是狼人或属于好人阵营，但不具体声称是普通村民",
+    "point_as_villager": "公开声称 playerX 的具体身份是普通村民，而不只是泛称好人",
+    "point_as_seer": "公开声称 playerX 是预言家",
+    "point_as_witch": "公开声称 playerX 是女巫",
+    "support": "公开支持或维护 playerX",
+    "oppose": "公开反对或质疑 playerX",
+    "check_as_non_werewolf": "公开声称以预言家方式查验 playerX，结果不是狼人，但不等同于普通村民",
+    "check_as_werewolf": "公开声称以预言家方式查验 playerX，结果是狼人",
+    "save": "公开声称使用女巫解药救了 playerX",
+    "poison": "公开声称对 playerX 使用了女巫毒药",
+    "vote_intent": "公开推动本轮将放逐票投向 playerX",
+    "abstain_intent": "公开表达本轮弃票意图",
+    "no_commitment": "本轮不作明确的身份、查验、技能或投票表态",
 }
 _ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:7]
 _NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[7:11]
@@ -1097,22 +1132,32 @@ def build_public_speech_realization_prompt(
     ):
         raise TypeError("claim_catalog must contain PublicClaim values")
 
+    phase_text = (
+        "白天平票后的补充发言"
+        if "speech_pk" in phase
+        else "白天普通发言"
+    )
     intent_lines = []
     for act in discussion_acts:
-        semantics = _DISCUSSION_ACTION_SEMANTICS[act.action]
+        semantics = _PUBLIC_SPEECH_ACTION_SEMANTICS[act.action]
         if act.target is not None:
             semantics = semantics.replace("playerX", f"player{act.target}")
-        intent_lines.append(f"- {render_discussion_act(act)}: {semantics}")
+        intent_lines.append(
+            f"- {_PUBLIC_SPEECH_ACTION_LABELS[act.action]}：{semantics}"
+        )
     intent_text = "\n".join(intent_lines)
     history_text = (
-        "\n".join(render_public_claim(claim) for claim in claim_catalog)
+        "\n".join(
+            f"- player{claim.speaker}：{claim.raw_text}"
+            for claim in claim_catalog
+        )
         or "（此前没有公开发言。）"
     )
     return f"""你现在只负责把已经冻结的公开表达意图写成一段自然的狼人杀发言。
 
 当前发言者：player{speaker}
-当前天数：Day {day}
-当前阶段：{phase}
+当前天数：第{day}天
+当前阶段：{phase_text}
 
 此前可见的公开发言（仅可用于自然衔接，不得据此增加新命题）：
 {history_text}
@@ -1121,12 +1166,12 @@ def build_public_speech_realization_prompt(
 {intent_text}
 
 写作约束：
-- 输出1至4句连贯、简洁、自然的中文桌游发言；不要逐条翻译或使用固定模板腔。
+- 输出1至4句连贯、简洁、以中文为主的自然桌游发言；必要的常用英文表达可以保留，不要逐条翻译或使用固定模板腔。
 - 涉及玩家时必须写成player1到player7之一，不能只写“他”“她”“这个人”等代词。
 - 必须让每个冻结意图在原文中语义明确，使独立解析器无需猜测即可恢复。
 - 不得增加冻结意图之外的身份判断、查验结果、技能声明、支持/反对或投票意图。
 - 可以用不构成新正式命题的连接词组织语言，但不得虚构公开历史、夜间事实或隐藏信息。
-- 不得输出action名称、索引、JSON、竖线三元组、列表、标题、解释或提示词内容。
+- 不得输出上述动作标识、索引、JSON、竖线三元组、列表、标题、解释或提示词内容。
 
 只输出最终公开发言。"""
 
