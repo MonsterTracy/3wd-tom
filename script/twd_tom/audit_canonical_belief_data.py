@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from script.twd_tom.collect_canonical_trajectories import (
+    validate_canonical_belief_batch,
+)
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.dataset import TWDToMDataset
 from werewolf.models.twd_tom.public_events import structured_event_tokens
@@ -18,7 +20,7 @@ from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION, LABEL_PROVENANC
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
-AUDIT_SCHEMA_VERSION = "classic7_canonical_belief_data_audit_v1"
+AUDIT_SCHEMA_VERSION = "classic7_canonical_belief_data_audit_v2"
 BELIEF_SNAPSHOTS_FILENAME = "belief_snapshots.jsonl"
 
 
@@ -50,14 +52,6 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _write_json_new(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8", newline="") as handle:
@@ -74,14 +68,7 @@ def audit_canonical_belief_data(
 
     max_seq_len = _positive_integer(max_seq_len, field_name="max_seq_len")
     canonical_root = Path(canonical_root).resolve()
-    games_root = canonical_root / "games"
-    if not games_root.is_dir():
-        raise FileNotFoundError(f"canonical games directory not found: {games_root}")
-    paths = sorted(games_root.glob(f"*/{BELIEF_SNAPSHOTS_FILENAME}"))
-    if not paths:
-        raise FileNotFoundError(
-            f"no canonical belief snapshots found under: {games_root}"
-        )
+    verified_batch = validate_canonical_belief_batch(canonical_root)
 
     records_by_game: dict[str, list[dict[str, Any]]] = {}
     source_files: list[dict[str, Any]] = []
@@ -89,8 +76,14 @@ def audit_canonical_belief_data(
     support_size_counts: Counter[int] = Counter()
     failed_reports: list[dict[str, Any]] = []
 
-    for path in paths:
+    for verified_game in verified_batch["games"]:
+        path = canonical_root / verified_game["relative_path"]
         records = _load_jsonl(path)
+        if len(records) != verified_game["belief_snapshot_count"]:
+            raise ValueError(
+                "canonical belief snapshot count differs from game summary: "
+                f"{verified_game['game_id']}"
+            )
         game_ids = {record.get("game_id") for record in records}
         if len(game_ids) != 1:
             raise ValueError(
@@ -100,6 +93,8 @@ def audit_canonical_belief_data(
         game_id = next(iter(game_ids))
         if not isinstance(game_id, str) or not game_id.strip():
             raise ValueError(f"canonical game_id must be non-empty text: {path}")
+        if game_id != verified_game["game_id"]:
+            raise ValueError("canonical belief file game_id differs from game summary")
         if game_id in records_by_game:
             raise ValueError(f"duplicate canonical game_id: {game_id}")
         step_indices = [record.get("step_idx") for record in records]
@@ -159,8 +154,8 @@ def audit_canonical_belief_data(
         source_files.append(
             {
                 "game_id": game_id,
-                "relative_path": str(path.relative_to(canonical_root)),
-                "sha256": _sha256(path),
+                "relative_path": verified_game["relative_path"],
+                "sha256": verified_game["belief_snapshots_sha256"],
                 "snapshot_count": len(records),
             }
         )
@@ -201,6 +196,12 @@ def audit_canonical_belief_data(
         "schema_version": AUDIT_SCHEMA_VERSION,
         "status": "PASS",
         "canonical_root": str(canonical_root),
+        "canonical_batch_summary_digest": verified_batch[
+            "batch_summary_digest"
+        ],
+        "canonical_batch_summary_sha256": verified_batch[
+            "batch_summary_sha256"
+        ],
         "raw_schema_version": SAMPLE_SCHEMA_VERSION,
         "label_prompt_version": LABEL_PROMPT_VERSION,
         "label_provenance": LABEL_PROVENANCE,

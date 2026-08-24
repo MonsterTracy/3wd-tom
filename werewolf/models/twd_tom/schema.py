@@ -29,7 +29,6 @@ SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v1"
 LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v2"
 LABEL_SOURCE = "playing_agent_readonly_self_report"
 LABEL_CONTEXT_SCOPE = "playing_agent_legally_available_information_state"
-MODEL_INPUT_SCOPE = "structured_public_events_only"
 REPORT_CONTEXT_MODE = "readonly_clone_of_playing_agent_context"
 REPORT_SIDE_EFFECT_FREE = True
 GLOBAL_TRUTH_INJECTED = False
@@ -351,7 +350,6 @@ __all__ = [
     "LABEL_PROVENANCE",
     "LABEL_SOURCE",
     "LABEL_CONTEXT_SCOPE",
-    "MODEL_INPUT_SCOPE",
     "REPORT_CONTEXT_MODE",
     "REPORT_SIDE_EFFECT_FREE",
     "GLOBAL_TRUTH_INJECTED",

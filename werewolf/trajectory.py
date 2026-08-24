@@ -139,7 +139,7 @@ def _sanitize_runtime_config(value: Any) -> Any:
     return serialize_json_value(value)
 
 
-def _sanitize_exception_message(exception: BaseException) -> str:
+def sanitize_exception_message(exception: BaseException) -> str:
     message = " ".join(str(exception).splitlines()).strip()
     message = _BEARER_MESSAGE_PATTERN.sub("Bearer <redacted>", message)
 
@@ -402,7 +402,7 @@ class CanonicalGameInteractionTrajectoryRecorder:
             ],
             "submitted_action": submitted_action,
             "exception_type": type(exception).__name__,
-            "exception_message": _sanitize_exception_message(exception),
+            "exception_message": sanitize_exception_message(exception),
         }
         self._pending = None
         self._finalize(
@@ -517,16 +517,10 @@ class CanonicalGameInteractionTrajectoryRecorder:
         if action[0] != speech_kind:
             raise ValueError("submitted speech action kind mismatch")
         content = action[1]
-        if isinstance(content, dict):
-            if set(content) != {"raw_text", "sp_actions"}:
-                raise ValueError("strict speech action fields do not match contract")
-            if content["raw_text"] != speech["raw_text"]:
-                raise ValueError("submitted and committed speech raw_text differ")
-        elif isinstance(content, str):
-            if content != speech["raw_text"]:
-                raise ValueError("submitted and committed speech raw_text differ")
-        else:
-            raise TypeError("speech action content must be text or a mapping")
+        if not isinstance(content, str):
+            raise TypeError("speech action content must be text")
+        if content != speech["raw_text"]:
+            raise ValueError("submitted and committed speech raw_text differ")
 
     def _reconstruct_public_events(self) -> list[dict[str, Any]]:
         if self._initial_public_events is None:

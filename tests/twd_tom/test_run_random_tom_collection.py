@@ -142,7 +142,7 @@ class ScriptedEnvironment:
                     parser_call_id=(
                         f"synthetic_{speech_event['event_idx']:06d}"
                     ),
-                    annotation_source="generator_contract",
+                    annotation_source="llm_parser",
                     status="ok" if parsed_actions else "no_action",
                     actions=deepcopy(parsed_actions or []),
                     raw_response=None,

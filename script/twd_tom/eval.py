@@ -12,6 +12,9 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
+from script.twd_tom.materialize_canonical_belief_dataset import (
+    validate_materialized_split_path,
+)
 from script.twd_tom.train import (
     REPO_ROOT,
     checkpoint_task_contract,
@@ -28,8 +31,6 @@ from werewolf.models.twd_tom.belief_backbone import (
     ToMBeliefBackboneConfig,
 )
 from werewolf.models.twd_tom.dataset import (
-    MODEL_INPUT_SCOPE,
-    TARGET_CONVERSION,
     TWDToMDataset,
     collate_twd_tom_samples,
     load_twd_tom_jsonl,
@@ -188,16 +189,47 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     dataset_path = Path(config.dataset_path).resolve()
     checkpoint = load_checkpoint(checkpoint_path)
     model = build_model_from_checkpoint(checkpoint, device=device)
+    evaluation_manifest = validate_materialized_split_path(
+        dataset_path,
+        split_name="test",
+    )
+    provenance = checkpoint.get("run_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("checkpoint must record run_provenance")
+    if provenance.get("split_manifest_digest") != evaluation_manifest[
+        "manifest_digest"
+    ]:
+        raise ValueError(
+            "evaluation test split does not share the checkpoint split manifest"
+        )
     samples = load_twd_tom_jsonl(dataset_path)
     evaluation_game_ids = collect_game_ids(samples)
     training_path = resolve_training_dataset_path(
         checkpoint, override_path=config.training_dataset_path
     )
+    training_manifest = validate_materialized_split_path(
+        training_path,
+        split_name="train",
+    )
+    if training_manifest["manifest_digest"] != evaluation_manifest["manifest_digest"]:
+        raise ValueError("training and evaluation data use different split manifests")
     training_game_ids = collect_game_ids(load_twd_tom_jsonl(training_path))
-    overlap = tuple(sorted(set(evaluation_game_ids) & set(training_game_ids)))
+    validation_game_ids = tuple(
+        evaluation_manifest["game_ids"]["validation"]
+    )
+    if set(evaluation_game_ids) != set(evaluation_manifest["game_ids"]["test"]):
+        raise ValueError("evaluation dataset game IDs differ from manifest test split")
+    if set(training_game_ids) != set(evaluation_manifest["game_ids"]["train"]):
+        raise ValueError("training dataset game IDs differ from manifest train split")
+    overlap = tuple(
+        sorted(
+            set(evaluation_game_ids)
+            & (set(training_game_ids) | set(validation_game_ids))
+        )
+    )
     if overlap:
         raise ValueError(
-            "evaluation game IDs must be disjoint from training data; "
+            "evaluation game IDs must be disjoint from train and validation data; "
             f"overlap_count={len(overlap)}, examples={list(overlap[:5])}"
         )
     dataset = TWDToMDataset(
@@ -206,6 +238,8 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     )
     if dataset.model_input_scope != checkpoint.get("model_input_scope"):
         raise ValueError("evaluation Dataset model_input_scope mismatch")
+    if dataset.target_semantics != checkpoint.get("target_semantics"):
+        raise ValueError("evaluation Dataset target_semantics mismatch")
     if dataset.target_conversion != checkpoint.get("target_conversion"):
         raise ValueError("evaluation Dataset target_conversion mismatch")
     loader = DataLoader(
@@ -236,7 +270,9 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "evaluation_supervised_observer_count": supervised,
         "training_dataset_path": str(training_path),
         "training_game_ids": list(training_game_ids),
+        "validation_game_ids": list(validation_game_ids),
         "overlapping_game_ids": list(overlap),
+        "split_manifest_digest": evaluation_manifest["manifest_digest"],
         "model_config": result_model_config(model),
         "metrics": metrics,
     }

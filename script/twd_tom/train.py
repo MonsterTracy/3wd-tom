@@ -20,6 +20,9 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
+from script.twd_tom.materialize_canonical_belief_dataset import (
+    validate_materialized_split_path,
+)
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
     QWEN2_BACKBONE_NAME,
@@ -31,6 +34,7 @@ from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
+    TARGET_SEMANTICS,
     TWDToMDataset,
     collate_twd_tom_samples,
 )
@@ -168,6 +172,29 @@ def _repository_relative_path(path: str | Path, *, repo_root: Path = REPO_ROOT) 
         raise ValueError(f"path must be inside the Git worktree: {candidate}") from exc
 
 
+def validate_training_split_lineage(
+    train_path: str | Path,
+    validation_path: str | Path,
+) -> dict[str, Any]:
+    """Require train and validation to be siblings from one split manifest."""
+
+    resolved_train = Path(train_path).resolve()
+    resolved_validation = Path(validation_path).resolve()
+    if resolved_train.parent != resolved_validation.parent:
+        raise ValueError("train and validation must share one split manifest directory")
+    manifest = validate_materialized_split_path(
+        resolved_train,
+        split_name="train",
+    )
+    expected_validation = (
+        resolved_train.parent
+        / manifest["output_files"]["validation"]["relative_path"]
+    ).resolve()
+    if resolved_validation != expected_validation:
+        raise ValueError("validation path is not the manifest validation split")
+    return manifest
+
+
 def build_run_provenance(
     config: TrainingConfig,
     *,
@@ -207,6 +234,8 @@ def build_run_provenance(
         )
     train_path = config.resolved_dataset_path
     validation_path = config.resolved_validation_dataset_path
+    split_manifest = validate_training_split_lineage(train_path, validation_path)
+    split_manifest_path = train_path.parent / "split_manifest.json"
     return {
         "git_commit_sha": commit,
         "git_worktree_clean": True,
@@ -224,6 +253,15 @@ def build_run_provenance(
             validation_path, repo_root=root
         ),
         "validation_dataset_sha256": sha256_file(validation_path),
+        "split_manifest_path": _repository_relative_path(
+            split_manifest_path,
+            repo_root=root,
+        ),
+        "split_manifest_sha256": sha256_file(split_manifest_path),
+        "split_manifest_digest": split_manifest["manifest_digest"],
+        "canonical_batch_summary_digest": split_manifest[
+            "canonical_batch_summary_digest"
+        ],
         "output_dir": _repository_relative_path(config.output_dir, repo_root=root),
     }
 
@@ -320,12 +358,17 @@ def _training_dataset_contract(
     train_dataset: TWDToMDataset,
     validation_dataset: TWDToMDataset,
 ) -> dict[str, str]:
-    for field_name in ("model_input_scope", "target_conversion"):
+    for field_name in (
+        "model_input_scope",
+        "target_semantics",
+        "target_conversion",
+    ):
         if getattr(train_dataset, field_name) != getattr(validation_dataset, field_name):
             raise ValueError(f"train and validation {field_name} values differ")
     return {
         "source_schema_version": SAMPLE_SCHEMA_VERSION,
         "model_input_scope": train_dataset.model_input_scope,
+        "target_semantics": train_dataset.target_semantics,
         "target_conversion": train_dataset.target_conversion,
     }
 
@@ -333,6 +376,10 @@ def _training_dataset_contract(
 def build_training_data_loaders(
     config: TrainingConfig,
 ) -> tuple[DataLoader, TWDToMDataset, DataLoader, TWDToMDataset]:
+    validate_training_split_lineage(
+        config.resolved_dataset_path,
+        config.resolved_validation_dataset_path,
+    )
     train_loader, train_dataset = build_data_loader(
         config, dataset_path=config.resolved_dataset_path, shuffle=True
     )
@@ -556,6 +603,7 @@ def checkpoint_task_contract() -> dict[str, Any]:
         "model_input_scope": MODEL_INPUT_SCOPE,
         "model_output": MODEL_OUTPUT,
         "output_shape": [NUM_PLAYERS, NUM_PLAYERS],
+        "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
         "train_player_augmentation": CYCLIC_ROTATION_VERSION,
     }
@@ -582,6 +630,7 @@ def checkpoint_payload(
     dataset_contract = dict(dataset_contract or {
         "source_schema_version": SAMPLE_SCHEMA_VERSION,
         "model_input_scope": MODEL_INPUT_SCOPE,
+        "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
     })
     serialized_config = asdict(config)

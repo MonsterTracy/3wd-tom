@@ -5,9 +5,9 @@
 ## 1. 冻结版本
 
 - public event：`classic7_public_event_sequence_v4`
-- speech annotation：`classic7_speech_annotation_v1`
+- speech annotation：`classic7_speech_annotation_v2`
 - speech action ontology：`classic7_speech_action_v1`
-- speech parser prompt：`classic7_speech_parser_v1`
+- speech parser prompt：`classic7_speech_parser_v2`
 - PRE belief sample：`classic7_pre_speech_player_suspicion_v4`
 
 版本不做隐式兼容或自动迁移。任一版本变化都必须产生新 canonical run；历史原文可以通过显式离线重标注生成新 annotation artifact，但不能原地覆盖旧 artifact。
@@ -47,7 +47,7 @@ error_type, error_message
 
 `status=ok` 必须至少有一个 action；`status=no_action` 表示 parser 成功但没有可表示命题；`status=error` 必须没有 action，并保存明确错误。`raw_response` 保留 parser 的原始响应，便于复核，而不是把清洗后的结果冒充原始输出。
 
-正式 canonical 数据只接受 `annotation_source=llm_parser` 且无 `status=error`。`generator_contract` 只用于无模型单元测试或 replay/debug，不能进入正式数据。
+唯一合法的 annotation 来源是 `annotation_source=llm_parser`。环境只接受公开原文字符串，结构化动作必须由 speech parser 独立产生；parser `status=error` 的游戏不能进入正式 canonical 数据。
 
 ## 4. 冻结的 14 类 action ontology
 
@@ -107,5 +107,5 @@ realization prompt 可以得到冻结 intent 和此前公开历史用于自然�
 - ontology、parser prompt、raw sample 和 public event 版本写入配置及 artifact。
 - PRE sample 的 structured-input digest 同时覆盖 public events 与 annotation prefix。
 - Dataset 和 backbone 不读取 `raw_text`。
-- canonical validator 拒绝缺失、重复、错 speaker、错原文 digest、parser error 和 generator-contract annotation。
+- canonical validator 拒绝缺失、重复、错 speaker、错原文 digest 和 parser error annotation。
 - deterministic replay 不调用 agent、realization 或 speech parser。

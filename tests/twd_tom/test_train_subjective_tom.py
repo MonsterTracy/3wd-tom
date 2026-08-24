@@ -21,6 +21,7 @@ from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
+    TARGET_SEMANTICS,
 )
 
 
@@ -48,6 +49,7 @@ def test_checkpoint_contract_is_single_belief_objective():
         "model_input_scope": MODEL_INPUT_SCOPE,
         "model_output": "belief_logits",
         "output_shape": [7, 7],
+        "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
         "train_player_augmentation": CYCLIC_ROTATION_VERSION,
     }

@@ -92,6 +92,12 @@ class PlayingAgentBeliefSnapshotCollector:
                 raise TypeError("reporter result must be a dictionary")
             if result.get("observer") != observer:
                 raise ValueError("reporter returned an unexpected observer")
+            if result.get("status") != "ok":
+                raise RuntimeError(
+                    "readonly belief report failed: "
+                    f"observer={observer} status={result.get('status')!r} "
+                    f"error={result.get('error')!r}"
+                )
             reports[observer] = result
 
         return reports

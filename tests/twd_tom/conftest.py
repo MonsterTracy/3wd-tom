@@ -1,4 +1,6 @@
 from copy import deepcopy
+import hashlib
+import json
 import os
 
 import pytest
@@ -10,6 +12,17 @@ from werewolf.models.twd_tom.schema import (
 )
 from tests.twd_tom.public_event_fixtures import public_history_fields
 from tests.twd_tom.public_event_fixtures import make_training_sample
+from werewolf.trajectory import canonical_digest, canonical_json
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _write_json(path, value):
+    path.write_text(canonical_json(value) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -69,6 +82,77 @@ def suspicion_sample_factory():
             "public_action_count": len(actions),
             "label_prompt_version": LABEL_PROMPT_VERSION,
         }
+    return make
+
+
+@pytest.fixture
+def canonical_belief_batch_factory():
+    def make(root, samples_by_game, *, reverse=False):
+        from script.twd_tom.collect_canonical_trajectories import (
+            BATCH_PLAN_SCHEMA_VERSION,
+            BATCH_SUMMARY_SCHEMA_VERSION,
+            GAME_SUMMARY_SCHEMA_VERSION,
+        )
+
+        items = list(samples_by_game.items())
+        if reverse:
+            items.reverse()
+        game_summaries = {}
+        for index, (game_id, records) in enumerate(items, start=1):
+            game_dir = root / "games" / f"game_{index:04d}"
+            game_dir.mkdir(parents=True)
+            ordered_records = list(reversed(records)) if reverse else list(records)
+            belief_path = game_dir / "belief_snapshots.jsonl"
+            belief_path.write_text(
+                "".join(
+                    json.dumps(record, ensure_ascii=False) + "\n"
+                    for record in ordered_records
+                ),
+                encoding="utf-8",
+            )
+            game_summary = {
+                "schema_version": GAME_SUMMARY_SCHEMA_VERSION,
+                "game_id": game_id,
+                "belief_snapshot_count": len(records),
+                "belief_report_count": sum(
+                    len(record["observer_ids"]) for record in records
+                ),
+                "belief_snapshots_sha256": _sha256(belief_path),
+            }
+            game_summary["summary_digest"] = canonical_digest(game_summary)
+            _write_json(game_dir / "summary.json", game_summary)
+            game_summaries[game_id] = game_summary
+
+        game_ids = sorted(game_summaries)
+        plan = {
+            "schema_version": BATCH_PLAN_SCHEMA_VERSION,
+            "planned_game_count": len(game_ids),
+        }
+        plan["plan_digest"] = canonical_digest(plan)
+        _write_json(root / "plan.json", plan)
+        summary = {
+            "schema_version": BATCH_SUMMARY_SCHEMA_VERSION,
+            "plan_digest": plan["plan_digest"],
+            "planned_game_count": len(game_ids),
+            "completed_game_count": len(game_ids),
+            "game_ids": game_ids,
+            "game_summary_digests": {
+                game_id: game_summaries[game_id]["summary_digest"]
+                for game_id in game_ids
+            },
+            "total_belief_snapshot_count": sum(
+                game_summaries[game_id]["belief_snapshot_count"]
+                for game_id in game_ids
+            ),
+            "total_belief_report_count": sum(
+                game_summaries[game_id]["belief_report_count"]
+                for game_id in game_ids
+            ),
+        }
+        summary["summary_digest"] = canonical_digest(summary)
+        _write_json(root / "summary.json", summary)
+        return summary
+
     return make
 
 

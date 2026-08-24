@@ -21,11 +21,12 @@
 - 每次 strict 公开发言通常包含 day cognition、自然语言 realization、speech parsing 三次 gameplay dispatch；
 - 达到 category/total call 上限后，在下一次请求发送前失败；每次请求前后检查单局 wall-clock 上限；
 - 每局无论成功或失败都保存 `call_audit.json`，成功 summary 同时汇总调用数；
-- 任一存活 observer 的报告不是 `status=ok`，该局在 artifact validation 阶段失败，不能成为 canonical completed game。
-- 每个 `public_speech` 必须在 `speech_annotations.jsonl` 中有且只有一条按 event/speaker/raw-text digest 绑定的 annotation；parser `status=error` 或 `annotation_source=generator_contract` 会使该局失败。
+- 任一存活 observer 的报告不是 `status=ok`，立即终止该局且不再请求其余 observer；失败 snapshot 不写入 raw JSONL，也不能成为 canonical completed game。
+- 每个 `public_speech` 必须在 `speech_annotations.jsonl` 中有且只有一条由独立 `llm_parser` 产生、按 event/speaker/raw-text digest 绑定的 annotation；parser `status=error` 会使该局失败。
+- 每个 belief snapshot 内嵌的 `speech_annotations` 必须与同局 canonical `speech_annotations.jsonl` 在该 snapshot 公开事件截止点上的规范化前缀完全相同；不能只依赖 snapshot 自身 digest。
 - 每个 completed game 必须使用记录的角色、environment seed 和 submitted actions 通过 deterministic environment replay；重放不得重新调用 LLM 或 speech parser。
 
-每局成功 artifact 至少包含 `trajectory.json`、`observer_views.json`、`belief_snapshots.jsonl`、`speech_annotations.jsonl`、`call_audit.json` 和 `summary.json`。其中 trajectory/public events 保存公开原文，annotation sidecar 保存版本化结构语义；重放只验证 simulator 与原文事件，不重新生成或重新解析发言。
+每局成功 artifact 至少包含 `trajectory.json`、`observer_views.json`、`belief_snapshots.jsonl`、`speech_annotations.jsonl`、`call_audit.json` 和 `summary.json`。其中 trajectory/public events 保存公开原文，annotation sidecar 保存版本化结构语义；snapshot 只保存截至自身 PRE 边界的 sidecar 前缀。重放只验证 simulator 与原文事件，不重新生成或重新解析发言。
 
 每个 completed game 也可以独立执行重放审计：
 
@@ -46,6 +47,6 @@ python -m script.twd_tom.audit_canonical_belief_data \
   --output /data/yuxiao/3wd-tom/canonical_data/<run_id>/belief_data_audit.json
 ```
 
-审计会再次验证 raw schema、prompt/provenance、game/step 唯一性、全部 observer 成功状态与 Dataset 可加载性，并报告 label support size 和结构化序列截断率。只有 `status=PASS` 的数据才进入 game-level materialization。
+审计会先拒绝含 `batch_failure.json`、缺少成功摘要或 plan/batch/per-game digest 与 snapshot SHA256 不一致的批次，再验证 raw schema、prompt/provenance、game/step 唯一性、全部 observer 成功状态与 Dataset 可加载性，并报告 label support size 和结构化序列截断率。只有 `status=PASS` 的数据才进入 game-level materialization。
 
 历史 V2.7/ToM1/ToM2 设计以 Git 历史为准，不再作为 tom-v2 active contract。

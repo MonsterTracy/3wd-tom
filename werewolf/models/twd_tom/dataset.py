@@ -47,7 +47,10 @@ from werewolf.models.twd_tom.speech_annotations import (
 from werewolf.speech.private_belief_perceiver import STATUS_OK
 
 
-MODEL_INPUT_SCOPE = "structured_public_events_only"
+MODEL_INPUT_SCOPE = (
+    "completed_structured_public_events_without_terminal_turn_start_v1"
+)
+TARGET_SEMANTICS = "relative_suspicion_matrix_v1"
 TARGET_CONVERSION = (
     "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
 )
@@ -456,6 +459,7 @@ class TWDToMDataset(Dataset):
         self.augmentation_seed = augmentation_seed
         self._epoch = 0
         self.model_input_scope = MODEL_INPUT_SCOPE
+        self.target_semantics = TARGET_SEMANTICS
         self.target_conversion = TARGET_CONVERSION
 
     @classmethod
@@ -499,8 +503,9 @@ class TWDToMDataset(Dataset):
                     shift=shift,
                 )
             )
+        model_public_events = sample["public_events"][:-1]
         features = self.feature_builder.encode_events(
-            sample["public_events"],
+            model_public_events,
             sample["speech_annotations"],
         )
         belief_targets = torch.zeros(
@@ -526,6 +531,7 @@ class TWDToMDataset(Dataset):
             "observer_ids": deepcopy(sample["observer_ids"]),
             "report_trigger": sample["report_trigger"],
             "label_provenance": sample["label_provenance"],
+            "target_semantics": TARGET_SEMANTICS,
             "target_conversion": TARGET_CONVERSION,
         }
         return {
@@ -593,6 +599,7 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
 __all__ = [
     "CYCLIC_ROTATION_VERSION",
     "MODEL_INPUT_SCOPE",
+    "TARGET_SEMANTICS",
     "TARGET_CONVERSION",
     "TWDToMDataset",
     "collate_twd_tom_samples",

@@ -1,4 +1,3 @@
-import json
 import unittest
 
 from werewolf.models import SpeechPerceiver
@@ -6,15 +5,10 @@ from werewolf.speech.speech_perceiver import (
     SPEECH_PARSER_MAX_TOKENS,
     SpeechActionValidationError,
 )
-from werewolf.models.twd_tom.schema import SpeechAction, normalize_player
 
 
 class FakeBackend:
-    def __init__(
-        self,
-        content=None,
-        error=None,
-    ):
+    def __init__(self, content=None, error=None):
         self.content = content
         self.error = error
         self.calls = []
@@ -38,167 +32,52 @@ class FakeBackend:
                 **kwargs,
             }
         )
-
         if self.error is not None:
             raise self.error
-
         return self.content
 
 
 class SpeechPerceiverTest(unittest.TestCase):
-    def test_calls_backend_and_returns_onuw_pipe_actions(
-        self,
-    ):
+    def test_calls_backend_and_returns_exact_pipe_actions(self):
         speech = "我是预言家，3号是狼人。"
         backend = FakeBackend(
-            "\n".join(
-                [
-                    "player7 | point_as_seer | player2",
-                    "player7 | point_as_werewolf | player3",
-                ]
-            )
+            "player2 | point_as_seer | player2\n"
+            "player2 | point_as_werewolf | player3"
         )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=2,
-            speech=speech,
-            day=1,
-            phase="speech",
-        )
+        perceiver = SpeechPerceiver(backend=backend, model_name="test-model")
 
         self.assertEqual(
-            actions,
+            perceiver.parse(2, speech, 1, "speech"),
             [
-                [
-                    "player2",
-                    "point_as_seer",
-                    "player2",
-                ],
-                [
-                    "player2",
-                    "point_as_werewolf",
-                    "player3",
-                ],
+                ["player2", "point_as_seer", "player2"],
+                ["player2", "point_as_werewolf", "player3"],
             ],
         )
-        self.assertEqual(
-            len(backend.calls),
-            1,
-        )
 
+        self.assertEqual(len(backend.calls), 1)
         call = backend.calls[0]
-        self.assertEqual(
-            call["model"],
-            "test-model",
-        )
-        self.assertEqual(
-            call["temperature"],
-            0,
-        )
-        self.assertEqual(
-            call["max_tokens"],
-            SPEECH_PARSER_MAX_TOKENS,
-        )
-        self.assertIsNone(
-            call["response_format"],
-        )
+        self.assertEqual(call["model"], "test-model")
+        self.assertEqual(call["temperature"], 0)
+        self.assertEqual(call["max_tokens"], SPEECH_PARSER_MAX_TOKENS)
+        self.assertIsNone(call["response_format"])
         self.assertEqual(
             call["extra_body"],
-            {
-                "chat_template_kwargs": {
-                    "enable_thinking": False,
-                }
-            },
-        )
-        self.assertEqual(
-            call["messages"][0]["role"],
-            "user",
+            {"chat_template_kwargs": {"enable_thinking": False}},
         )
 
         prompt = call["messages"][0]["content"]
-        self.assertIn(
-            "当前发言者：player2",
-            prompt,
-        )
-        self.assertIn(
-            "subject | action | object",
-            prompt,
-        )
-        self.assertIn(
-            "每个动作单独一行",
-            prompt,
-        )
-        self.assertIn("格式严格为", prompt)
-        self.assertIn("穷尽输出所有明确动作", prompt)
-        self.assertIn(
-            "没有可抽取动作时，只输出：NONE",
-            prompt,
-        )
-        self.assertIn(
-            "point_as_werewolf",
-            prompt,
-        )
-        self.assertNotIn("point_as_guard", prompt)
-        self.assertIn(
-            "support",
-            prompt,
-        )
-        self.assertIn(
-            "oppose",
-            prompt,
-        )
-        for action_name in (
-            "check_as_non_werewolf",
-            "check_as_werewolf",
-            "save",
-            "poison",
-            "vote_intent",
-            "abstain_intent",
-            "no_commitment",
-        ):
-            self.assertIn(f"- {action_name}", prompt)
-        self.assertNotIn("- guard", prompt)
-        for unsupported_alias in (
-            "check_good",
-            "checked_good",
-            "heal",
-            "protected",
-            "intend_vote",
-        ):
-            self.assertNotIn(unsupported_alias, prompt)
-        self.assertIn("多个不同命题按原文语义顺序输出", prompt)
-        self.assertIn("连续玩家范围", prompt)
-        self.assertIn(
-            "player2 | oppose | player2",
-            prompt,
-        )
-        self.assertIn(
-            speech,
-            prompt,
-        )
-        self.assertNotIn(
-            "claim_camp",
-            prompt,
-        )
-        self.assertNotIn(
-            "certainty",
-            prompt,
-        )
+        self.assertIn("当前发言者：player2", prompt)
+        self.assertIn("subject | action | object", prompt)
+        self.assertIn("每个动作单独一行", prompt)
+        self.assertIn("没有可抽取动作时，只输出：NONE", prompt)
+        self.assertIn("不输出 JSON、解释或 Markdown 代码块", prompt)
+        self.assertIn(speech, prompt)
 
-    def test_prompt_freezes_formal_core_fourteen_semantics(
-        self,
-    ):
-        perceiver = SpeechPerceiver(
-            backend=FakeBackend("NONE"),
-            model_name="test-model",
-        )
-
+    def test_prompt_freezes_formal_action_semantics(self):
+        backend = FakeBackend("NONE")
+        perceiver = SpeechPerceiver(backend=backend, model_name="test-model")
         perceiver.parse(1, "公开发言", 1, "speech")
-        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+        prompt = backend.calls[0]["messages"][0]["content"]
 
         for action_name in (
             "point_as_werewolf",
@@ -218,1278 +97,225 @@ class SpeechPerceiverTest(unittest.TestCase):
         ):
             self.assertIn(f"- {action_name}", prompt)
         self.assertNotIn("point_as_guard", prompt)
-        self.assertNotIn("- guard", prompt)
-        self.assertIn("好人阵营", prompt)
-        self.assertIn("可信", prompt)
-        self.assertIn("不能产生point_as_villager", prompt)
         self.assertIn("most-specific-source", prompt)
         self.assertIn("不得读取真实角色或环境技能记录", prompt)
         self.assertIn("vote_intent不等于环境实际vote", prompt)
 
-    def test_prompt_requires_explicit_target_in_the_supporting_proposition(
-        self,
-    ):
-        perceiver = SpeechPerceiver(
-            backend=FakeBackend("NONE"),
-            model_name="test-model",
-        )
-
+    def test_prompt_requires_explicit_target_and_atomic_range_output(self):
+        backend = FakeBackend("NONE")
+        perceiver = SpeechPerceiver(backend=backend, model_name="test-model")
         perceiver.parse(1, "基于以上判断，我投这一票。", 1, "speech")
-        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
+        prompt = backend.calls[0]["messages"][0]["content"]
 
         self.assertIn("同一个明确命题或分句", prompt)
-        self.assertIn("以 playerN 或 N号被明确点名", prompt)
-        self.assertIn("第一人称明确自报具体身份", prompt)
-        self.assertIn("“我是预言家”", prompt)
-        self.assertIn("明确指向当前发言者", prompt)
-        self.assertIn("显式连续编号范围", prompt)
-        self.assertIn("“2号到4号”", prompt)
-        self.assertIn("不是discourse antecedent推断", prompt)
         self.assertIn("不得从代词、省略宾语", prompt)
-        self.assertIn("前一句、前一个action、discourse context", prompt)
-        self.assertIn("基于以上判断，我投这一票。", prompt)
-        self.assertIn("我就投他。", prompt)
-        self.assertIn("那我投这个人。", prompt)
-        self.assertIn("player2和player3都在发言。那我投他。", prompt)
-        self.assertIn("这一轮我投4号。", prompt)
+        self.assertIn("第一人称明确自报具体身份", prompt)
+        self.assertIn("连续玩家范围必须按原文顺序展开成多个原子三元组", prompt)
         self.assertIn("player1 | vote_intent | player4", prompt)
 
-    def test_preserves_distinct_actions_for_same_object(
-        self,
-    ):
-        backend = FakeBackend(
-            "\n".join(
-                [
-                    "player2 | point_as_seer | player1",
-                    "player2 | support | player1",
-                ]
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=2,
-            speech=(
-                "1号大概率是真的预言家，"
-                "我建议先相信1号。"
-            ),
-            day=1,
-            phase="speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player2",
-                    "point_as_seer",
-                    "player1",
-                ],
-                [
-                    "player2",
-                    "support",
-                    "player1",
-                ],
-            ],
-        )
-
-    def test_core_thirteen_actions_are_kept_online(
-        self,
-    ):
-        actions = SpeechPerceiver._normalize(
-            parsed=[["player2", "check_as_non_werewolf", "player3"]],
-            speaker=2,
-        )
-        self.assertEqual(
-            actions,
-            [["player2", "check_as_non_werewolf", "player3"]],
-        )
-
-    def test_parse_keeps_most_specific_check_provenance(
-        self,
-    ):
-        backend = FakeBackend(
-            "\n".join(
-                [
-                    "player2 | check_as_non_werewolf | player3",
-                    "player2 | check_as_werewolf | player4",
-                ]
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(
-                speaker=2,
-                speech=(
-                    "我查验3号为好人；经过查验，"
-                    "我确认4号是狼人。"
-                ),
-                day=1,
-                phase="speech",
-            ),
-            [
-                ["player2", "check_as_non_werewolf", "player3"],
-                ["player2", "check_as_werewolf", "player4"],
-            ],
-        )
-
-    def test_preserves_literal_self_claim_when_backend_returns_none(
-        self,
-    ):
-        backend = FakeBackend("NONE")
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=6,
-            speech=(
-                "我是6号玩家，身份是村民。"
-                "目前信息不足，我暂时没有明确怀疑对象。"
-            ),
-            day=1,
-            phase="speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player6",
-                    "point_as_villager",
-                    "player6",
-                ]
-            ],
-        )
-
-        prompt = backend.calls[0][
-            "messages"
-        ][0]["content"]
-
-        self.assertIn("第一人称明确自报具体身份必须抽取", prompt)
-
-    def test_active_specific_self_claim_actions_remain_unchanged(
-        self,
-    ):
-        expected_actions = {
-            "村民": "point_as_villager",
-            "预言家": "point_as_seer",
-            "女巫": "point_as_witch",
-        }
-
-        for role, action_name in expected_actions.items():
-            with self.subTest(role=role):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend("NONE"),
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse(
-                        speaker=2,
-                        speech=f"我是{role}。",
-                        day=1,
-                        phase="speech",
-                    ),
-                    [["player2", action_name, "player2"]],
-                )
-
-    def test_vote_intent_is_in_prompt_vocabulary_without_implied_oppose(
-        self,
-    ):
+    def test_accepts_none_as_the_only_empty_result(self):
         perceiver = SpeechPerceiver(
             backend=FakeBackend("NONE"),
             model_name="test-model",
         )
+        self.assertEqual(perceiver.parse(2, "我还要继续听。", 1, "speech"), [])
 
-        perceiver.parse(
-            speaker=1,
-            speech="公开发言",
-            day=1,
-            phase="speech",
-        )
-        prompt = perceiver.backend.calls[0]["messages"][0]["content"]
-
-        self.assertIn("- vote_intent", prompt)
-        self.assertIn("vote_intent不等于环境实际vote，也不自动产生oppose", prompt)
-
-    def test_merges_protected_self_claim_with_other_llm_actions(
-        self,
-    ):
-        backend = FakeBackend(
-            "player6 | support | player3"
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=6,
-            speech=(
-                "我是6号玩家，身份是村民。"
-                "我比较认可3号。"
-            ),
-            day=1,
-            phase="speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player6",
-                    "point_as_villager",
-                    "player6",
-                ],
-                [
-                    "player6",
-                    "support",
-                    "player3",
-                ],
-            ],
-        )
-
-    def test_protected_self_role_merges_with_check_provenance(
-        self,
-    ):
-        backend = FakeBackend(
-            "\n".join(
-                [
-                    "player1 | check_as_non_werewolf | player1",
-                    "player1 | point_as_villager | player1",
-                ]
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(
-                speaker=1,
-                speech="我是 1 号村民，我查验自己确认为好人。",
-                day=1,
-                phase="speech",
-            ),
-            [
-                ["player1", "point_as_villager", "player1"],
-                ["player1", "check_as_non_werewolf", "player1"],
-            ],
-        )
-
-    def test_protected_self_role_accepts_seat_spacing_variants(
-        self,
-    ):
-        for speech in (
-            "我是2号村民",
-            "我是 2号村民",
-            "我是2号 村民",
-            "我是 2 号村民",
-        ):
-            with self.subTest(speech=speech):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend("NONE"),
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse(
-                        speaker=2,
-                        speech=speech,
-                        day=1,
-                        phase="speech",
-                    ),
-                    [
-                        [
-                            "player2",
-                            "point_as_villager",
-                            "player2",
-                        ]
-                    ],
-                )
-
-    def test_deduplicates_self_claim_returned_by_backend(
-        self,
-    ):
-        backend = FakeBackend(
-            "player6 | point_as_villager | player6"
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=6,
-            speech="我是6号玩家，身份是村民。",
-            day=1,
-            phase="speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player6",
-                    "point_as_villager",
-                    "player6",
-                ]
-            ],
-        )
-
-    def test_backend_failure_does_not_promote_protected_claim_to_annotation(
-        self,
-    ):
-        backend = FakeBackend(
-            error=RuntimeError(
-                "backend unavailable"
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            speaker=6,
-            speech="我是6号玩家，身份是村民。",
-            day=1,
-            phase="speech",
-        )
-
-        self.assertEqual(actions, [])
-
-    def test_does_not_protect_non_specific_or_conditional_claims(
-        self,
-    ):
-        for speech in (
-            "我是好人。",
-            "我不是狼人。",
-            "如果我是预言家，我会先验2号。",
-            "4号说我是村民。",
-        ):
-            with self.subTest(
-                speech=speech,
-            ):
-                backend = FakeBackend("NONE")
-                perceiver = SpeechPerceiver(
-                    backend=backend,
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse(
-                        speaker=6,
-                        speech=speech,
-                        day=1,
-                        phase="speech",
-                    ),
-                    [],
-                )
-
-    def test_parses_pipe_code_fence_bullets_and_fullwidth_separator(
-        self,
-    ):
-        backend = FakeBackend(
-            """```text
-- player1 | oppose | player2
-2. player1｜support｜player3。
-```"""
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            5,
-            "我关注2号，也比较相信3号。",
-            1,
-            "speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player5",
-                    "oppose",
-                    "player2",
-                ],
-                [
-                    "player5",
-                    "support",
-                    "player3",
-                ],
-            ],
-        )
-
-    def test_keeps_legacy_json_array_compatibility(
-        self,
-    ):
-        backend = FakeBackend(
-            """```json
-[
-  ["player1", "point_as_seer", "player1"]
-]
-```"""
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            1,
-            "我是预言家",
-            1,
-            "speech",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player1",
-                    "point_as_seer",
-                    "player1",
-                ]
-            ],
-        )
-
-    def test_strict_accepts_targeted_actions_in_pipe_and_complete_json(
-        self,
-    ):
-        expected = [
-            ["player1", "check_as_non_werewolf", "player2"],
-            ["player1", "check_as_werewolf", "player3"],
-            ["player1", "save", "player4"],
-            ["player1", "poison", "player5"],
-            ["player1", "vote_intent", "player7"],
-        ]
-        responses = [
-            "\n".join(" | ".join(action) for action in expected),
-            json.dumps(expected),
-        ]
-
-        for response in responses:
-            with self.subTest(response=response):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend(response),
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse_strict(
-                        1,
-                        "公开发言",
-                        1,
-                        "speech",
-                    ),
-                    expected,
-                )
-
-    def test_strict_accepts_targetless_actions_with_null_object(self):
-        expected = [
-            ["player1", "abstain_intent", None],
-            ["player1", "no_commitment", None],
-        ]
-        perceiver = SpeechPerceiver(
-            backend=FakeBackend(json.dumps(expected)),
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse_strict(1, "公开发言", 1, "speech"),
-            expected,
-        )
-
-    def test_strict_accepts_targetless_pipe_actions_with_none_object(self):
-        expected = [
-            ["player1", "abstain_intent", None],
-            ["player1", "no_commitment", None],
-        ]
+    def test_targetless_actions_require_uppercase_none(self):
         perceiver = SpeechPerceiver(
             backend=FakeBackend(
                 "player1 | abstain_intent | NONE\n"
-                "player1 | no_commitment | null"
+                "player1 | no_commitment | NONE"
             ),
             model_name="test-model",
         )
-
         self.assertEqual(
-            perceiver.parse_strict(1, "公开发言", 1, "speech"),
-            expected,
-        )
-
-    def test_extracts_first_legacy_json_array_from_text(
-        self,
-    ):
-        backend = FakeBackend(
-            (
-                "解析结果："
-                '[["player2","support","player4"]]。'
-                "备选："
-                '[["player2","oppose","player5"]]'
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            2,
-            "我支持4号",
-            1,
-            "speech",
-        )
-
-        self.assertEqual(
-            actions,
+            perceiver.parse(1, "这一轮我弃票，也不作身份表态。", 1, "speech"),
             [
-                [
-                    "player2",
-                    "support",
-                    "player4",
-                ]
+                ["player1", "abstain_intent", None],
+                ["player1", "no_commitment", None],
             ],
         )
 
-    def test_filters_invalid_actions_and_duplicates(
-        self,
-    ):
-        backend = FakeBackend(
-            json.dumps(
-                [
-                    [
-                        "player5",
-                        "invented_action",
-                        "player1",
-                    ],
-                    [
-                        "player5",
-                        "support",
-                        "player8",
-                    ],
-                    [
-                        "player7",
-                        "oppose",
-                        "player3",
-                    ],
-                    [
-                        "player5",
-                        "oppose",
-                        "player3",
-                    ],
-                    {
-                        "subject": "player1",
-                        "action": "point_as_werewolf",
-                        "object": "player4",
-                    },
-                    {
-                        "predicate": "suspect",
-                        "target": 6,
-                    },
-                ],
-                ensure_ascii=False,
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions = perceiver.parse(
-            5,
-            "我不信3号，我认为4号是狼人。",
-            2,
-            "speech_pk",
-        )
-
-        self.assertEqual(
-            actions,
-            [
-                [
-                    "player5",
-                    "oppose",
-                    "player3",
-                ],
-                [
-                    "player5",
-                    "point_as_werewolf",
-                    "player4",
-                ],
-            ],
-        )
-
-    def test_v27_player_range_expands_to_atomic_actions(self):
+    def test_deduplicates_only_exact_valid_actions(self):
         perceiver = SpeechPerceiver(
             backend=FakeBackend(
-                "player1 | oppose | player2 至 player7"
+                "player2 | support | player3\n"
+                "player2 | support | player3\n"
+                "player2 | oppose | player3"
             ),
             model_name="test-model",
         )
-
         self.assertEqual(
-            perceiver.parse(1, "player2 至 player7 都有问题", 1, "speech"),
+            perceiver.parse(2, "我支持3号，但也质疑3号。", 1, "speech"),
             [
-                ["player1", "oppose", f"player{player_id}"]
-                for player_id in range(2, 8)
+                ["player2", "support", "player3"],
+                ["player2", "oppose", "player3"],
             ],
         )
 
-    def test_range_expansion_reuses_atomic_dedup_and_keeps_other_actions(self):
+    def test_does_not_add_actions_that_are_absent_from_model_response(self):
         perceiver = SpeechPerceiver(
-            backend=FakeBackend(
-                "\n".join(
-                    [
-                        "player1 | oppose | player2 至 player4",
-                        "player1 | oppose | player3",
-                        "player1 | support | player3",
-                        "player1 | oppose | player5",
-                    ]
-                )
-            ),
+            backend=FakeBackend("NONE"),
             model_name="test-model",
         )
+        self.assertEqual(perceiver.parse(6, "我是6号村民。", 1, "speech"), [])
 
-        self.assertEqual(
-            perceiver.parse(1, "发言", 1, "speech"),
-            [
-                ["player1", "oppose", "player2"],
-                ["player1", "oppose", "player3"],
-                ["player1", "oppose", "player4"],
-                ["player1", "support", "player3"],
-                ["player1", "oppose", "player5"],
-            ],
-        )
-
-    def test_single_player_object_remains_compatible(self):
+    def test_rejects_alternate_subject_instead_of_repairing_it(self):
         perceiver = SpeechPerceiver(
-            backend=FakeBackend("player1 | oppose | player3"),
+            backend=FakeBackend("player7 | support | player3"),
             model_name="test-model",
         )
-        self.assertEqual(
-            perceiver.parse(1, "我反对3号", 1, "speech"),
-            [["player1", "oppose", "player3"]],
-        )
-
-    def test_invalid_or_malformed_ranges_fail_closed(self):
-        for object_value in (
-            "player0 至 player3",
-            "player3 至 player8",
-            "player4 至 player2",
-            "playerX 至 player4",
-        ):
-            with self.subTest(object_value=object_value):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend(
-                        f"player1 | oppose | {object_value}"
-                    ),
-                    model_name="test-model",
-                )
-                self.assertEqual(
-                    perceiver.parse(1, "发言", 1, "speech"),
-                    [],
-                )
-                with self.assertRaises(
-                    (SpeechActionValidationError, ValueError)
-                ):
-                    perceiver.parse_strict(1, "发言", 1, "speech")
-
-    def test_atomic_player_validators_still_reject_range_strings(self):
-        with self.assertRaises(ValueError):
-            normalize_player("player2 至 player4")
-        with self.assertRaises(ValueError):
-            SpeechAction.from_values(
-                "player1",
-                "oppose",
-                "player2 至 player4",
-            )
-
-    def test_none_is_a_valid_empty_result(
-        self,
-    ):
-        backend = FakeBackend("NONE")
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(
-                2,
-                "我还要继续听。",
-                1,
-                "speech",
-            ),
-            [],
-        )
-
-    def test_returns_empty_without_backend_or_model(
-        self,
-    ):
-        self.assertEqual(
-            SpeechPerceiver(
-                model_name="test-model"
-            ).parse(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
-
-        backend = FakeBackend("NONE")
-        self.assertEqual(
-            SpeechPerceiver(
-                backend=backend
-            ).parse(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
-        self.assertEqual(
-            backend.calls,
-            [],
-        )
-
-    def test_strict_parse_exposes_backend_failure(
-        self,
-    ):
-        backend = FakeBackend(
-            error=RuntimeError(
-                "backend unavailable"
-            )
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "backend unavailable",
-        ):
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_with_response_preserves_pipe_text(
-        self,
-    ):
-        raw_response = (
-            "\nplayer1 | support | player3\n"
-        )
-        backend = FakeBackend(raw_response)
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions, returned_response = (
-            perceiver.parse_strict_with_response(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-        )
-
-        self.assertEqual(
-            actions,
-            [["player1", "support", "player3"]],
-        )
-        self.assertEqual(returned_response, raw_response)
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_with_response_preserves_json_text(
-        self,
-    ):
-        raw_response = (
-            '[ [ "player1", "support", "player2" ] ]'
-        )
-        backend = FakeBackend(raw_response)
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions, returned_response = (
-            perceiver.parse_strict_with_response(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-        )
-
-        self.assertEqual(
-            actions,
-            [["player1", "support", "player2"]],
-        )
-        self.assertEqual(returned_response, raw_response)
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_with_response_preserves_none_text(
-        self,
-    ):
-        raw_response = "NONE"
-        backend = FakeBackend(raw_response)
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        actions, returned_response = (
-            perceiver.parse_strict_with_response(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-        )
-
-        self.assertEqual(actions, [])
-        self.assertEqual(returned_response, raw_response)
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_parse_rejects_malformed_response(
-        self,
-    ):
-        backend = FakeBackend(
-            "not a structured response"
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "No structured speech action",
-        ):
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-
-    def test_strict_rejects_unknown_action_without_changing_parse(
-        self,
-    ):
-        backend = FakeBackend(
-            "player1 | invented_action | player2"
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(1, "发言", 1, "speech"),
-            [],
-        )
-
-        with self.assertRaises(
-            SpeechActionValidationError
-        ) as caught:
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-
-        self.assertEqual(caught.exception.invalid_count, 1)
-        self.assertEqual(
-            caught.exception.failures[0]["candidate"],
-            ["player1", "invented_action", "player2"],
-        )
-        self.assertIn(
-            "unsupported speech action",
-            caught.exception.failures[0]["reason"],
-        )
-
-    def test_strict_with_response_attaches_invalid_raw_text(
-        self,
-    ):
-        raw_response = "player1 | invented_action | player2"
-        backend = FakeBackend(raw_response)
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        with self.assertRaises(
-            SpeechActionValidationError
-        ) as caught:
-            perceiver.parse_strict_with_response(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-
-        self.assertEqual(
-            caught.exception.raw_response,
-            raw_response,
-        )
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_rejects_invalid_player_without_changing_parse(
-        self,
-    ):
-        backend = FakeBackend(
-            "player8 | support | player2"
-        )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(1, "发言", 1, "speech"),
-            [],
-        )
-
         with self.assertRaisesRegex(
             SpeechActionValidationError,
-            "player8",
+            "subject must equal current speaker",
         ):
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
+            perceiver.parse(2, "我支持3号。", 1, "speech")
 
-    def test_strict_rejects_malformed_candidate_without_changing_parse(
-        self,
-    ):
-        responses = [
-            (
-                "player1 | support",
-                "pipe triplet protocol",
-            ),
-            (
-                "player1 | support | player2 | extra",
-                "pipe triplet protocol",
-            ),
-            (
-                json.dumps(
-                    [
-                        {
-                            "subject": "player1",
-                            "action": "support",
-                        }
-                    ]
-                ),
-                "three-item sequence",
-            ),
-        ]
-
-        for response, error_pattern in responses:
-            with self.subTest(response=response):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend(response),
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse(1, "发言", 1, "speech"),
-                    [],
-                )
-
-                with self.assertRaisesRegex(
-                    SpeechActionValidationError,
-                    error_pattern,
-                ):
-                    perceiver.parse_strict(
-                        1,
-                        "发言",
-                        1,
-                        "speech",
-                    )
-
-    def test_strict_rejects_entire_mixed_valid_invalid_output(
-        self,
-    ):
-        backend = FakeBackend(
-            "\n".join(
-                [
-                    "player1 | support | player2",
-                    "player1 | invented_action | player3",
-                ]
-            )
+    def test_rejects_non_protocol_formats(self):
+        responses = (
+            '[["player1", "support", "player2"]]',
+            "```text\nplayer1 | support | player2\n```",
+            "- player1 | support | player2",
+            "player1｜support｜player2",
+            "player1 | support | player2。",
+            "player1 | support | player2 至 player4",
+            "player1 | no_commitment | null",
+            "NONE\n",
         )
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse(1, "发言", 1, "speech"),
-            [["player1", "support", "player2"]],
-        )
-
-        with self.assertRaises(
-            SpeechActionValidationError
-        ) as caught:
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            )
-
-        self.assertEqual(caught.exception.invalid_count, 1)
-
-    def test_strict_none_is_a_valid_empty_result(
-        self,
-    ):
-        backend = FakeBackend("NONE")
-        perceiver = SpeechPerceiver(
-            backend=backend,
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
-        self.assertEqual(len(backend.calls), 1)
-
-    def test_strict_accepts_one_triplet_with_blank_lines(
-        self,
-    ):
-        perceiver = SpeechPerceiver(
-            backend=FakeBackend(
-                "\n\t\nplayer1 | support | player2\n  \n"
-            ),
-            model_name="test-model",
-        )
-
-        self.assertEqual(
-            perceiver.parse_strict(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [["player1", "support", "player2"]],
-        )
-
-    def test_strict_rejects_extra_non_protocol_lines(
-        self,
-    ):
-        valid_action = "player1 | support | player2"
-        responses = [
-            (
-                f"{valid_action}\n解释：这是抽取原因",
-                "解释：这是抽取原因",
-            ),
-            (
-                f"以下是结果：\n{valid_action}",
-                "以下是结果：",
-            ),
-            (
-                f"```\n{valid_action}\n```",
-                "```",
-            ),
-            (
-                f"- {valid_action}",
-                "- player1",
-            ),
-        ]
-
-        for response, invalid_line in responses:
-            with self.subTest(response=response):
-                perceiver = SpeechPerceiver(
-                    backend=FakeBackend(response),
-                    model_name="test-model",
-                )
-
-                self.assertEqual(
-                    perceiver.parse(1, "发言", 1, "speech"),
-                    [["player1", "support", "player2"]],
-                )
-
-                with self.assertRaises(
-                    SpeechActionValidationError
-                ) as caught:
-                    perceiver.parse_strict(
-                        1,
-                        "发言",
-                        1,
-                        "speech",
-                    )
-
-                self.assertIn(
-                    invalid_line,
-                    str(caught.exception.failures),
-                )
-
-    def test_strict_rejects_none_mixed_with_other_content(
-        self,
-    ):
-        responses = [
-            "NONE\nplayer1 | support | player2",
-            "NONE\n解释：没有动作",
-        ]
-
         for response in responses:
             with self.subTest(response=response):
                 perceiver = SpeechPerceiver(
                     backend=FakeBackend(response),
                     model_name="test-model",
                 )
+                with self.assertRaises((SpeechActionValidationError, ValueError)):
+                    perceiver.parse(1, "公开发言", 1, "speech")
 
-                with self.assertRaises(
-                    SpeechActionValidationError
-                ):
-                    perceiver.parse_strict(
-                        1,
-                        "发言",
-                        1,
-                        "speech",
-                    )
-
-    def test_returns_empty_when_backend_raises(
-        self,
-    ):
-        backend = FakeBackend(
-            error=RuntimeError(
-                "backend unavailable"
-            )
+    def test_rejects_extra_or_partial_lines(self):
+        responses = (
+            "player1 | support",
+            "player1 | support | player2 | extra",
+            "player1 | support | player2\n解释：这是抽取原因",
+            "NONE\nplayer1 | support | player2",
         )
+        for response in responses:
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+                with self.assertRaises(SpeechActionValidationError):
+                    perceiver.parse(1, "公开发言", 1, "speech")
+
+    def test_rejects_unknown_action_and_invalid_player(self):
+        for response in (
+            "player1 | invented_action | player2",
+            "player1 | support | player8",
+        ):
+            with self.subTest(response=response):
+                perceiver = SpeechPerceiver(
+                    backend=FakeBackend(response),
+                    model_name="test-model",
+                )
+                with self.assertRaises(SpeechActionValidationError):
+                    perceiver.parse(1, "公开发言", 1, "speech")
+
+    def test_mixed_valid_invalid_output_fails_as_one_response(self):
         perceiver = SpeechPerceiver(
-            backend=backend,
+            backend=FakeBackend(
+                "player1 | support | player2\n"
+                "player1 | invented_action | player3"
+            ),
             model_name="test-model",
         )
+        with self.assertRaises(SpeechActionValidationError) as caught:
+            perceiver.parse(1, "公开发言", 1, "speech")
+        self.assertEqual(caught.exception.invalid_count, 1)
 
-        self.assertEqual(
-            perceiver.parse(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
+    def test_strict_with_response_preserves_backend_text(self):
+        raw_response = "player1 | support | player3"
+        backend = FakeBackend(raw_response)
+        perceiver = SpeechPerceiver(backend=backend, model_name="test-model")
 
-    def test_returns_empty_for_malformed_response(
-        self,
-    ):
-        backend = FakeBackend(
-            "not a structured response"
+        actions, returned_response = perceiver.parse_strict_with_response(
+            1, "发言", 1, "speech"
         )
+        self.assertEqual(actions, [["player1", "support", "player3"]])
+        self.assertEqual(returned_response, raw_response)
+
+    def test_validation_error_attaches_unchanged_backend_text(self):
+        raw_response = "player1 | invented_action | player2"
         perceiver = SpeechPerceiver(
-            backend=backend,
+            backend=FakeBackend(raw_response),
             model_name="test-model",
         )
+        with self.assertRaises(SpeechActionValidationError) as caught:
+            perceiver.parse(1, "发言", 1, "speech")
+        self.assertEqual(caught.exception.raw_response, raw_response)
 
-        self.assertEqual(
-            perceiver.parse(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
-
-    def test_overlong_garbage_fails_closed_without_retry(self):
-        backend = FakeBackend(
-            "not-an-action " * 10000
-        )
+    def test_parse_with_audit_records_success(self):
+        raw_response = "player1 | support | player2"
         perceiver = SpeechPerceiver(
-            backend=backend,
+            backend=FakeBackend(raw_response),
             model_name="test-model",
         )
-
+        result = perceiver.parse_with_audit(1, "我支持2号。", 1, "speech")
         self.assertEqual(
-            perceiver.parse(
-                1,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
+            result.normalized_actions,
+            [["player1", "support", "player2"]],
         )
-        self.assertEqual(len(backend.calls), 1)
+        self.assertEqual(result.raw_response, raw_response)
+        self.assertEqual(result.parse_status, "ok")
+        self.assertIsNone(result.error_type)
+        self.assertIsNone(result.error_message)
 
-    def test_rejects_invalid_speaker(
-        self,
-    ):
-        backend = FakeBackend("NONE")
+    def test_parse_with_audit_fails_closed_without_repair(self):
+        raw_response = '[["player1", "support", "player2"]]'
         perceiver = SpeechPerceiver(
-            backend=backend,
+            backend=FakeBackend(raw_response),
             model_name="test-model",
         )
+        result = perceiver.parse_with_audit(1, "我支持2号。", 1, "speech")
+        self.assertEqual(result.normalized_actions, [])
+        self.assertEqual(result.raw_response, raw_response)
+        self.assertEqual(result.parse_status, "parser_error")
+        self.assertEqual(result.error_type, "SpeechActionValidationError")
 
-        self.assertEqual(
-            perceiver.parse(
-                0,
-                "发言",
-                1,
-                "speech",
-            ),
-            [],
-        )
-        self.assertEqual(
-            backend.calls,
-            [],
-        )
-
-    def test_rejects_empty_speech_without_calling_backend(
-        self,
-    ):
-        backend = FakeBackend("NONE")
+    def test_parse_with_audit_records_backend_failure(self):
         perceiver = SpeechPerceiver(
-            backend=backend,
+            backend=FakeBackend(error=RuntimeError("backend unavailable")),
             model_name="test-model",
         )
+        result = perceiver.parse_with_audit(1, "发言", 1, "speech")
+        self.assertEqual(result.normalized_actions, [])
+        self.assertIsNone(result.raw_response)
+        self.assertEqual(result.parse_status, "parser_error")
+        self.assertEqual(result.error_type, "RuntimeError")
+        self.assertEqual(result.error_message, "backend unavailable")
 
-        self.assertEqual(
-            perceiver.parse(
-                1,
-                " ",
-                1,
-                "speech",
-            ),
-            [],
+    def test_parse_exposes_backend_and_precondition_failures(self):
+        perceiver = SpeechPerceiver(
+            backend=FakeBackend(error=RuntimeError("backend unavailable")),
+            model_name="test-model",
         )
-        self.assertEqual(
-            backend.calls,
-            [],
+        with self.assertRaisesRegex(RuntimeError, "backend unavailable"):
+            perceiver.parse(1, "发言", 1, "speech")
+
+        for unconfigured in (
+            SpeechPerceiver(model_name="test-model"),
+            SpeechPerceiver(backend=FakeBackend("NONE")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "must be configured"):
+                unconfigured.parse(1, "发言", 1, "speech")
+
+        configured = SpeechPerceiver(
+            backend=FakeBackend("NONE"),
+            model_name="test-model",
         )
+        with self.assertRaisesRegex(ValueError, "speaker"):
+            configured.parse(0, "发言", 1, "speech")
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            configured.parse(1, " ", 1, "speech")
 
 
 if __name__ == "__main__":

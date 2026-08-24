@@ -34,13 +34,7 @@ ROLES = [
 ]
 STRICT_SPEECH_ACTION = (
     "speech",
-    {
-        "raw_text": "player3 looks suspicious",
-        "sp_actions": [
-            ["player1", "point_as_werewolf", "player3"],
-            ["player1", "vote_intent", "player3"],
-        ],
-    },
+    "player3 looks suspicious",
 )
 
 
@@ -195,7 +189,7 @@ class TrajectoryEnvironment:
                     "event_idx": len(self.public_events),
                     "event_type": "public_speech",
                     "speaker": "player1",
-                    "raw_text": action[1]["raw_text"],
+                    "raw_text": action[1],
                 }
             )
             self.public_events.append(
@@ -332,7 +326,7 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
         for event in speech_transition["public_events_appended"]
         if event["event_type"] == "public_speech"
     )
-    assert committed_speech["raw_text"] == STRICT_SPEECH_ACTION[1]["raw_text"]
+    assert committed_speech["raw_text"] == STRICT_SPEECH_ACTION[1]
     assert "sp_actions" not in committed_speech
     assert vote_transition["public_events_appended"][-1]["event_type"] == (
         "exile_result"

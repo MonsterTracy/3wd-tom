@@ -29,13 +29,13 @@
 5. 为每次尝试选择全新的 `run_id` 和不存在的输出目录，例如 `/data/yuxiao/3wd-tom/canonical_data/<run_id>`。
 6. 运行 `python -m script.twd_tom.collect_canonical_trajectories ...`。不启用自动重试、replacement seed 或 provider fallback。
 7. 逐局确认存在 `speech_annotations.jsonl`；每条公开发言都必须是 `annotation_source=llm_parser` 且不能是 `status=error`。生成器 intent 不能替代独立 parser 标注。
-8. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；只有 audit `status=PASS` 才能物化数据集。
+8. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；该命令会验证成功 batch 的 plan/summary/per-game digest 与 snapshot SHA256 链，只有 audit `status=PASS` 才能物化数据集。
 9. 失败后保留失败工件并更换 `run_id`，不得覆盖或续写原目录。
 
 ## 数据物化、训练与评估
 
-1. 用 `script.twd_tom.materialize_canonical_belief_dataset` 按 game-level split 直接物化 raw belief snapshots；当前主线没有 C1、D 或 `split_offline_d_training_data` 阶段。
-2. `train` 只读取 train/validation；test 只由 `eval` 读取。
+1. 用 `script.twd_tom.materialize_canonical_belief_dataset` 按 game-level split 直接物化 raw belief snapshots；输出目录必须同时包含 `split_manifest.json`，当前主线没有 C1、D 或 `split_offline_d_training_data` 阶段。不要手工移动、改名或拼接三份 JSONL。
+2. `train` 只接受同一个 `split_manifest.json` 指定的 train/validation；test 只由 `eval` 读取。`eval` 要求 checkpoint 的 manifest digest 与 test 所属 manifest 一致，并验证 test 与 train、validation 均无 game overlap。
 3. 数据集写入 `/data/yuxiao/3wd-tom/datasets`，checkpoint 和 metrics 写入 `/data/yuxiao/3wd-tom/outputs`。
 4. 保存 commit、配置 SHA256、`run_id`、模型 ID、endpoint、seeds、环境版本、采集 plan/summary/failure、每局 call audit、数据 audit、split manifest、checkpoint 和 metrics。
 5. 模型服务与长任务交给服务器 service manager 或会话管理器；仓库不负责自动下载模型或守护进程。

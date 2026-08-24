@@ -14,6 +14,7 @@ from werewolf.models.twd_tom.public_events import (
     normalize_public_events,
     public_event_digest,
 )
+from werewolf.speech.speech_perceiver import SpeechParseAuditResult
 from werewolf.trajectory import (
     OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION,
     OBSERVATION_SCHEMA_VERSION,
@@ -29,6 +30,22 @@ from werewolf.trajectory import (
 
 
 REPLAY_RESULT_SCHEMA_VERSION = "classic7_canonical_replay_result_v1"
+
+
+class _ReplaySpeechPerceiver:
+    """Avoid parser/model calls while replaying immutable public text."""
+
+    model_name = "canonical_replay_no_parser"
+
+    @staticmethod
+    def parse_with_audit(**_context) -> SpeechParseAuditResult:
+        return SpeechParseAuditResult(
+            normalized_actions=[],
+            raw_response=None,
+            parse_status="ok",
+            error_type=None,
+            error_message=None,
+        )
 
 
 def _load_json_object(path: Path) -> dict[str, Any]:
@@ -146,7 +163,9 @@ def _runtime_action(
     if not isinstance(action_type, str):
         raise TypeError("submitted action type must be text")
 
-    if action_type in PUBLIC_SPEECH_KINDS and isinstance(action_content, str):
+    if action_type in PUBLIC_SPEECH_KINDS:
+        if not isinstance(action_content, str):
+            raise TypeError("replayed speech action content must be text")
         speech_events = [
             event
             for event in expected_appended_events
@@ -154,14 +173,8 @@ def _runtime_action(
         ]
         if len(speech_events) != 1:
             raise ValueError("text speech replay requires one recorded speech event")
-        action_content = {
-            "raw_text": action_content,
-            # Replay only needs the immutable public text. Supplying an empty
-            # generator contract prevents any parser/model call while leaving
-            # the v4 public event byte-for-byte identical. Parser annotations
-            # are validated separately against speech_annotations.jsonl.
-            "sp_actions": [],
-        }
+        if speech_events[0].get("raw_text") != action_content:
+            raise ValueError("replayed speech differs from recorded public text")
     return action_type, action_content
 
 
@@ -208,6 +221,7 @@ def replay_canonical_trajectory(
     replay_env_config = dict(env_config)
     replay_env_config["log_save_path"] = None
     replay_env_config["random_seed"] = environment_seed
+    replay_env_config["speech_perceiver"] = _ReplaySpeechPerceiver()
     env = WerewolfTextEnvV0(**replay_env_config)
     observation = env.reset(roles=roles)
 

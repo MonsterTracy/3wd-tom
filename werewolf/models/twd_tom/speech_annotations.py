@@ -14,15 +14,15 @@ from werewolf.models.twd_tom.schema import (
 )
 
 
-SPEECH_ANNOTATION_SCHEMA_VERSION = "classic7_speech_annotation_v1"
+SPEECH_ANNOTATION_SCHEMA_VERSION = "classic7_speech_annotation_v2"
 SPEECH_ACTION_ONTOLOGY_VERSION = "classic7_speech_action_v1"
-SPEECH_PARSER_PROMPT_VERSION = "classic7_speech_parser_v1"
+SPEECH_PARSER_PROMPT_VERSION = "classic7_speech_parser_v2"
 
 STATUS_OK = "ok"
 STATUS_NO_ACTION = "no_action"
 STATUS_ERROR = "error"
 ANNOTATION_STATUSES = frozenset({STATUS_OK, STATUS_NO_ACTION, STATUS_ERROR})
-ANNOTATION_SOURCES = frozenset({"llm_parser", "generator_contract"})
+ANNOTATION_SOURCES = frozenset({"llm_parser"})
 
 ANNOTATION_FIELDS = frozenset(
     {

@@ -1,4 +1,3 @@
-import inspect
 import unittest
 
 from werewolf.agents.prompt_template_v0 import (
@@ -15,7 +14,6 @@ from werewolf.agents.prompt_template_v0 import (
     freeze_discussion_candidates,
     project_discussion_content_indices,
     project_discussion_vote_stances,
-    render_deterministic_public_speech,
 )
 from werewolf.helper.log_utils import Log
 
@@ -553,122 +551,6 @@ Villager: {3}""".format(*counts)
         self.assertIn("Actual role supplied by the Environment: Seer", prompt)
         self.assertIn("Environment-supplied self role", prompt)
         self.assertIn("Infer only these unresolved players", prompt)
-
-    def test_deterministic_renderer_covers_all_discussion_act_meanings(self):
-        cases = (
-            ("point_as_werewolf", 2, "我认为 player2 是狼人。"),
-            (
-                "point_as_non_werewolf",
-                2,
-                "我认为 player2 不是狼人，属于好人阵营。",
-            ),
-            ("point_as_villager", 2, "我认为 player2 是普通村民。"),
-            ("point_as_seer", 2, "我认为 player2 是预言家。"),
-            ("point_as_witch", 2, "我认为 player2 是女巫。"),
-            ("support", 2, "我支持 player2。"),
-            ("oppose", 2, "我质疑 player2。"),
-            ("check_as_non_werewolf", 2, "我查验过 player2，结果不是狼人。"),
-            ("check_as_werewolf", 2, "我查验过 player2，结果是狼人。"),
-            ("save", 2, "我用解药救了 player2。"),
-            ("poison", 2, "我对 player2 使用了毒药。"),
-            ("vote_intent", 2, "这一轮我建议投票放逐 player2。"),
-            ("abstain_intent", None, "这一轮我选择弃票。"),
-            (
-                "no_commitment",
-                None,
-                "这一轮我暂不作明确的身份、查验、技能或投票表态。",
-            ),
-        )
-
-        self.assertEqual(tuple(action for action, _target, _text in cases), DISCUSSION_ACTIONS)
-        for action, target, expected in cases:
-            with self.subTest(action=action):
-                self.assertEqual(
-                    render_deterministic_public_speech(
-                        1,
-                        discussion_acts=(DiscussionAct(action, target),),
-                    ),
-                    expected,
-                )
-
-        realized = {action: text for action, _target, text in cases}
-        self.assertNotIn("好人", realized["point_as_villager"])
-        self.assertNotIn("普通村民", realized["check_as_non_werewolf"])
-
-    def test_deterministic_renderer_naturalizes_self_role_claims(self):
-        cases = (
-            ("point_as_villager", "我是普通村民。"),
-            ("point_as_seer", "我是预言家。"),
-            ("point_as_witch", "我是女巫。"),
-        )
-
-        for action, expected in cases:
-            with self.subTest(action=action):
-                self.assertEqual(
-                    render_deterministic_public_speech(
-                        3,
-                        discussion_acts=(DiscussionAct(action, 3),),
-                    ),
-                    expected,
-                )
-
-        with self.assertRaisesRegex(ValueError, "cannot accuse itself"):
-            render_deterministic_public_speech(
-                3,
-                discussion_acts=(DiscussionAct("point_as_werewolf", 3),),
-            )
-
-    def test_deterministic_renderer_preserves_order_and_is_atemporal(self):
-        speech = render_deterministic_public_speech(
-            3,
-            discussion_acts=(
-                DiscussionAct("check_as_werewolf", 6),
-                DiscussionAct("save", 5),
-                DiscussionAct("poison", 4),
-            ),
-        )
-
-        self.assertEqual(
-            speech.splitlines(),
-            [
-                "我查验过 player6，结果是狼人。",
-                "我用解药救了 player5。",
-                "我对 player4 使用了毒药。",
-            ],
-        )
-        for temporal_anchor in (
-            "昨晚",
-            "前晚",
-            "第一夜",
-            "第1夜",
-            "今天查验",
-            "Night0",
-            "Night1",
-        ):
-            self.assertNotIn(temporal_anchor, speech)
-
-    def test_deterministic_renderer_has_no_evidence_interface(self):
-        signature = inspect.signature(render_deterministic_public_speech)
-
-        self.assertEqual(
-            tuple(signature.parameters),
-            ("speaker_id", "discussion_acts"),
-        )
-        self.assertNotIn("selected_claims", signature.parameters)
-        self.assertEqual(
-            render_deterministic_public_speech(
-                3,
-                discussion_acts=(DiscussionAct("oppose", 6),),
-            ),
-            "我质疑 player6。",
-        )
-
-    def test_deterministic_renderer_unknown_action_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "unknown DiscussionAct action"):
-            render_deterministic_public_speech(
-                1,
-                discussion_acts=(DiscussionAct("unknown_action", 2),),
-            )
 
     def test_frozen_discussion_candidates_enforce_only_hard_boundaries(self):
         self.assertEqual(

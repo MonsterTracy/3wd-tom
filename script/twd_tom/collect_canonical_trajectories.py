@@ -64,13 +64,14 @@ from werewolf.trajectory import (
     TRAJECTORY_SCHEMA_VERSION,
     canonical_digest,
     canonical_json,
+    sanitize_exception_message,
 )
 
 
 BATCH_PLAN_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_plan_v4"
 GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v4"
 BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v4"
-BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v1"
+BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v2"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 
 BACKEND_MAX_RETRIES = 0
@@ -210,6 +211,148 @@ def _load_jsonl_objects(path: Path) -> list[dict[str, Any]]:
             raise TypeError(f"JSONL record must be an object: {path}:{line_number}")
         records.append(value)
     return records
+
+
+def _validate_embedded_digest(
+    value: Mapping[str, Any],
+    *,
+    digest_field: str,
+    artifact_name: str,
+) -> str:
+    payload = dict(value)
+    digest = payload.pop(digest_field, None)
+    if not isinstance(digest, str) or not digest:
+        raise ValueError(f"{artifact_name} has no {digest_field}")
+    if digest != canonical_digest(payload):
+        raise ValueError(f"{artifact_name} {digest_field} mismatch")
+    return digest
+
+
+def validate_canonical_belief_batch(
+    canonical_root: str | Path,
+) -> dict[str, Any]:
+    """Verify the successful batch summary chain that owns belief snapshots."""
+
+    root = Path(canonical_root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"canonical root not found: {root}")
+    if (root / "batch_failure.json").exists():
+        raise ValueError("canonical batch contains batch_failure.json")
+
+    plan_path = root / "plan.json"
+    plan = _load_json_object(plan_path)
+    if plan.get("schema_version") != BATCH_PLAN_SCHEMA_VERSION:
+        raise ValueError("canonical batch plan schema version mismatch")
+    plan_digest = _validate_embedded_digest(
+        plan,
+        digest_field="plan_digest",
+        artifact_name="canonical batch plan",
+    )
+
+    summary_path = root / "summary.json"
+    summary = _load_json_object(summary_path)
+    if summary.get("schema_version") != BATCH_SUMMARY_SCHEMA_VERSION:
+        raise ValueError("canonical batch summary schema version mismatch")
+    summary_digest = _validate_embedded_digest(
+        summary,
+        digest_field="summary_digest",
+        artifact_name="canonical batch summary",
+    )
+    if summary.get("plan_digest") != plan_digest:
+        raise ValueError("canonical batch summary does not match plan")
+
+    planned_count = _positive_integer(
+        summary.get("planned_game_count"),
+        field_name="planned_game_count",
+    )
+    completed_count = _positive_integer(
+        summary.get("completed_game_count"),
+        field_name="completed_game_count",
+    )
+    if completed_count != planned_count:
+        raise ValueError("canonical batch is not complete")
+    if plan.get("planned_game_count") != planned_count:
+        raise ValueError("canonical batch plan and summary game counts differ")
+
+    game_ids = summary.get("game_ids")
+    if not isinstance(game_ids, list) or len(game_ids) != completed_count:
+        raise ValueError("canonical batch summary game_ids count mismatch")
+    if any(not isinstance(game_id, str) or not game_id.strip() for game_id in game_ids):
+        raise ValueError("canonical batch game_ids must be non-empty text")
+    if len(set(game_ids)) != len(game_ids):
+        raise ValueError("canonical batch game_ids must be unique")
+    summary_digests = summary.get("game_summary_digests")
+    if (
+        not isinstance(summary_digests, Mapping)
+        or set(summary_digests) != set(game_ids)
+    ):
+        raise ValueError("canonical batch game summary digest set mismatch")
+
+    games_root = root / "games"
+    if not games_root.is_dir():
+        raise FileNotFoundError(f"canonical games directory not found: {games_root}")
+    game_directories = sorted(path for path in games_root.iterdir() if path.is_dir())
+    if len(game_directories) != completed_count:
+        raise ValueError("canonical game directory count mismatch")
+
+    verified_by_id: dict[str, dict[str, Any]] = {}
+    total_snapshot_count = 0
+    total_report_count = 0
+    for game_dir in game_directories:
+        game_summary_path = game_dir / "summary.json"
+        game_summary = _load_json_object(game_summary_path)
+        if game_summary.get("schema_version") != GAME_SUMMARY_SCHEMA_VERSION:
+            raise ValueError("canonical game summary schema version mismatch")
+        game_summary_digest = _validate_embedded_digest(
+            game_summary,
+            digest_field="summary_digest",
+            artifact_name=f"canonical game summary {game_dir.name}",
+        )
+        game_id = game_summary.get("game_id")
+        if not isinstance(game_id, str) or not game_id.strip():
+            raise ValueError("canonical game summary has no valid game_id")
+        if game_id in verified_by_id:
+            raise ValueError(f"duplicate canonical game_id: {game_id}")
+        if summary_digests.get(game_id) != game_summary_digest:
+            raise ValueError(f"canonical game summary digest mismatch: {game_id}")
+
+        belief_path = game_dir / BELIEF_SNAPSHOTS_FILENAME
+        belief_sha256 = _sha256(belief_path)
+        if game_summary.get("belief_snapshots_sha256") != belief_sha256:
+            raise ValueError(f"canonical belief snapshot SHA-256 mismatch: {game_id}")
+        snapshot_count = _positive_integer(
+            game_summary.get("belief_snapshot_count"),
+            field_name="belief_snapshot_count",
+        )
+        report_count = _positive_integer(
+            game_summary.get("belief_report_count"),
+            field_name="belief_report_count",
+        )
+        total_snapshot_count += snapshot_count
+        total_report_count += report_count
+        verified_by_id[game_id] = {
+            "game_id": game_id,
+            "game_summary_digest": game_summary_digest,
+            "relative_path": str(belief_path.relative_to(root)),
+            "belief_snapshots_sha256": belief_sha256,
+            "belief_snapshot_count": snapshot_count,
+        }
+
+    if set(verified_by_id) != set(game_ids):
+        raise ValueError("canonical game directories do not match batch summary")
+    if summary.get("total_belief_snapshot_count") != total_snapshot_count:
+        raise ValueError("canonical batch belief snapshot total mismatch")
+    if summary.get("total_belief_report_count") != total_report_count:
+        raise ValueError("canonical batch belief report total mismatch")
+
+    return {
+        "canonical_root": str(root),
+        "plan_digest": plan_digest,
+        "batch_summary_digest": summary_digest,
+        "batch_summary_sha256": _sha256(summary_path),
+        "game_ids": list(game_ids),
+        "games": [verified_by_id[game_id] for game_id in game_ids],
+    }
 
 
 def _reject_private_belief_artifact_keys(value: Any) -> None:
@@ -601,16 +744,10 @@ def validate_complete_game_artifacts(
             if speech.get("speaker") != f"player{transition['acting_player_id']}":
                 raise ValueError("committed public speech speaker mismatch")
             content = action[1]
-            if isinstance(content, Mapping):
-                if set(content) != {"raw_text", "sp_actions"}:
-                    raise ValueError("strict speech action fields do not match contract")
-                if content["raw_text"] != speech.get("raw_text"):
-                    raise ValueError("submitted and committed speech raw_text differ")
-            elif isinstance(content, str):
-                if content != speech.get("raw_text"):
-                    raise ValueError("submitted and committed speech raw_text differ")
-            else:
-                raise TypeError("speech action content must be text or a mapping")
+            if not isinstance(content, str):
+                raise TypeError("speech action content must be text")
+            if content != speech.get("raw_text"):
+                raise ValueError("submitted and committed speech raw_text differ")
             speech_steps.append((expected_step, transition, speeches))
         reconstructed = normalize_public_events([*reconstructed, *appended])
         alive = transition["alive_players_after"]
@@ -832,16 +969,6 @@ def validate_speech_annotation_artifact(
             "canonical speech annotations require successful parsing; "
             f"error_event_indices={failed}"
         )
-    non_parser = [
-        annotation["event_idx"]
-        for annotation in annotations
-        if annotation["annotation_source"] != "llm_parser"
-    ]
-    if non_parser:
-        raise ValueError(
-            "canonical collection forbids generator-contract annotations; "
-            f"event_indices={non_parser}"
-        )
     return {
         "speech_annotation_schema_version": SPEECH_ANNOTATION_SCHEMA_VERSION,
         "speech_action_ontology_version": SPEECH_ACTION_ONTOLOGY_VERSION,
@@ -861,6 +988,7 @@ def validate_speech_annotation_artifact(
 def validate_belief_snapshot_artifact(
     belief_snapshots_path: str | Path,
     observer_views_path: str | Path,
+    speech_annotations_path: str | Path,
     *,
     expected_game_id: str,
 ) -> dict[str, Any]:
@@ -868,6 +996,7 @@ def validate_belief_snapshot_artifact(
 
     belief_snapshots_path = Path(belief_snapshots_path)
     provenance = _load_json_object(Path(observer_views_path))
+    canonical_annotations = _load_jsonl_objects(Path(speech_annotations_path))
     records = _load_jsonl_objects(belief_snapshots_path)
     pre_boundaries = {
         boundary["step_idx"]: boundary
@@ -976,6 +1105,24 @@ def validate_belief_snapshot_artifact(
             public_events=public_events,
             require_complete=True,
         )
+        public_speech_event_indices = {
+            event["event_idx"]
+            for event in public_events
+            if event["event_type"] == "public_speech"
+        }
+        expected_speech_annotations = normalize_speech_annotations(
+            [
+                annotation
+                for annotation in canonical_annotations
+                if annotation.get("event_idx") in public_speech_event_indices
+            ],
+            public_events=public_events,
+            require_complete=True,
+        )
+        if speech_annotations != expected_speech_annotations:
+            raise ValueError(
+                "belief snapshot speech annotations differ from canonical sidecar"
+            )
         if len(public_events) != boundary["public_event_count_at_materialization"]:
             raise ValueError("belief snapshot public cutoff count mismatch")
         if record["public_event_digest"] != public_event_digest(public_events):
@@ -1084,6 +1231,7 @@ def _failure_record(
         "failed_game_id": failed_game_id,
         "failure_stage": failure_stage,
         "exception_type": type(exception).__name__,
+        "exception_message": sanitize_exception_message(exception),
         "completed_game_count": len(completed_games),
         "completed_game_ids": [game["game_id"] for game in completed_games],
         "stop_on_first_failure": True,
@@ -1265,6 +1413,7 @@ def collect_canonical_trajectory_batch(
                     validate_belief_snapshot_artifact(
                         belief_snapshots_path,
                         observer_views_path,
+                        speech_annotations_path,
                         expected_game_id=game_id,
                     )
                 )

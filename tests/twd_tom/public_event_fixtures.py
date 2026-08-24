@@ -58,7 +58,7 @@ def make_speech_annotations(public_events, sp_actions=()):
             raw_text=event["raw_text"],
             parser_model_id="synthetic_parser",
             parser_call_id=f"synthetic_{event['event_idx']:06d}",
-            annotation_source="generator_contract",
+            annotation_source="llm_parser",
             status="ok" if index == 0 and sp_actions else "no_action",
             actions=deepcopy(sp_actions) if index == 0 else [],
             raw_response=None,

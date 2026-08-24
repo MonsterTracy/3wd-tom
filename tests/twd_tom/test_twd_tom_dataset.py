@@ -7,6 +7,7 @@ from copy import deepcopy
 import pytest
 import torch
 
+from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_labels import (
     suspicion_set_to_belief_vector,
 )
@@ -14,6 +15,7 @@ from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
+    TARGET_SEMANTICS,
     TWDToMDataset,
     collate_twd_tom_samples,
     cyclically_rotate_belief_sample,
@@ -41,6 +43,7 @@ def test_dataset_consumes_raw_self_report_and_emits_fixed_belief_contract(
     assert item["observer_alive_mask"].dtype == torch.bool
     assert item["diagonal_target_mask"].dtype == torch.bool
     assert item["metadata"]["target_conversion"] == TARGET_CONVERSION
+    assert item["metadata"]["target_semantics"] == TARGET_SEMANTICS
     assert "pair_targets" not in item
     assert "known_werewolves" not in item
     assert "known_non_werewolves" not in item
@@ -288,6 +291,24 @@ def test_public_cutoff_and_digest_validation_remain_strict(
     )
     with pytest.raises(ValueError, match="matching turn_start"):
         TWDToMDataset([broken])
+
+
+def test_model_features_exclude_only_the_terminal_pre_speech_turn_start(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory()
+    item = TWDToMDataset([sample])[0]
+    expected = PublicEventFeatureBuilder().encode_events(
+        sample["public_events"][:-1],
+        sample["speech_annotations"],
+    )
+    complete = PublicEventFeatureBuilder().encode_events(
+        sample["public_events"],
+        sample["speech_annotations"],
+    )
+    for field_name in PublicEventFeatureBuilder.FEATURE_FIELDS:
+        assert torch.equal(item[field_name], expected[field_name])
+    assert item["subject_ids"].shape[0] < complete["subject_ids"].shape[0]
 
 
 def test_jsonl_loading_and_dataset_materialization_are_deterministic(

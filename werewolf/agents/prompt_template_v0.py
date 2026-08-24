@@ -75,28 +75,6 @@ _DISCUSSION_ACTION_SEMANTICS = {
         "make no explicit role/check/skill/vote commitment this turn"
     ),
 }
-_DISCUSSION_ACTION_REALIZATIONS = {
-    "point_as_werewolf": "我认为 player{target} 是狼人。",
-    "point_as_non_werewolf": "我认为 player{target} 不是狼人，属于好人阵营。",
-    "point_as_villager": "我认为 player{target} 是普通村民。",
-    "point_as_seer": "我认为 player{target} 是预言家。",
-    "point_as_witch": "我认为 player{target} 是女巫。",
-    "support": "我支持 player{target}。",
-    "oppose": "我质疑 player{target}。",
-    "check_as_non_werewolf": "我查验过 player{target}，结果不是狼人。",
-    "check_as_werewolf": "我查验过 player{target}，结果是狼人。",
-    "save": "我用解药救了 player{target}。",
-    "poison": "我对 player{target} 使用了毒药。",
-    "vote_intent": "这一轮我建议投票放逐 player{target}。",
-    "abstain_intent": "这一轮我选择弃票。",
-    "no_commitment": "这一轮我暂不作明确的身份、查验、技能或投票表态。",
-}
-_SELF_ROLE_CLAIM_REALIZATIONS = {
-    "point_as_werewolf": "我是狼人。",
-    "point_as_villager": "我是普通村民。",
-    "point_as_seer": "我是预言家。",
-    "point_as_witch": "我是女巫。",
-}
 _ALL_PLAYER_TARGET_ACTIONS = DISCUSSION_ACTIONS[:7]
 _NON_SELF_TARGET_ACTIONS = DISCUSSION_ACTIONS[7:11]
 _PUBLIC_CONTENT_ACTIONS = DISCUSSION_ACTIONS[:11]
@@ -317,31 +295,6 @@ def render_discussion_act(act):
     if not isinstance(act, DiscussionAct):
         raise TypeError("discussion intent must contain DiscussionAct values")
     return act.action if act.target is None else f"{act.action}(player{act.target})"
-
-
-def render_deterministic_public_speech(
-    speaker_id,
-    *,
-    discussion_acts,
-):
-    lines = []
-    for act in discussion_acts:
-        if act.action not in _DISCUSSION_ACTION_REALIZATIONS:
-            raise ValueError(f"unknown DiscussionAct action: {act.action!r}")
-        if act.action == "point_as_werewolf" and act.target == speaker_id:
-            raise ValueError("a speaker cannot accuse itself of being Werewolf")
-        if (
-            act.action in _SELF_ROLE_CLAIM_REALIZATIONS
-            and act.target == speaker_id
-        ):
-            lines.append(_SELF_ROLE_CLAIM_REALIZATIONS[act.action])
-        else:
-            lines.append(
-                _DISCUSSION_ACTION_REALIZATIONS[act.action].format(
-                    target=act.target,
-                )
-            )
-    return "\n".join(lines)
 
 
 def _render_discussion_action_glossary():

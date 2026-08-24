@@ -12,58 +12,9 @@ from typing import Any
 SPEECH_PARSER_MAX_TOKENS = 256
 
 _PIPE_TRIPLET_PATTERN = re.compile(
-    r"^\s*[\"'`]?\s*"
-    r"(?P<subject>(?:player\s*)?[1-7])"
-    r"\s*[|｜]\s*"
-    r"(?P<action>[a-zA-Z_]+)"
-    r"\s*[|｜]\s*"
-    r"(?P<object>(?:player\s*[1-7]\s*至\s*player\s*[1-7]|"
-    r"(?:player\s*)?[1-7]|NONE|null|<none>))"
-    r"\s*[\"'`]?\s*[,;，；。.！!]?\s*$",
-    flags=re.IGNORECASE,
-)
-
-_BULLET_PREFIX_PATTERN = re.compile(
-    r"^\s*(?:[-*•]+\s*|\d+\s*[.)、:：-]\s*)"
-)
-
-_EXPLICIT_PLAYER_RANGE_PATTERN = re.compile(
-    r"^player\s*(?P<start>[1-7])\s*至\s*player\s*(?P<end>[1-7])$",
-    flags=re.IGNORECASE,
-)
-
-_EMPTY_RESPONSE_MARKERS = {
-    "none",
-    "no action",
-    "no actions",
-    "null",
-    "[]",
-    "无",
-    "无动作",
-    "没有动作",
-}
-
-_SELF_ROLE_ACTIONS = {
-    "狼人": "point_as_werewolf",
-    "村民": "point_as_villager",
-    "平民": "point_as_villager",
-    "预言家": "point_as_seer",
-    "女巫": "point_as_witch",
-}
-
-# This intentionally covers only literal first-person role declarations.
-# It does not infer roles from "好人", negations, conditions, quotations,
-# other-player reports, or hidden game state.
-_SELF_ROLE_CLAIM_PATTERN = re.compile(
-    r"(?:^|[。！？；;\n])\s*"
-    r"(?:"
-    r"我是\s*(?:[1-7]\s*号(?:\s*玩家)?)?\s*[，,\s]*"
-    r"(?:身份(?:是|为|：|:)\s*)?"
-    r"|我的身份(?:是|为|：|:)\s*"
-    r"|我身份(?:是|为|：|:)\s*"
-    r")"
-    r"(?:一名|一个|普通的?)?\s*"
-    r"(?P<role>狼人|村民|平民|预言家|女巫)"
+    r"^(?P<subject>player[1-7]) \| "
+    r"(?P<action>[a-z_]+) \| "
+    r"(?P<object>player[1-7]|NONE)$"
 )
 
 
@@ -113,7 +64,6 @@ class SpeechParseAuditResult:
     normalized_actions: list[list[str | None]]
     raw_response: str | None
     parse_status: str
-    protected_self_claim_actions: list[list[str | None]]
     error_type: str | None
     error_message: str | None
 
@@ -130,9 +80,9 @@ class SpeechPerceiver:
         player2 | point_as_werewolf | player5
         player2 | oppose | player3
 
-    ``NONE`` represents a valid speech with no extractable action. Legacy
-    JSON-array responses remain readable so existing logs and backends do
-    not break during the format migration.
+    ``NONE`` is the only valid response with no extractable action. JSON,
+    Markdown, bullets, commentary, alternate subjects and partial lines are
+    rejected rather than repaired.
 
     This parser only receives public speech text. It does not construct
     private subjective guesses and never receives the game's true roles.
@@ -150,15 +100,15 @@ class SpeechPerceiver:
         phase: str,
         context: dict | None = None,
     ) -> list[list[str | None]]:
-        """Parse one speech turn without interrupting the game on failure."""
+        """Strictly parse one public speech turn."""
 
         del context
-        return self.parse_with_audit(
+        return self.parse_strict(
             speaker=speaker,
             speech=speech,
             day=day,
             phase=phase,
-        ).normalized_actions
+        )
 
     def parse_with_audit(
         self,
@@ -167,7 +117,7 @@ class SpeechPerceiver:
         day: int,
         phase: str,
     ) -> SpeechParseAuditResult:
-        """Parse once through the online tolerant path and retain audit data."""
+        """Parse once through the formal protocol and retain audit data."""
 
         precondition_error = None
         if self.backend is None or not self.model_name:
@@ -185,28 +135,21 @@ class SpeechPerceiver:
                 normalized_actions=[],
                 raw_response=None,
                 parse_status="parser_error",
-                protected_self_claim_actions=[],
                 error_type=type(precondition_error).__name__,
                 error_message=str(precondition_error),
             )
 
-        protected_actions = self._extract_explicit_self_claim_actions(
-            speaker=speaker,
-            speech=speech,
-        )
         try:
-            actions, raw_response = self._parse_configured_with_response(
+            actions, raw_response = self.parse_strict_with_response(
                 speaker=speaker,
                 speech=speech,
                 day=day,
                 phase=phase,
-                protected_actions=protected_actions,
             )
             return SpeechParseAuditResult(
                 normalized_actions=actions,
                 raw_response=raw_response,
                 parse_status="ok",
-                protected_self_claim_actions=protected_actions,
                 error_type=None,
                 error_message=None,
             )
@@ -218,7 +161,6 @@ class SpeechPerceiver:
                 normalized_actions=[],
                 raw_response=raw_response,
                 parse_status="parser_error",
-                protected_self_claim_actions=protected_actions,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
             )
@@ -230,12 +172,7 @@ class SpeechPerceiver:
         day: int,
         phase: str,
     ) -> list[list[str | None]]:
-        """Parse one speech while exposing configuration and parser errors.
-
-        This entry point is for offline audits and reparsing only. The online
-        environment continues to call :meth:`parse`, which remains fail-closed
-        so a parser outage cannot interrupt a game.
-        """
+        """Parse one speech while exposing configuration and parser errors."""
 
         actions, _raw_response = (
             self.parse_strict_with_response(
@@ -271,47 +208,12 @@ class SpeechPerceiver:
                 "speech must be non-empty text"
             )
 
-        protected_actions = (
-            self._extract_explicit_self_claim_actions(
-                speaker=speaker,
-                speech=speech,
-            )
-        )
-
         return self._parse_configured_with_response(
             speaker=speaker,
             speech=speech,
             day=day,
             phase=phase,
-            protected_actions=(
-                protected_actions
-            ),
-            strict=True,
         )
-
-    def _parse_configured(
-        self,
-        *,
-        speaker: int,
-        speech: str,
-        day: int,
-        phase: str,
-        protected_actions: Sequence[
-            Sequence[str]
-        ],
-        strict: bool = False,
-    ) -> list[list[str | None]]:
-        actions, _raw_response = (
-            self._parse_configured_with_response(
-                speaker=speaker,
-                speech=speech,
-                day=day,
-                phase=phase,
-                protected_actions=protected_actions,
-                strict=strict,
-            )
-        )
-        return actions
 
     def _parse_configured_with_response(
         self,
@@ -320,10 +222,6 @@ class SpeechPerceiver:
         speech: str,
         day: int,
         phase: str,
-        protected_actions: Sequence[
-            Sequence[str]
-        ],
-        strict: bool = False,
     ) -> tuple[list[list[str | None]], str]:
         prompt = self._build_prompt(
             speaker=speaker,
@@ -354,13 +252,11 @@ class SpeechPerceiver:
         try:
             parsed = self._extract_response_actions(
                 response_text,
-                strict=strict,
             )
 
             llm_actions = self._normalize(
                 parsed=parsed,
                 speaker=speaker,
-                strict=strict,
             )
         except SpeechActionValidationError as exc:
             raise SpeechActionValidationError(
@@ -374,13 +270,7 @@ class SpeechPerceiver:
             exc.raw_response = response_text
             raise
 
-        return (
-            self._merge_actions(
-                protected_actions,
-                llm_actions,
-            ),
-            response_text,
-        )
+        return llm_actions, response_text
 
     @staticmethod
     def _build_prompt(
@@ -524,334 +414,57 @@ player{speaker} | no_commitment | NONE
 player{speaker}: {speech}"""
 
     @classmethod
-    def _extract_explicit_self_claim_actions(
-        cls,
-        *,
-        speaker: int,
-        speech: str,
-    ) -> list[list[str | None]]:
-        """Protect literal first-person public role declarations.
-
-        This is deliberately narrow. It only preserves an identity that the
-        current speaker explicitly states about themself in the public text.
-        It never reads the player's real role, observation, or private state.
-        """
-
-        _, speech_action_type = (
-            _load_tom_schema()
-        )
-
-        actions: list[list[str | None]] = []
-        seen: set[
-            tuple[str | None, str | None, str | None]
-        ] = set()
-
-        for match in (
-            _SELF_ROLE_CLAIM_PATTERN.finditer(
-                speech
-            )
-        ):
-            action_name = _SELF_ROLE_ACTIONS[
-                match.group("role")
-            ]
-
-            try:
-                action = (
-                    speech_action_type
-                    .from_values(
-                        subject=speaker,
-                        action=action_name,
-                        object_=speaker,
-                    )
-                )
-            except (
-                TypeError,
-                ValueError,
-                KeyError,
-            ):
-                continue
-
-            normalized = action.to_list()
-            key = tuple(normalized)
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-            actions.append(normalized)
-
-        return actions
-
-    @staticmethod
-    def _merge_actions(
-        *action_groups: Sequence[
-            Sequence[str | None]
-        ],
-    ) -> list[list[str | None]]:
-        """Merge action groups while retaining distinct action triplets."""
-
-        merged: list[list[str | None]] = []
-        seen: set[
-            tuple[str | None, str | None, str | None]
-        ] = set()
-
-        for action_group in action_groups:
-            for action in action_group:
-                if (
-                    isinstance(
-                        action,
-                        (str, bytes),
-                    )
-                    or len(action) != 3
-                ):
-                    continue
-
-                normalized = list(action)
-                key = tuple(normalized)
-
-                if key in seen:
-                    continue
-
-                seen.add(key)
-                merged.append(normalized)
-
-        return merged
-
-    @classmethod
     def _extract_response_actions(
         cls,
         response_text: str,
-        *,
-        strict: bool = False,
     ) -> list:
-        """Read preferred pipe triplets with legacy JSON compatibility."""
+        """Read the exact pipe-triplet protocol or the exact ``NONE`` marker."""
 
         if not isinstance(response_text, str):
             raise ValueError(
                 "LLM response content must be text."
             )
 
-        text = response_text.strip()
-
-        if not text:
+        if not response_text:
             raise ValueError(
                 "LLM response content is empty."
             )
-
-        if strict:
-            meaningful_lines = [
-                line.strip()
-                for line in text.splitlines()
-                if line.strip()
-            ]
-
-            if (
-                len(meaningful_lines) == 1
-                and "`" not in meaningful_lines[0]
-                and cls._is_empty_marker(
-                    meaningful_lines[0]
-                )
-            ):
-                return []
-        elif cls._is_empty_marker(text):
+        if response_text == "NONE":
             return []
-
-        # The new ONUW-style format has priority.
-        pipe_actions = cls._extract_pipe_triplets(
-            text,
-            preserve_invalid=strict,
-        )
-
-        if pipe_actions:
-            return pipe_actions
-
-        # Keep old JSON responses readable during migration.
-        try:
-            json_actions = cls._extract_json_array(
-                text
-            )
-        except ValueError:
-            pass
-        else:
-            if strict:
-                try:
-                    exact_json = json.loads(text)
-                except json.JSONDecodeError:
-                    exact_json = None
-
-                if not isinstance(exact_json, list):
-                    raise SpeechActionValidationError(
-                        [
-                            {
-                                "candidate": text,
-                                "reason": (
-                                    "legacy JSON action output contains "
-                                    "extra non-protocol text"
-                                ),
-                            }
-                        ]
-                    )
-
-            return json_actions
-
-        if not strict and cls._contains_empty_marker(
-            text
-        ):
-            return []
-
-        raise ValueError(
-            "No structured speech action found in LLM response."
-        )
-
-    @staticmethod
-    def _extract_json_array(
-        response_text: str,
-    ) -> list:
-        """Extract the first JSON array from a legacy response."""
-
-        if not isinstance(response_text, str):
-            raise ValueError(
-                "LLM response content must be text."
-            )
-
-        text = response_text.strip()
-
-        try:
-            parsed = json.loads(
-                text
-            )
-
-            if isinstance(parsed, list):
-                return parsed
-        except json.JSONDecodeError:
-            pass
-
-        fenced_blocks = re.findall(
-            r"```(?:json)?\s*([\s\S]*?)\s*```",
-            text,
-            flags=re.IGNORECASE,
-        )
-
-        for fenced_text in fenced_blocks:
-            try:
-                parsed = json.loads(
-                    fenced_text
-                )
-
-                if isinstance(parsed, list):
-                    return parsed
-            except json.JSONDecodeError:
-                continue
-
-        decoder = json.JSONDecoder()
-
-        for index, character in enumerate(
-            text
-        ):
-            if character != "[":
-                continue
-
-            try:
-                parsed, _ = decoder.raw_decode(
-                    text[index:]
-                )
-            except json.JSONDecodeError:
-                continue
-
-            if isinstance(parsed, list):
-                return parsed
-
-        raise ValueError(
-            "No JSON array found in LLM response."
+        return cls._extract_pipe_triplets(
+            response_text,
         )
 
     @classmethod
     def _extract_pipe_triplets(
         cls,
         response_text: str,
-        *,
-        preserve_invalid: bool = False,
     ) -> list[list[str | None]]:
         """Extract strict ONUW-style pipe triplets from separate lines."""
 
-        if preserve_invalid:
-            cleaned_text = response_text
-        else:
-            cleaned_text = re.sub(
-                r"```(?:[a-zA-Z0-9_-]+)?\s*",
-                "",
-                response_text,
-                flags=re.IGNORECASE,
-            ).replace(
-                "```",
-                "",
-            )
-
         actions: list[list[str | None]] = []
         failures: list[dict[str, Any]] = []
-        lines: list[tuple[str, str]] = []
-
-        for raw_line in cleaned_text.splitlines():
-            original_line = raw_line.strip()
-
-            if not original_line:
-                continue
-
-            if preserve_invalid:
-                line = original_line
-            else:
-                # Tolerate accidental bullets or numbered lists online.
-                line = _BULLET_PREFIX_PATTERN.sub(
-                    "",
-                    original_line,
-                    count=1,
-                )
-
-            lines.append(
-                (original_line, line)
-            )
-
-        recognized_protocol = any(
-            re.search(r"[|｜]", line)
-            or cls._is_empty_marker(line)
-            for _, line in lines
-        )
-
-        for original_line, line in lines:
-
-            match = _PIPE_TRIPLET_PATTERN.fullmatch(
-                line
-            )
+        for line in response_text.splitlines():
+            match = _PIPE_TRIPLET_PATTERN.fullmatch(line)
 
             if match is None:
-                if preserve_invalid and recognized_protocol:
-                    reason = (
-                        "NONE must be the only non-empty response line"
-                        if cls._is_empty_marker(line)
-                        else (
-                            "non-empty response line does not match "
+                failures.append(
+                    {
+                        "candidate": line,
+                        "reason": (
+                            "response line does not exactly match "
                             "the pipe triplet protocol"
-                        )
-                    )
-                    failures.append(
-                        {
-                            "candidate": original_line,
-                            "reason": reason,
-                        }
-                    )
+                        ),
+                    }
+                )
                 continue
 
+            object_value = match.group("object")
             actions.append(
                 [
-                    match.group(
-                        "subject"
-                    ),
-                    match.group(
-                        "action"
-                    ),
-                    match.group(
-                        "object"
-                    ),
+                    match.group("subject"),
+                    match.group("action"),
+                    None if object_value == "NONE" else object_value,
                 ]
             )
 
@@ -859,257 +472,66 @@ player{speaker}: {speech}"""
             raise SpeechActionValidationError(
                 failures
             )
-
+        if not actions:
+            raise ValueError("LLM response contains no speech action")
         return actions
-
-    @staticmethod
-    def _normalized_marker_text(
-        text: str,
-    ) -> str:
-        return re.sub(
-            r"[\s.!！。`'\"]+",
-            " ",
-            text.strip().lower(),
-        ).strip()
-
-    @classmethod
-    def _is_empty_marker(
-        cls,
-        text: str,
-    ) -> bool:
-        return (
-            cls._normalized_marker_text(
-                text
-            )
-            in _EMPTY_RESPONSE_MARKERS
-        )
-
-    @classmethod
-    def _contains_empty_marker(
-        cls,
-        text: str,
-    ) -> bool:
-        cleaned_text = re.sub(
-            r"```(?:\w+)?\s*",
-            "",
-            text,
-            flags=re.IGNORECASE,
-        ).replace(
-            "```",
-            "",
-        )
-
-        meaningful_lines = [
-            line.strip()
-            for line
-            in cleaned_text.splitlines()
-            if line.strip()
-        ]
-
-        return any(
-            cls._is_empty_marker(
-                line
-            )
-            for line in meaningful_lines
-        )
 
     @classmethod
     def _normalize(
         cls,
         parsed: list,
         speaker: int,
-        *,
-        strict: bool = False,
     ) -> list[list[str | None]]:
-        """Validate actions and force the subject to the real speaker."""
+        """Validate exact triplets without repairing their subject or object."""
 
-        _, speech_action_type = (
-            _load_tom_schema()
-        )
-
-        if not isinstance(
-            parsed,
-            list,
-        ):
-            return []
+        _, speech_action_type = _load_tom_schema()
+        if not isinstance(parsed, list):
+            raise TypeError("parsed speech actions must be a list")
 
         actions: list[list[str | None]] = []
         failures: list[dict[str, Any]] = []
-        seen: set[
-            tuple[str | None, str | None, str | None]
-        ] = set()
-
+        seen: set[tuple[str | None, str | None, str | None]] = set()
         for item in parsed:
-            raw_action = cls._read_raw_action(
-                item
-            )
-
-            if raw_action is None:
-                if strict:
-                    failures.append(
-                        {
-                            "candidate": item,
-                            "reason": (
-                                "candidate must be a mapping with action/object "
-                                "or a three-item sequence"
-                            ),
-                        }
-                    )
+            if (
+                isinstance(item, (str, bytes))
+                or not isinstance(item, Sequence)
+                or len(item) != 3
+            ):
+                failures.append(
+                    {
+                        "candidate": item,
+                        "reason": "candidate must be a three-item sequence",
+                    }
+                )
                 continue
-
-            (
-                raw_subject,
-                action_name,
-                object_player,
-            ) = raw_action
-
             try:
-                object_players = (
-                    cls._expand_explicit_player_range(
-                        object_player
-                    )
+                action = speech_action_type.from_values(
+                    subject=item[0],
+                    action=item[1],
+                    object_=item[2],
                 )
-            except (
-                TypeError,
-                ValueError,
-                KeyError,
-            ) as exc:
-                if strict:
-                    failures.append(
-                        {
-                            "candidate": item,
-                            "reason": (
-                                f"{type(exc).__name__}: {exc}"
-                            ),
-                        }
+                if action.subject != f"player{speaker}":
+                    raise ValueError(
+                        "speech action subject must equal current speaker"
                     )
+            except (TypeError, ValueError, KeyError) as exc:
+                failures.append(
+                    {
+                        "candidate": item,
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    }
+                )
                 continue
 
-            for atomic_object in object_players:
-                try:
-                    if strict:
-                        strict_action = speech_action_type.from_values(
-                            subject=raw_subject,
-                            action=action_name,
-                            object_=atomic_object,
-                        )
-                        if strict_action.subject != f"player{speaker}":
-                            raise ValueError(
-                                "speech action subject must equal current speaker"
-                            )
-
-                    action = (
-                        speech_action_type
-                        .from_values(
-                            subject=speaker,
-                            action=action_name,
-                            object_=atomic_object,
-                        )
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                    KeyError,
-                ) as exc:
-                    if strict:
-                        failures.append(
-                            {
-                                "candidate": item,
-                                "reason": (
-                                    f"{type(exc).__name__}: {exc}"
-                                ),
-                            }
-                        )
-                    continue
-
-                normalized = action.to_list()
-                key = tuple(normalized)
-
-                if key in seen:
-                    continue
-
+            normalized = action.to_list()
+            key = tuple(normalized)
+            if key not in seen:
                 seen.add(key)
-                actions.append(
-                    normalized
-                )
+                actions.append(normalized)
 
         if failures:
-            raise SpeechActionValidationError(
-                failures
-            )
-
+            raise SpeechActionValidationError(failures)
         return actions
-
-    @staticmethod
-    def _expand_explicit_player_range(
-        object_player: Any,
-    ) -> list[Any]:
-        """Expand only the confirmed ascending ``playerN 至 playerM`` form."""
-
-        if not isinstance(object_player, str):
-            return [object_player]
-        if object_player.strip().lower() in {"none", "null", "<none>"}:
-            return [None]
-        match = _EXPLICIT_PLAYER_RANGE_PATTERN.fullmatch(
-            object_player.strip()
-        )
-        if match is None:
-            return [object_player]
-        start = int(match.group("start"))
-        end = int(match.group("end"))
-        if start > end:
-            raise ValueError("player range must be ascending")
-        return [
-            f"player{player_id}"
-            for player_id in range(start, end + 1)
-        ]
-
-    @staticmethod
-    def _read_raw_action(
-        item: Any,
-    ) -> tuple[Any, Any, Any] | None:
-        """Read a triplet while tolerating the legacy object response."""
-
-        if isinstance(
-            item,
-            dict,
-        ):
-            if (
-                "action" not in item
-                or "object" not in item
-            ):
-                return None
-
-            return (
-                item.get(
-                    "subject"
-                ),
-                item.get(
-                    "action"
-                ),
-                item.get(
-                    "object"
-                ),
-            )
-
-        if (
-            isinstance(
-                item,
-                Sequence,
-            )
-            and not isinstance(
-                item,
-                (str, bytes),
-            )
-            and len(item) == 3
-        ):
-            return (
-                item[0],
-                item[1],
-                item[2],
-            )
-
-        return None
 
 
 __all__ = [

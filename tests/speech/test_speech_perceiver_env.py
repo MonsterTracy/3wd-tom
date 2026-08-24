@@ -5,6 +5,7 @@ from werewolf.agents.base_agent import RandomAgent
 from werewolf.envs.werewolf_text_env_v0 import (
     WerewolfTextEnvV0,
 )
+from werewolf.speech.speech_perceiver import SpeechParseAuditResult
 
 
 ROLES = [
@@ -23,13 +24,12 @@ class RecordingPerceiver:
         self.result = result
         self.calls = []
 
-    def parse(
+    def parse_with_audit(
         self,
         speaker,
         speech,
         day,
         phase,
-        context=None,
     ):
         self.calls.append(
             {
@@ -37,38 +37,44 @@ class RecordingPerceiver:
                 "speech": speech,
                 "day": day,
                 "phase": phase,
-                "context": context,
             }
         )
 
-        return self.result
+        return SpeechParseAuditResult(
+            normalized_actions=self.result,
+            raw_response="synthetic parser response",
+            parse_status="ok",
+            error_type=None,
+            error_message=None,
+        )
 
 
 class RaisingPerceiver:
-    def parse(
+    def parse_with_audit(
         self,
         speaker,
         speech,
         day,
         phase,
-        context=None,
     ):
         raise RuntimeError("parse failed")
 
 
 class NonListPerceiver:
-    def parse(
+    def parse_with_audit(
         self,
         speaker,
         speech,
         day,
         phase,
-        context=None,
     ):
-        return {
-            "action": "support",
-            "object": "player2",
-        }
+        return SpeechParseAuditResult(
+            normalized_actions={"action": "support", "object": "player2"},
+            raw_response="synthetic parser response",
+            parse_status="ok",
+            error_type=None,
+            error_message=None,
+        )
 
 
 class SpeechPerceiverEnvironmentTest(unittest.TestCase):
@@ -144,7 +150,6 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
                     "speech": "我认为3号是狼人",
                     "day": 2,
                     "phase": "speech",
-                    "context": None,
                 }
             ],
         )
@@ -248,7 +253,10 @@ class SpeechPerceiverEnvironmentTest(unittest.TestCase):
         )
 
         before_events = list(env.public_events)
-        with self.assertRaisesRegex(TypeError, "three-element sequence"):
+        with self.assertRaisesRegex(
+            TypeError,
+            "speech action must be a three-element sequence",
+        ):
             env.step(("speech", "发言"))
         self.assertEqual(env.public_events, before_events)
 

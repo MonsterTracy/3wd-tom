@@ -12,6 +12,7 @@ from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
 )
 from werewolf.speech.private_belief_perceiver import PlayingAgentBeliefReporter
+from werewolf.speech.speech_perceiver import SpeechParseAuditResult
 from werewolf.models.twd_tom.speech_annotations import make_speech_annotation
 
 
@@ -29,7 +30,7 @@ class ScriptedSpeechPerceiver:
     def __init__(self):
         self.calls = []
 
-    def parse(self, *, speaker, speech, day, phase):
+    def parse_with_audit(self, *, speaker, speech, day, phase):
         self.calls.append(
             {
                 "speaker": speaker,
@@ -44,14 +45,22 @@ class ScriptedSpeechPerceiver:
             if player_id != speaker
         ]
         if speech == "first synthetic public speech":
-            return [
+            actions = [
                 [f"player{speaker}", "point_as_werewolf", other_players[0]],
                 [f"player{speaker}", "support", other_players[1]],
                 [f"player{speaker}", "oppose", other_players[2]],
             ]
-        return [
-            [f"player{speaker}", "point_as_villager", other_players[0]],
-        ]
+        else:
+            actions = [
+                [f"player{speaker}", "point_as_villager", other_players[0]],
+            ]
+        return SpeechParseAuditResult(
+            normalized_actions=actions,
+            raw_response="synthetic parser response",
+            parse_status="ok",
+            error_type=None,
+            error_message=None,
+        )
 
 
 def _log(event, *, source=0, target=0, content=None):
@@ -117,7 +126,7 @@ class SyntheticEnvironment:
                 raw_text=event["raw_text"],
                 parser_model_id="synthetic_parser",
                 parser_call_id="synthetic_000002",
-                annotation_source="generator_contract",
+                annotation_source="llm_parser",
                 status="ok",
                 actions=[action],
                 raw_response=None,
@@ -262,15 +271,15 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
 
     agents = []
     backends = []
-    responses = {
-        1: '{"suspected_werewolves":["player2","player3"]}',
-        2: '{"suspected_werewolves":["player1"]}',
-        3: '{"suspected_werewolves":["player1","player4"]}',
-        4: '{"suspected_werewolves":[]}',
-        5: '{"suspected_werewolves":[]}',
-        6: '{"suspected_werewolves":["player1","player2","player3"]}',
-        7: '{"belief_mode":"no_extra_narrowing"}',
-    }
+    responses = {}
+    for player_id in range(1, 8):
+        known_werewolves, _ = env.get_twd_tom_hard_knowledge_for(player_id)
+        required = [
+            player
+            for player in known_werewolves
+            if player != f"player{player_id}"
+        ]
+        responses[player_id] = json.dumps({"suspected_werewolves": required})
     for player_id in range(1, 8):
         backend = FakeBackend(responses[player_id])
         agent = LLMAgent(
@@ -366,18 +375,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     ) == first_actions
     assert raw_samples[0]["observer_ids"] == alive_observers
     assert raw_samples[1]["observer_ids"] == alive_observers
-    assert all(
-        sample["belief_status"]["player7"] == "parse_error"
-        and sample["suspected_werewolves"]["player7"] is None
-        for sample in raw_samples
-    )
-    assert {
-        len(suspicion)
-        for sample in raw_samples
-        for suspicion in sample["suspected_werewolves"].values()
-        if suspicion is not None
-    } >= {0, 1, 2, 3}
-
+    assert all(sample["belief_status"]["player7"] == "ok" for sample in raw_samples)
     assert not any(
         private_term
         in json.dumps(
@@ -400,5 +398,43 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     serialized = path.read_text(encoding="utf-8")
     assert "pair_target" not in serialized
     assert "pair_support" not in serialized
-    with pytest.raises(ValueError, match="status=ok for every alive observer"):
-        TWDToMDataset.from_jsonl(path)
+    assert len(TWDToMDataset.from_jsonl(path)) == 2
+
+
+def test_belief_collection_stops_on_first_failed_report(tmp_path):
+    agents = []
+    backends = []
+    for player_id in range(1, 8):
+        response = (
+            "not valid JSON"
+            if player_id == 3
+            else '{"suspected_werewolves":[]}'
+        )
+        backend = FakeBackend(response)
+        agent = LLMAgent(backend=backend, model_name=f"fake-model-{player_id}")
+        agent.backend_id = f"fake-backend-{player_id}"
+        agents.append(agent)
+        backends.append(backend)
+
+    path = tmp_path / "failed_snapshot.jsonl"
+    collector = PlayingAgentBeliefSnapshotCollector(
+        PlayingAgentBeliefReporter(),
+        agents,
+    )
+    env = SyntheticEnvironment()
+    with TWDToMSampleCollector(str(path), collector, game_id="failed") as samples:
+        with pytest.raises(
+            RuntimeError,
+            match="observer=player3 status='parse_error'",
+        ):
+            samples.record(
+                env,
+                step_idx=1,
+                trigger="speech",
+                phase="1_day_speech",
+                speaker_id=3,
+                observer_ids=list(range(1, 8)),
+            )
+
+    assert [len(backend.calls) for backend in backends] == [1, 1, 1, 0, 0, 0, 0]
+    assert path.read_text(encoding="utf-8") == ""

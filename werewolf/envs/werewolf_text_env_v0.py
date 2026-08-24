@@ -4,7 +4,6 @@ import json, os
 import numpy as np
 import gymnasium as gym
 from collections import Counter
-from collections.abc import Mapping
 import json
 
 from werewolf.helper.log_utils import Log
@@ -356,83 +355,41 @@ class WerewolfTextEnvV0(gym.Env):
             assert action_type == 'speech' or action_type == 'speech_pk'
             event_idx = len(self.public_events)
             speaker = normalize_player(self.current_act_idx + 1)
-            if isinstance(action_content, Mapping):
-                expected_fields = {"raw_text", "sp_actions"}
-                if set(action_content) != expected_fields:
-                    missing = sorted(expected_fields - set(action_content))
-                    extra = sorted(set(action_content) - expected_fields)
-                    raise ValueError(
-                        "structured speech field set mismatch; "
-                        f"missing={missing}, extra={extra}"
-                    )
-                raw_text = action_content["raw_text"]
-                sp_actions = action_content["sp_actions"]
+            if not isinstance(action_content, str):
+                raise TypeError("speech content must be text")
+            raw_text = action_content
+            audit = self.speech_perceiver.parse_with_audit(
+                speaker=self.current_act_idx + 1,
+                speech=raw_text,
+                day=self.day,
+                phase=self.phase,
+            )
+            if audit.parse_status == "ok":
+                sp_actions = audit.normalized_actions
                 status = STATUS_OK if sp_actions else STATUS_NO_ACTION
-                annotation = make_speech_annotation(
-                    event_idx=event_idx,
-                    speaker=speaker,
-                    raw_text=raw_text,
-                    parser_model_id="generator_contract",
-                    parser_call_id=f"speech_generator_event_{event_idx:06d}",
-                    annotation_source="generator_contract",
-                    status=status,
-                    actions=sp_actions,
-                    raw_response=None,
-                    error_type=None,
-                    error_message=None,
-                )
-            elif isinstance(action_content, str):
-                raw_text = action_content
-                parse_with_audit = getattr(
-                    self.speech_perceiver, "parse_with_audit", None
-                )
-                if callable(parse_with_audit):
-                    audit = parse_with_audit(
-                        speaker=self.current_act_idx + 1,
-                        speech=raw_text,
-                        day=self.day,
-                        phase=self.phase,
-                    )
-                    if audit.parse_status == "ok":
-                        sp_actions = audit.normalized_actions
-                        status = STATUS_OK if sp_actions else STATUS_NO_ACTION
-                        error_type = None
-                        error_message = None
-                    else:
-                        sp_actions = []
-                        status = STATUS_ERROR
-                        error_type = audit.error_type or "SpeechParserError"
-                        error_message = audit.error_message or "speech parser failed"
-                    raw_response = audit.raw_response
-                else:
-                    sp_actions = self.speech_perceiver.parse(
-                        speaker=self.current_act_idx + 1,
-                        speech=raw_text,
-                        day=self.day,
-                        phase=self.phase,
-                    )
-                    status = STATUS_OK if sp_actions else STATUS_NO_ACTION
-                    raw_response = None
-                    error_type = None
-                    error_message = None
-                annotation = make_speech_annotation(
-                    event_idx=event_idx,
-                    speaker=speaker,
-                    raw_text=raw_text,
-                    parser_model_id=(
-                        getattr(self.speech_perceiver, "model_name", None)
-                        or type(self.speech_perceiver).__name__
-                    ),
-                    parser_call_id=f"speech_parser_event_{event_idx:06d}",
-                    annotation_source="llm_parser",
-                    status=status,
-                    actions=sp_actions,
-                    raw_response=raw_response,
-                    error_type=error_type,
-                    error_message=error_message,
-                )
+                error_type = None
+                error_message = None
             else:
-                raise TypeError("speech content must be text or a mapping")
+                sp_actions = []
+                status = STATUS_ERROR
+                error_type = audit.error_type or "SpeechParserError"
+                error_message = audit.error_message or "speech parser failed"
+            annotation = make_speech_annotation(
+                event_idx=event_idx,
+                speaker=speaker,
+                raw_text=raw_text,
+                parser_model_id=(
+                    getattr(self.speech_perceiver, "model_name", None)
+                    or type(self.speech_perceiver).__name__
+                ),
+                parser_call_id=f"speech_parser_event_{event_idx:06d}",
+                annotation_source="llm_parser",
+                status=status,
+                actions=sp_actions,
+                raw_response=audit.raw_response,
+                error_type=error_type,
+                error_message=error_message,
+            )
 
             speech_event = self._append_public_event(
                 "public_speech",

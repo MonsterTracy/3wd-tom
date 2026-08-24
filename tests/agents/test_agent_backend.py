@@ -38,12 +38,43 @@ from werewolf.agents.prompt_template_v0 import (
     freeze_discussion_candidates,
     project_discussion_content_indices,
     project_discussion_vote_stances,
-    render_deterministic_public_speech,
 )
 from werewolf.backends import BackendError
 from werewolf.helper.log_utils import Log
 from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
 from werewolf.registry import Registry
+
+
+_TEST_REALIZATIONS = {
+    "point_as_werewolf": "我认为 player{target} 是狼人。",
+    "point_as_non_werewolf": "我认为 player{target} 不是狼人，属于好人阵营。",
+    "point_as_villager": "我认为 player{target} 是普通村民。",
+    "point_as_seer": "我认为 player{target} 是预言家。",
+    "point_as_witch": "我认为 player{target} 是女巫。",
+    "support": "我支持 player{target}。",
+    "oppose": "我质疑 player{target}。",
+    "check_as_non_werewolf": "我查验过 player{target}，结果不是狼人。",
+    "check_as_werewolf": "我查验过 player{target}，结果是狼人。",
+    "save": "我用解药救了 player{target}。",
+    "poison": "我对 player{target} 使用了毒药。",
+    "vote_intent": "这一轮我建议投票放逐 player{target}。",
+    "abstain_intent": "这一轮我选择弃票。",
+    "no_commitment": "这一轮我暂不作明确的身份、查验、技能或投票表态。",
+}
+_TEST_SELF_CLAIMS = {
+    "point_as_villager": "我是普通村民。",
+    "point_as_seer": "我是预言家。",
+    "point_as_witch": "我是女巫。",
+}
+
+
+def _render_test_public_speech(speaker, acts):
+    return "\n".join(
+        _TEST_SELF_CLAIMS[act.action]
+        if act.target == speaker and act.action in _TEST_SELF_CLAIMS
+        else _TEST_REALIZATIONS[act.action].format(target=act.target)
+        for act in acts
+    )
 
 
 class MetadataBackend:
@@ -83,10 +114,7 @@ class MetadataBackend:
                     )
                 )
             return (
-                render_deterministic_public_speech(
-                    speaker,
-                    discussion_acts=tuple(acts),
-                ),
+                _render_test_public_speech(speaker, tuple(acts)),
                 {"finish_reason": "stop"},
             )
         response = self.responses.pop(0)

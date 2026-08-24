@@ -2,6 +2,7 @@ import pytest
 
 from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.public_events import normalize_public_events
+from werewolf.speech.speech_perceiver import SpeechParseAuditResult
 
 
 ROLES = [
@@ -19,13 +20,19 @@ class Parser:
     def __init__(self):
         self.calls = []
 
-    def parse(self, **kwargs):
+    def parse_with_audit(self, **kwargs):
         self.calls.append(kwargs)
         speaker = f"player{kwargs['speaker']}"
-        return [
-            [speaker, "support", "player2"],
-            [speaker, "oppose", "player3"],
-        ]
+        return SpeechParseAuditResult(
+            normalized_actions=[
+                [speaker, "support", "player2"],
+                [speaker, "oppose", "player3"],
+            ],
+            raw_response="synthetic parser response",
+            parse_status="ok",
+            error_type=None,
+            error_message=None,
+        )
 
 
 def _env(parser=None):
@@ -80,79 +87,28 @@ def test_first_snapshot_has_death_phase_and_turn_before_speech():
     ) == 1
 
 
-def test_structured_speech_bypasses_parser_and_commits_exact_semantics():
-    class ForbiddenParser:
-        def parse(self, **_kwargs):
-            raise AssertionError("structured speech must bypass SpeechPerceiver")
-
-    env = _env(ForbiddenParser())
+def test_speech_rejects_structured_generator_payload():
+    env = _env()
     _finish_first_night(env, 5)
-    speaker = f"player{env.current_act_idx + 1}"
     payload = {
         "raw_text": "deterministic speech",
-        "sp_actions": [
-            [speaker, "oppose", "player1"],
-            [speaker, "vote_intent", "player3"],
-        ],
+        "sp_actions": [],
     }
 
-    env.step(("speech", payload))
-
-    public_speech = next(
-        event for event in env.public_events
-        if event["event_type"] == "public_speech"
-    )
-    speech_log = next(
-        log for log in env.game_log if log.event == "speech"
-    )
-    assert public_speech["raw_text"] == payload["raw_text"]
-    assert env.speech_annotations[-1]["actions"] == payload["sp_actions"]
-    assert speech_log.content == {
-        "speech_content": payload["raw_text"],
-    }
-
-
-@pytest.mark.parametrize("action_name", ("abstain_intent", "no_commitment"))
-def test_structured_targetless_speech_commits_null(action_name):
-    env = _env()
-    _finish_first_night(env, 5)
-    speaker = f"player{env.current_act_idx + 1}"
-    env.step(("speech", {
-        "raw_text": "targetless",
-        "sp_actions": [[speaker, action_name, None]],
-    }))
-    assert env.speech_annotations[-1]["actions"] == [
-        [speaker, action_name, None]
-    ]
-
-
-def test_structured_speech_rejects_wrong_subject_and_extra_fields():
-    env = _env()
-    _finish_first_night(env, 5)
-    before = list(env.public_events)
-    speaker = f"player{env.current_act_idx + 1}"
-    wrong_speaker = "player1" if speaker != "player1" else "player2"
-
-    with pytest.raises(ValueError, match="subject must equal annotation speaker"):
-        env.step(("speech", {
-            "raw_text": "x",
-            "sp_actions": [[wrong_speaker, "oppose", "player2"]],
-        }))
-    assert env.public_events == before
-
-    with pytest.raises(ValueError, match="field set mismatch"):
-        env.step(("speech", {
-            "raw_text": "x",
-            "sp_actions": [],
-            "extra": True,
-        }))
-    assert env.public_events == before
+    with pytest.raises(TypeError, match="speech content must be text"):
+        env.step(("speech", payload))
 
 
 def test_empty_death_and_empty_speech_remain_explicit_events():
     class EmptyParser:
-        def parse(self, **_kwargs):
-            return []
+        def parse_with_audit(self, **_kwargs):
+            return SpeechParseAuditResult(
+                normalized_actions=[],
+                raw_response="NONE",
+                parse_status="ok",
+                error_type=None,
+                error_message=None,
+            )
 
     env = _env(EmptyParser())
     _finish_first_night(env, 0)

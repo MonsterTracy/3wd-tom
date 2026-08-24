@@ -4,16 +4,20 @@
 
 每个 raw sample 在 `speech` 或 `speech_pk` 动作生成前创建。冻结的 `public_events` 必须截止于与当前 speaker 对应的 `turn_start`，且 `label_cutoff_step_idx == step_idx`。
 
+末尾 `turn_start` 是证明“轮到谁发言”的采样边界标记，不是已经发生的公开语义。canonical artifact 必须保留它；Dataset 构造模型特征时必须且只能删除这一条末尾标记，使训练输入与未来对候选发言追加后的反事实输入采用同一个 completed-history 定义。
+
 当前冻结版本：
 
 - raw sample：`classic7_pre_speech_player_suspicion_v4`；
 - label prompt：`classic7_pre_speech_player_suspicion_prompt_v4`；
 - label provenance：`alive_observer_readonly_pre_speech_report_v2`；
 - target conversion：`hard_knowledge_consistent_sparse_suspicion_uniform_support_v2`；
+- target semantics：`relative_suspicion_matrix_v1`；
+- model input scope：`completed_structured_public_events_without_terminal_turn_start_v1`；
 - public event：`classic7_public_event_sequence_v4`；
-- speech annotation：`classic7_speech_annotation_v1`；
+- speech annotation：`classic7_speech_annotation_v2`；
 - speech action ontology：`classic7_speech_action_v1`；
-- speech parser prompt：`classic7_speech_parser_v1`。
+- speech parser prompt：`classic7_speech_parser_v2`。
 
 旧版本不做兼容读取或隐式迁移；需要重新采集。
 
@@ -39,9 +43,9 @@ R ⊆ S
 S ∩ F = ∅
 ```
 
-因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。失败报告保存明确 status/error，并将该观察者的 suspicion 记为 `null`；不进行修复、重试、fallback、补猜或概率化。包含任一非 `ok` 存活观察者的 snapshot 不能进入训练 Dataset。
+因此已知的其他狼人必须出现，观察者自身和已知非狼人不得出现；`R` 非空时空集合非法。违反这些语义的原始响应记为 `semantic_error`。不进行修复、重试、fallback、补猜或概率化；任一存活观察者的报告非 `ok` 时立即终止当前局，失败 snapshot 不写入 raw JSONL。
 
-在正式 canonical collector 中，这一条件不是延迟到训练时才检查：任一存活 observer 非 `ok` 会使当前 game 的 artifact validation 失败，batch 随即停止。失败目录和 `call_audit.json` 保留，不能用 replacement seed 补位。
+在正式 canonical collector 中，这一条件不是延迟到 artifact validation 或训练时才检查：按 observer 顺序遇到首个非 `ok` 报告后不再请求其余 observer，batch 随即停止。失败目录、`call_audit.json` 和包含异常类型与消息的 `batch_failure.json` 保留，不能用 replacement seed 补位。
 
 raw sample 保存 public history 的两个 digest、观察者集合、每个观察者的 self-report、hard knowledge、状态与 backend provenance。它不保存 raw model response、私有 observation、pair target 或概率矩阵。
 
@@ -50,6 +54,8 @@ raw sample 保存 public history 的两个 digest、观察者集合、每个观�
 tom-v2 只有一个 Dataset。输入是同一时间边界的结构化公开历史和存活观察者集合；raw label 直接读取 playing-agent self-report 中的 `suspected_werewolves`，不经过 external annotation、public-only reporter、ToM1/ToM2 materialization 或旧 lineage adapter。
 
 Dataset 将每个观察者的合法怀疑集合确定性转换为长度 7 的稀疏 belief row：非空集合只在被列入的玩家上均分概率，其他玩家为 0；空集合只在 admissible players `P - F` 上均匀分布。观察者自身对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
+
+该矩阵的冻结语义是“相对怀疑质量”，不是每个玩家为狼的独立边缘概率，也不是两狼组合上的联合概率。softmax 只在每一行的非自身候选间分配单位质量；因此不能把 `B[i,j]=0.5` 解释为经过校准的 50% 狼人概率。checkpoint 以独立的 `target_semantics` 字段锁定这一解释，旧 checkpoint 不得隐式兼容。
 
 Dataset 输出：
 
@@ -71,9 +77,11 @@ day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过�
 
 ## Canonical materialization
 
-`script/twd_tom/materialize_canonical_belief_dataset.py` 扫描 `canonical_root/games/*/belief_snapshots.jsonl`，按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
+`script/twd_tom/materialize_canonical_belief_dataset.py` 只接受具有合法 `plan.json`、成功 `summary.json`、完整 per-game summary digest/SHA256 链且不存在 `batch_failure.json` 的 canonical batch。随后按稳定 SHA256 排名将完整 game 分配到 train、validation、test。一个 game 的所有 PRE snapshots 必须进入同一 split；输出记录保留原始 provenance 和 PRE boundary metadata，不执行 snapshot-level split。
 
-物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。
+物化前运行 `script/twd_tom/audit_canonical_belief_data.py`。该入口先验证上述成功批次摘要链，再验证全部 raw labels 可进入唯一 Dataset，并报告 suspicion support、原始/保留 token 长度以及在训练 `max_seq_len` 下的截断数量；audit 不修改原始记录。物化目录原子生成 `train.jsonl`、`validation.jsonl`、`test.jsonl` 和 `split_manifest.json`；manifest 绑定来源批次摘要、game-level split、输出文件 SHA256 与自身 digest。
+
+`split_manifest.json` 是训练与评估的强制 lineage，而不是旁路记录。训练入口只接受同一目录、同一 manifest 指定的 train 与 validation 文件；评估入口只接受该 manifest 指定的 test 文件，并要求 checkpoint 记录相同的 manifest digest。manifest 校验同时检查三份输出的 SHA256、行数、game_id 集合和三路不相交；test 必须与 train、validation 两者都不重叠。
 
 ## 唯一来源
 
@@ -81,8 +89,10 @@ day cognition 先冻结与 PRE belief 同源的公开表达 intent，再通过�
 
 ## 模型与目标函数
 
-模型输入只有由 public event 与对应 speech annotation 投影出的结构化 `public_history <= t`，不编码自然语言 `raw_text`，并对七个 canonical observer query 共享参数。原文仍无损保存在 canonical artifact 中，以支持审计和未来重标注。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`。
+模型输入只有由 public event 与对应 speech annotation 投影出的已经完成的结构化 `public_history < t`；raw snapshot 的末尾 `turn_start` 不进入特征。模型不编码自然语言 `raw_text`，并对七个 canonical observer query 共享参数。原文仍无损保存在 canonical artifact 中，以支持审计和未来重标注。输出 `belief_logits[B, 7, 7]`，直接对应 Dataset 的 `belief_targets[B, 7, 7]`；字段名沿用 belief，但其冻结语义由 `target_semantics=relative_suspicion_matrix_v1` 限定。
 
 对每个存活 observer，在六个非自身 target 位置上计算 soft-target cross entropy；其中 hard knowledge 不允许的列已有 target 概率为 0。batch loss 是所有存活 observer 行的算术平均。死亡 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。checkpoint、metrics、train 和 eval 均使用这一单一目标，不保存旧任务阶数或组合类别字段。
 
 评估中的 top-1 指标定义为预测最高概率集合是否与 soft target 的正概率支持集相交，不再把 `target.argmax()` 当作唯一类别。同时报告六个非自身玩家均匀分布的固定 baseline cross entropy、total variation 与 mean absolute error，便于判断模型是否真正超过无信息预测。
+
+该 belief predictor 是 ONUW 式功能性 ToM 的状态预测基础，不等于完整行动闭环。完整闭环还需要在 gameplay 中对候选公开发言逐一追加、重新预测矩阵，并用当前玩家在其他观察者行中的相对怀疑变化进行候选评分；该决策层在实现并通过审计前不得宣称已经完成。

@@ -147,7 +147,7 @@ def _complete_artifacts(recorder, *, winner="Villager"):
         "delivered_observation_digest": canonical_digest(delivered_observation),
         "submitted_action": [
             "speech",
-            {"raw_text": "synthetic speech", "sp_actions": []},
+            "synthetic speech",
         ],
         "public_event_count_before": len(initial_events),
         "public_events_appended": [speech],
@@ -498,6 +498,7 @@ def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch)
     assert failure["failed_seed"] == 2002
     assert failure["failed_game_id"] == "failure-run_game_0002_seed_2002"
     assert failure["failure_stage"] == "gameplay"
+    assert failure["exception_message"] == "synthetic gameplay failure"
     assert failure["completed_game_count"] == 1
     assert failure["completed_game_ids"] == ["failure-run_game_0001_seed_2001"]
     assert failure["stop_on_first_failure"] is True
@@ -509,6 +510,20 @@ def test_failure_stops_batch_without_retry_or_replacement(tmp_path, monkeypatch)
     payload = deepcopy(failure)
     digest = payload.pop("failure_digest")
     assert digest == canonical_digest(payload)
+
+
+def test_batch_failure_message_redacts_secrets():
+    failure = batch_module._failure_record(
+        run_id="failed-run",
+        commit=COMMIT,
+        failed_seed=1,
+        failed_game_id="failed-game",
+        failure_stage="gameplay",
+        exception=RuntimeError("request failed api_key=raw-test-secret"),
+        completed_games=[],
+    )
+
+    assert failure["exception_message"] == "request failed api_key=<redacted>"
 
 
 def test_existing_destination_is_rejected_before_any_runtime_call(tmp_path, monkeypatch):
@@ -742,27 +757,127 @@ def test_belief_artifact_rejects_any_failed_alive_observer(tmp_path):
     snapshot["suspected_werewolves"]["player3"] = None
     belief_path = tmp_path / "belief_snapshots.jsonl"
     belief_path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+    speech_path = tmp_path / "speech_annotations.jsonl"
+    speech_path.write_text(
+        "".join(
+            json.dumps(annotation) + "\n"
+            for annotation in snapshot["speech_annotations"]
+        ),
+        encoding="utf-8",
+    )
 
     with pytest.raises(ValueError, match="status=ok.*player3"):
         batch_module.validate_belief_snapshot_artifact(
             belief_path,
             tmp_path / "observer_views.json",
+            speech_path,
             expected_game_id="game_001",
         )
 
 
-@pytest.mark.parametrize(
-    ("annotation_source", "status", "expected_error"),
-    [
-        ("llm_parser", "error", "successful parsing"),
-        ("generator_contract", "no_action", "generator-contract"),
-    ],
-)
+def test_belief_artifact_annotations_must_match_canonical_sidecar_prefix(tmp_path):
+    snapshot = _belief_snapshot("game_001")
+    public_events = [
+        snapshot["public_events"][0],
+        snapshot["public_events"][1],
+        {
+            "event_idx": 2,
+            "event_type": "public_speech",
+            "speaker": "player2",
+            "raw_text": "synthetic speech",
+        },
+        {
+            "event_idx": 3,
+            "event_type": "turn_start",
+            "speaker": "player3",
+        },
+    ]
+    snapshot_annotation = make_speech_annotation(
+        event_idx=2,
+        speaker="player2",
+        raw_text="synthetic speech",
+        parser_model_id="synthetic-parser",
+        parser_call_id="snapshot-parser-call",
+        annotation_source="llm_parser",
+        status="ok",
+        actions=[["player2", "support", "player3"]],
+        raw_response=None,
+        error_type=None,
+        error_message=None,
+    )
+    canonical_annotation = make_speech_annotation(
+        event_idx=2,
+        speaker="player2",
+        raw_text="synthetic speech",
+        parser_model_id="synthetic-parser",
+        parser_call_id="canonical-parser-call",
+        annotation_source="llm_parser",
+        status="ok",
+        actions=[["player2", "oppose", "player3"]],
+        raw_response=None,
+        error_type=None,
+        error_message=None,
+    )
+    snapshot["step_idx"] = 1
+    snapshot["label_cutoff_step_idx"] = 1
+    snapshot["speaker_id"] = 3
+    snapshot["public_events"] = public_events
+    snapshot["speech_annotations"] = [snapshot_annotation]
+    snapshot["public_event_digest"] = public_event_digest(public_events)
+    snapshot["speech_annotation_digest"] = speech_annotation_digest(
+        snapshot["speech_annotations"]
+    )
+    snapshot["structured_input_digest"] = structured_input_digest(
+        public_events,
+        snapshot["speech_annotations"],
+    )
+    snapshot["public_action_count"] = 1
+
+    observer_views = {
+        "boundaries": [
+            {
+                "boundary_type": batch_module.PRE_PUBLIC_SPEECH,
+                "step_idx": 1,
+                "speech_kind": "speech",
+                "speaker_id": 3,
+                "public_event_count_at_materialization": len(public_events),
+                "public_event_digest_at_materialization": public_event_digest(
+                    public_events
+                ),
+                "observer_views": [
+                    {
+                        "observer_id": observer_id,
+                        "observation": {"phase": "1_day_speech"},
+                    }
+                    for observer_id in range(1, 8)
+                ],
+            }
+        ]
+    }
+    belief_path = tmp_path / "belief_snapshots.jsonl"
+    observer_views_path = tmp_path / "observer_views.json"
+    speech_path = tmp_path / "speech_annotations.jsonl"
+    belief_path.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
+    observer_views_path.write_text(
+        json.dumps(observer_views) + "\n",
+        encoding="utf-8",
+    )
+    speech_path.write_text(
+        json.dumps(canonical_annotation) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="differ from canonical sidecar"):
+        batch_module.validate_belief_snapshot_artifact(
+            belief_path,
+            observer_views_path,
+            speech_path,
+            expected_game_id="game_001",
+        )
+
+
 def test_canonical_speech_annotation_artifact_fails_closed(
     tmp_path,
-    annotation_source,
-    status,
-    expected_error,
 ):
     players = [
         {
@@ -798,12 +913,12 @@ def test_canonical_speech_annotation_artifact_fails_closed(
         raw_text=speech["raw_text"],
         parser_model_id="synthetic-parser",
         parser_call_id="synthetic-parser-call-000001",
-        annotation_source=annotation_source,
-        status=status,
+        annotation_source="llm_parser",
+        status="error",
         actions=[],
-        raw_response="NONE" if status != "error" else "malformed",
-        error_type="SyntheticParserError" if status == "error" else None,
-        error_message="synthetic failure" if status == "error" else None,
+        raw_response="malformed",
+        error_type="SyntheticParserError",
+        error_message="synthetic failure",
     )
     annotation_path = tmp_path / "speech_annotations.jsonl"
     annotation_path.write_text(
@@ -811,7 +926,7 @@ def test_canonical_speech_annotation_artifact_fails_closed(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match=expected_error):
+    with pytest.raises(ValueError, match="successful parsing"):
         batch_module.validate_speech_annotation_artifact(
             annotation_path,
             tmp_path / "trajectory.json",

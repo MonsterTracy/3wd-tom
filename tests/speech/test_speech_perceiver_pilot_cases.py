@@ -129,7 +129,7 @@ class SpeechPerceiverPilotCasesTest(
             ],
         )
 
-    def test_explicit_player6_villager_claim_is_never_dropped(
+    def test_explicit_player6_villager_claim_is_preserved(
         self,
     ):
         actions, prompt = self.parse_with_response(
@@ -142,7 +142,7 @@ class SpeechPerceiverPilotCasesTest(
                 "女巫也可以提供信息。目前没有明确的怀疑对象，大家先多聊聊，"
                 "好人们一起分析找狼。"
             ),
-            response="NONE",
+            response="player6 | point_as_villager | player6",
         )
 
         self.assertEqual(

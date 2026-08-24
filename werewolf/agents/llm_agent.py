@@ -3,7 +3,6 @@ from copy import copy, deepcopy
 from dataclasses import dataclass
 import json
 import logging
-import random
 import re
 from pathlib import Path
 from werewolf.agents.prompt_template_v0 import (
@@ -1431,47 +1430,6 @@ class LLMAgent(Agent):
         if vote_target in (None, -1, 0):
             return "{'投票': '否'}"
         return "{'" + f"投票': '{vote_target}'" + "}"
-
-    def choose_fallback_vote(self, observation, self_player_id=None):
-        if self_player_id is None:
-            self_player_id = observation.get("current_act_idx")
-        positive_candidates = []
-        non_self_candidates = []
-        for action_name, target in observation.get("valid_action", observation.get("valid_actions", [])):
-            if action_name not in ("vote", "vote_pk", "投票"):
-                continue
-            if not isinstance(target, int) or target <= 0:
-                continue
-
-            positive_candidates.append(target)
-            if target != self_player_id:
-                non_self_candidates.append(target)
-
-        if non_self_candidates:
-            return random.choice(non_self_candidates)
-        if positive_candidates:
-            return random.choice(positive_candidates)
-        return 0
-
-    def choose_fallback_vote_action(self, observation, valid_action=None):
-        valid_action = list(valid_action or self.nlp_action_to_env_action.keys())
-        fallback_target = self.choose_fallback_vote(observation)
-        fallback_action = self.vote_target_to_action_str(fallback_target)
-        if fallback_action in valid_action:
-            return fallback_action
-
-        non_abstain_actions = [
-            action
-            for action in valid_action
-            if self.parse_vote_target(action) not in (None, 0)
-        ]
-        if non_abstain_actions:
-            return random.choice(non_abstain_actions)
-
-        abstain_action = self.vote_target_to_action_str(0)
-        if abstain_action in valid_action:
-            return abstain_action
-        return valid_action[0] if valid_action else abstain_action
 
     def freeze_legal_vote_candidates(self, valid_actions, *, phase):
         expected_action = "vote_pk" if "vote_pk" in phase else "vote"
