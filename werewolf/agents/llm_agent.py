@@ -815,6 +815,14 @@ _CHINESE_PLAYER_NUMBERS = {
     character: number
     for number, character in enumerate("零一二三四五六七八九")
 }
+_PLAYER_LIKE_REFERENCE = re.compile(
+    r"(?<![A-Za-z0-9_])player(?:\s*[A-Za-z0-9_]+)?",
+    re.IGNORECASE,
+)
+_CANONICAL_ENGLISH_PLAYER_REFERENCE = re.compile(
+    r"player\s*[1-7]",
+    re.IGNORECASE,
+)
 _EXPLICIT_PLAYER_REFERENCE = re.compile(
     r"player\s*(?P<english>\d+)(?!\d)"
     r"|玩家\s*(?P<chinese_prefix>\d+|[零一二三四五六七八九])(?!\d)"
@@ -836,6 +844,11 @@ _SPEAKER_SELF_REFERENCE = re.compile(
 
 def _extract_explicit_player_references(content, *, speaker_id, context):
     referenced_players = set()
+    for match in _PLAYER_LIKE_REFERENCE.finditer(content):
+        if _CANONICAL_ENGLISH_PLAYER_REFERENCE.fullmatch(match.group(0)) is None:
+            raise GameplaySpeechQualityError(
+                f"invalid player reference {match.group(0)!r} ({context})"
+            )
     for match in _GROUPED_PLAYER_REFERENCE.finditer(content):
         for value in _GROUPED_PLAYER_NUMBER.findall(match.group("players")):
             player_number = (

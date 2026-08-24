@@ -1097,10 +1097,13 @@ def build_public_speech_realization_prompt(
     ):
         raise TypeError("claim_catalog must contain PublicClaim values")
 
-    intent_text = "\n".join(
-        f"- {render_discussion_act(act)}: {_DISCUSSION_ACTION_SEMANTICS[act.action]}"
-        for act in discussion_acts
-    )
+    intent_lines = []
+    for act in discussion_acts:
+        semantics = _DISCUSSION_ACTION_SEMANTICS[act.action]
+        if act.target is not None:
+            semantics = semantics.replace("playerX", f"player{act.target}")
+        intent_lines.append(f"- {render_discussion_act(act)}: {semantics}")
+    intent_text = "\n".join(intent_lines)
     history_text = (
         "\n".join(render_public_claim(claim) for claim in claim_catalog)
         or "（此前没有公开发言。）"

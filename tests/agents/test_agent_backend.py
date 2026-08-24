@@ -131,6 +131,22 @@ class MetadataBackend:
         return response
 
 
+class ScriptedRealizationBackend(MetadataBackend):
+    def __init__(self, cognition_response, realization_responses):
+        super().__init__([cognition_response])
+        self.realization_responses = list(realization_responses)
+
+    def chat_with_metadata(self, **kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        if (
+            "response_format" not in kwargs
+            and prompt.startswith("你现在只负责把已经冻结的公开表达意图")
+        ):
+            self.calls.append(kwargs)
+            return self.realization_responses.pop(0), {"finish_reason": "stop"}
+        return super().chat_with_metadata(**kwargs)
+
+
 def _belief(player_id=1, *, role="unknown"):
     return json.dumps(
         {
@@ -1373,7 +1389,11 @@ class GameplayCognitionTest(unittest.TestCase):
         self.assertNotIn("response_format", realization_call)
         realization_prompt = realization_call["messages"][0]["content"]
         self.assertIn("当前天数：Day 1", realization_prompt)
-        self.assertIn("- oppose(player2)", realization_prompt)
+        self.assertIn(
+            "- oppose(player2): publicly oppose / question player2",
+            realization_prompt,
+        )
+        self.assertNotIn("playerX", realization_prompt)
         self.assertIn("只能表达以下冻结意图", realization_prompt)
         self.assertIn("BELIEF OUTPUT", cognition_prompt)
         self.assertIn("PUBLIC CONVERSATION", cognition_prompt)
@@ -1892,6 +1912,73 @@ class GameplayCognitionTest(unittest.TestCase):
                         player_id=1,
                         phase="1_day_speech",
                     )
+
+    def test_noncanonical_player_like_references_are_rejected(self):
+        invalid_speeches = (
+            "我是 player7，我直接公开站队，playerX 绝对是好人阵营的一员。",
+            "我认为 player0 是狼人。",
+            "我认为 player8 是狼人。",
+            "我认为 player12 是狼人。",
+            "我支持 player_2。",
+            "我暂时观察 player。",
+        )
+        for content in invalid_speeches:
+            with self.subTest(content=content), self.assertRaisesRegex(
+                GameplaySpeechQualityError,
+                "invalid player reference",
+            ):
+                validate_gameplay_public_speech(
+                    content,
+                    finish_reason="stop",
+                    player_id=1,
+                    phase="1_day_speech",
+                )
+
+        valid = "我支持 player1，也质疑 PLAYER7。"
+        self.assertEqual(
+            validate_gameplay_public_speech(
+                valid,
+                finish_reason="stop",
+                player_id=1,
+                phase="1_day_speech",
+            ),
+            valid,
+        )
+
+    def test_player_placeholder_retries_public_realization(self):
+        observation = _observation()
+        backend = ScriptedRealizationBackend(
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("support", 2),),
+            ),
+            (
+                "我支持 playerX。",
+                "我支持 player2。",
+            ),
+        )
+        agent = self._agent(backend)
+
+        self.assertEqual(agent.act(observation), ("speech", "我支持 player2。"))
+        self.assertEqual(len(backend.calls), 3)
+
+    def test_player_placeholder_exhausts_public_realization(self):
+        observation = _observation()
+        backend = ScriptedRealizationBackend(
+            _day_cognition(
+                observation,
+                content_actions=(DiscussionAct("support", 2),),
+            ),
+            ("我支持 playerX。",) * 3,
+        )
+        agent = self._agent(backend)
+
+        with self.assertRaisesRegex(
+            GameplayGenerationExhausted,
+            "speech_realization",
+        ):
+            agent.act(observation)
+        self.assertEqual(len(backend.calls), 4)
 
     def test_active_prompt_control_markers_cannot_be_public_speech(self):
         for marker in (
