@@ -14,13 +14,16 @@ from script.twd_tom.collect_canonical_trajectories import (
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.dataset import TWDToMDataset
-from werewolf.models.twd_tom.public_events import structured_event_tokens
+from werewolf.models.twd_tom.public_events import (
+    completed_pre_speech_public_events,
+    structured_event_tokens,
+)
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION, LABEL_PROVENANCE
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
-AUDIT_SCHEMA_VERSION = "classic7_canonical_belief_data_audit_v2"
+AUDIT_SCHEMA_VERSION = "classic7_canonical_belief_data_audit_v3"
 BELIEF_SNAPSHOTS_FILENAME = "belief_snapshots.jsonl"
 
 
@@ -171,7 +174,7 @@ def audit_canonical_belief_data(
         for game_id in sorted(records_by_game)
         for record in records_by_game[game_id]
     ]
-    raw_token_counts = [
+    collector_raw_token_counts = [
         len(
             structured_event_tokens(
                 record.get("public_events"),
@@ -180,15 +183,42 @@ def audit_canonical_belief_data(
         )
         for record in all_records
     ]
+    model_input_token_counts = [
+        len(
+            structured_event_tokens(
+                completed_pre_speech_public_events(
+                    record.get("public_events"),
+                    speaker_id=record.get("speaker_id"),
+                ),
+                record.get("speech_annotations"),
+            )
+        )
+        for record in all_records
+    ]
+    terminal_removed_token_counts = [
+        collector_raw - model_input
+        for collector_raw, model_input in zip(
+            collector_raw_token_counts,
+            model_input_token_counts,
+        )
+    ]
+    if any(count != 1 for count in terminal_removed_token_counts):
+        raise RuntimeError(
+            "strict PRE model input must remove exactly one terminal "
+            "turn_start token per sample"
+        )
     feature_builder = PublicEventFeatureBuilder(max_seq_len=max_seq_len)
     dataset = TWDToMDataset(all_records, feature_builder=feature_builder)
     retained_token_counts = [
         int(dataset[index]["attention_mask"].sum().item())
         for index in range(len(dataset))
     ]
-    truncated_sample_count = sum(
-        retained < raw
-        for retained, raw in zip(retained_token_counts, raw_token_counts)
+    length_truncated_sample_count = sum(
+        retained < model_input
+        for retained, model_input in zip(
+            retained_token_counts,
+            model_input_token_counts,
+        )
     )
     sample_count = len(all_records)
     observer_report_count = sum(status_counts.values())
@@ -214,18 +244,26 @@ def audit_canonical_belief_data(
             str(size): count
             for size, count in sorted(support_size_counts.items())
         },
-        "raw_structured_token_count": {
-            "min": min(raw_token_counts),
-            "max": max(raw_token_counts),
-            "mean": sum(raw_token_counts) / sample_count,
+        "collector_raw_structured_token_count": {
+            "min": min(collector_raw_token_counts),
+            "max": max(collector_raw_token_counts),
+            "mean": sum(collector_raw_token_counts) / sample_count,
+        },
+        "model_input_structured_token_count": {
+            "min": min(model_input_token_counts),
+            "max": max(model_input_token_counts),
+            "mean": sum(model_input_token_counts) / sample_count,
         },
         "retained_structured_token_count": {
             "min": min(retained_token_counts),
             "max": max(retained_token_counts),
             "mean": sum(retained_token_counts) / sample_count,
         },
-        "truncated_sample_count": truncated_sample_count,
-        "truncated_sample_fraction": truncated_sample_count / sample_count,
+        "terminal_turn_start_removed_sample_count": sample_count,
+        "length_truncated_sample_count": length_truncated_sample_count,
+        "length_truncated_sample_fraction": (
+            length_truncated_sample_count / sample_count
+        ),
         "source_files": source_files,
     }
     report["audit_digest"] = canonical_digest(report)

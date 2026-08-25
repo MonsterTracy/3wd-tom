@@ -9,7 +9,7 @@ from script.twd_tom.audit_canonical_belief_data import (
 from werewolf.trajectory import canonical_digest
 
 
-def test_audit_reports_label_and_truncation_statistics(
+def test_audit_reports_label_and_length_truncation_statistics(
     tmp_path,
     suspicion_sample_factory,
     canonical_belief_batch_factory,
@@ -33,18 +33,72 @@ def test_audit_reports_label_and_truncation_statistics(
         output_path=output,
     )
 
+    assert AUDIT_SCHEMA_VERSION == "classic7_canonical_belief_data_audit_v3"
     assert report["schema_version"] == AUDIT_SCHEMA_VERSION
     assert report["status"] == "PASS"
     assert report["game_count"] == 2
     assert report["sample_count"] == 2
     assert report["observer_report_count"] == 7
     assert report["status_counts"] == {"ok": 7}
-    assert report["truncated_sample_count"] == 2
-    assert report["truncated_sample_fraction"] == 1.0
+    assert report["collector_raw_structured_token_count"] == {
+        "min": 5,
+        "max": 5,
+        "mean": 5.0,
+    }
+    assert report["model_input_structured_token_count"] == {
+        "min": 4,
+        "max": 4,
+        "mean": 4.0,
+    }
+    assert report["retained_structured_token_count"] == {
+        "min": 1,
+        "max": 1,
+        "mean": 1.0,
+    }
+    assert report["terminal_turn_start_removed_sample_count"] == 2
+    assert report["length_truncated_sample_count"] == 2
+    assert report["length_truncated_sample_fraction"] == 1.0
+    assert "raw_structured_token_count" not in report
+    assert "truncated_sample_count" not in report
+    assert "truncated_sample_fraction" not in report
     payload = dict(report)
     digest = payload.pop("audit_digest")
     assert digest == canonical_digest(payload)
     assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
+def test_audit_does_not_count_terminal_pre_marker_as_length_truncation(
+    tmp_path,
+    suspicion_sample_factory,
+    canonical_belief_batch_factory,
+):
+    root = tmp_path / "canonical"
+    sample = suspicion_sample_factory(game_id="game_1")
+    canonical_belief_batch_factory(root, {"game_1": [sample]})
+
+    report = audit_canonical_belief_data(
+        canonical_root=root,
+        max_seq_len=256,
+    )
+
+    assert report["collector_raw_structured_token_count"] == {
+        "min": 5,
+        "max": 5,
+        "mean": 5.0,
+    }
+    assert report["model_input_structured_token_count"] == {
+        "min": 4,
+        "max": 4,
+        "mean": 4.0,
+    }
+    assert report["retained_structured_token_count"] == {
+        "min": 4,
+        "max": 4,
+        "mean": 4.0,
+    }
+    assert report["terminal_turn_start_removed_sample_count"] == 1
+    assert report["length_truncated_sample_count"] == 0
+    assert report["length_truncated_sample_fraction"] == 0.0
 
 
 def test_audit_rejects_failed_observer_before_dataset_materialization(
