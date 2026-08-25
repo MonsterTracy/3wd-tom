@@ -32,6 +32,8 @@ def make_config(**overrides):
         ({"warmup_ratio": 1.0}, "warmup_ratio"),
         ({"min_learning_rate": -1e-5}, "min_learning_rate"),
         ({"min_learning_rate": 4e-4}, "min_learning_rate"),
+        ({"early_stopping_patience": -1}, "early_stopping_patience"),
+        ({"early_stopping_min_delta": -0.1}, "early_stopping_min_delta"),
     ],
 )
 def test_scheduler_config_validation(overrides, message):
@@ -48,12 +50,18 @@ def test_scheduler_cli_arguments():
             "--lr-scheduler", "warmup_cosine",
             "--warmup-ratio", "0.05",
             "--min-learning-rate", "3e-5",
+            "--dense-supervision",
+            "--early-stopping-patience", "10",
+            "--early-stopping-min-delta", "0.001",
         ]
     )
 
     assert args.lr_scheduler == "warmup_cosine"
     assert args.warmup_ratio == pytest.approx(0.05)
     assert args.min_learning_rate == pytest.approx(3e-5)
+    assert args.dense_supervision is True
+    assert args.early_stopping_patience == 10
+    assert args.early_stopping_min_delta == pytest.approx(0.001)
 
 
 def test_constant_scheduler_preserves_learning_rate():

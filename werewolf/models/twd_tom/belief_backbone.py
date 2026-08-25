@@ -403,6 +403,8 @@ class ToMBeliefBackbone(nn.Module):
         event_type_ids: torch.Tensor | None = None,
         phase_ids: torch.Tensor | None = None,
         day_values: torch.Tensor | None = None,
+        boundary_indices: torch.Tensor | None = None,
+        boundary_valid_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Encode public actions and predict observer belief logits.
 
@@ -416,8 +418,9 @@ class ToMBeliefBackbone(nn.Module):
 
         Returns:
             A dictionary with ``hidden_states`` (``[B, T, 256]``),
-            ``pooled_hidden_state`` (``[B, 256]``), and ``belief_logits``
-            with shape ``[B, 7, 7]``.
+            ``pooled_hidden_state`` (``[B, 256]``), and ``belief_logits``.
+            The logits have shape ``[B, 7, 7]`` for ordinary inference and
+            ``[B, Q, 7, 7]`` when dense PRE boundaries are supplied.
         """
 
         (
@@ -549,32 +552,104 @@ class ToMBeliefBackbone(nn.Module):
             sequence_length,
             HIDDEN_SIZE,
         )
-        flattened_queries = observer_queries.reshape(
-            batch_size * self.config.num_players,
-            1,
-            HIDDEN_SIZE,
-        )
         flattened_padding_mask = (
             (~safe_attention_mask)
             .unsqueeze(1)
             .expand(-1, self.config.num_players, -1)
             .reshape(batch_size * self.config.num_players, sequence_length)
         )
-        observer_context, _ = self.observer_query_attention(
-            query=flattened_queries,
-            key=flattened_relative_hidden,
-            value=flattened_relative_hidden,
-            key_padding_mask=flattened_padding_mask,
-            need_weights=False,
-        )
-        observer_context = observer_context.reshape(
-            batch_size,
-            self.config.num_players,
-            HIDDEN_SIZE,
-        )
-        observer_hidden_states = self.observer_query_layer_norm(
-            observer_queries + observer_context
-        )
+
+        if boundary_indices is None and boundary_valid_mask is None:
+            flattened_queries = observer_queries.reshape(
+                batch_size * self.config.num_players,
+                1,
+                HIDDEN_SIZE,
+            )
+            observer_context, _ = self.observer_query_attention(
+                query=flattened_queries,
+                key=flattened_relative_hidden,
+                value=flattened_relative_hidden,
+                key_padding_mask=flattened_padding_mask,
+                need_weights=False,
+            )
+            observer_context = observer_context.reshape(
+                batch_size,
+                self.config.num_players,
+                HIDDEN_SIZE,
+            )
+            observer_hidden_states = self.observer_query_layer_norm(
+                observer_queries + observer_context
+            )
+        else:
+            boundary_indices, boundary_valid_mask = self._validate_dense_boundaries(
+                boundary_indices=boundary_indices,
+                boundary_valid_mask=boundary_valid_mask,
+                batch_size=batch_size,
+                sequence_length=sequence_length,
+                last_valid_indices=last_valid_indices,
+                device=subject_ids.device,
+            )
+            boundary_count = boundary_indices.shape[1]
+            dense_queries = observer_queries.unsqueeze(2).expand(
+                -1, -1, boundary_count, -1
+            )
+            flattened_queries = dense_queries.reshape(
+                batch_size * self.config.num_players,
+                boundary_count,
+                HIDDEN_SIZE,
+            )
+            positions = torch.arange(
+                sequence_length,
+                device=subject_ids.device,
+            ).view(1, 1, 1, sequence_length)
+            effective_boundaries = torch.where(
+                boundary_valid_mask,
+                boundary_indices,
+                torch.zeros_like(boundary_indices),
+            )
+            prefix_mask = positions > effective_boundaries.view(
+                batch_size, 1, boundary_count, 1
+            )
+            prefix_mask = prefix_mask.expand(
+                -1, self.config.num_players, -1, -1
+            )
+            prefix_mask = (
+                prefix_mask.unsqueeze(2)
+                .expand(
+                    -1,
+                    -1,
+                    self.observer_query_attention.num_heads,
+                    -1,
+                    -1,
+                )
+                .reshape(
+                    batch_size
+                    * self.config.num_players
+                    * self.observer_query_attention.num_heads,
+                    boundary_count,
+                    sequence_length,
+                )
+            )
+            observer_context, _ = self.observer_query_attention(
+                query=flattened_queries,
+                key=flattened_relative_hidden,
+                value=flattened_relative_hidden,
+                key_padding_mask=flattened_padding_mask,
+                attn_mask=prefix_mask,
+                need_weights=False,
+            )
+            observer_context = observer_context.reshape(
+                batch_size,
+                self.config.num_players,
+                boundary_count,
+                HIDDEN_SIZE,
+            )
+            dense_queries = dense_queries + observer_context
+            dense_queries = self.observer_query_layer_norm(dense_queries)
+            dense_queries = dense_queries * boundary_valid_mask[:, None, :, None].to(
+                dtype=dense_queries.dtype
+            )
+            observer_hidden_states = dense_queries.transpose(1, 2)
 
         belief_logits = self.output_projection(observer_hidden_states)
         return {
@@ -584,6 +659,54 @@ class ToMBeliefBackbone(nn.Module):
             "relative_public_hidden_states": relative_public_hidden_states,
             "belief_logits": belief_logits,
         }
+
+    @staticmethod
+    def _validate_dense_boundaries(
+        *,
+        boundary_indices: torch.Tensor | None,
+        boundary_valid_mask: torch.Tensor | None,
+        batch_size: int,
+        sequence_length: int,
+        last_valid_indices: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if boundary_indices is None or boundary_valid_mask is None:
+            raise ValueError(
+                "boundary_indices and boundary_valid_mask must be supplied together"
+            )
+        if not isinstance(boundary_indices, torch.Tensor):
+            raise TypeError("boundary_indices must be a tensor")
+        if not isinstance(boundary_valid_mask, torch.Tensor):
+            raise TypeError("boundary_valid_mask must be a tensor")
+        if boundary_indices.ndim != 2 or boundary_indices.shape[0] != batch_size:
+            raise ValueError("boundary_indices must have shape [B, Q]")
+        if boundary_indices.shape[1] <= 0:
+            raise ValueError("dense supervision requires at least one boundary")
+        if boundary_valid_mask.shape != boundary_indices.shape:
+            raise ValueError("boundary_valid_mask must match boundary_indices")
+        if boundary_indices.dtype != torch.long:
+            raise TypeError("boundary_indices must use torch.long")
+        if boundary_valid_mask.dtype is not torch.bool:
+            raise TypeError("boundary_valid_mask must use torch.bool")
+        indices = boundary_indices.to(device=device)
+        valid = boundary_valid_mask.to(device=device)
+        if torch.any(valid.sum(dim=1) == 0):
+            raise ValueError("every dense game requires at least one valid boundary")
+        if torch.any(indices[~valid] != 0):
+            raise ValueError("padded boundary indices must equal zero")
+        if torch.any(indices[valid] < 0) or torch.any(indices[valid] >= sequence_length):
+            raise ValueError("valid boundary indices must address the event sequence")
+        if torch.any(
+            valid & (indices > last_valid_indices.unsqueeze(1))
+        ):
+            raise ValueError("dense boundaries cannot address right padding")
+        if indices.shape[1] > 1:
+            if torch.any((~valid[:, :-1]) & valid[:, 1:]):
+                raise ValueError("boundary_valid_mask must use right padding")
+            adjacent_valid = valid[:, :-1] & valid[:, 1:]
+            if torch.any(adjacent_valid & (indices[:, 1:] <= indices[:, :-1])):
+                raise ValueError("valid boundary indices must be strictly increasing")
+        return indices, valid
 
     def _validate_inputs(
         self,

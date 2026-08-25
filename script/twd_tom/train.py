@@ -12,7 +12,7 @@ import random
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import torch
 import transformers
@@ -23,12 +23,21 @@ from torch.utils.data import DataLoader
 from script.twd_tom.materialize_canonical_belief_dataset import (
     validate_materialized_split_path,
 )
+from script.twd_tom.materialize_development_folds import (
+    DEVELOPMENT_FOLD_MANIFEST_FILENAME,
+    DEVELOPMENT_FOLD_MANIFEST_SCHEMA_VERSION,
+    validate_development_fold_paths,
+)
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
     QWEN2_BACKBONE_NAME,
     SUPPORTED_BACKBONE_NAMES,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
+)
+from werewolf.models.twd_tom.baselines import (
+    evaluate_dense_empirical_priors,
+    fit_dense_empirical_priors,
 )
 from werewolf.models.twd_tom.checkpoint import (
     MODEL_OUTPUT,
@@ -42,6 +51,10 @@ from werewolf.models.twd_tom.dataset import (
     TARGET_SEMANTICS,
     TWDToMDataset,
     collate_twd_tom_samples,
+)
+from werewolf.models.twd_tom.dense_dataset import (
+    DenseTWDToMDataset,
+    collate_dense_twd_tom_games,
 )
 from werewolf.models.twd_tom.losses import masked_belief_distribution_loss
 from werewolf.models.twd_tom.metrics import compute_belief_metrics
@@ -83,6 +96,9 @@ class TrainingConfig:
     gradient_clip_norm: float = 1.0
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
+    dense_supervision: bool = False
+    early_stopping_patience: int = 0
+    early_stopping_min_delta: float = 0.0
 
     def __post_init__(self) -> None:
         for field_name in ("output_dir", "dataset_path", "validation_dataset_path"):
@@ -126,6 +142,20 @@ class TrainingConfig:
             self.gradient_clip_norm, (int, float)
         ) or self.gradient_clip_norm < 0:
             raise ValueError("gradient_clip_norm cannot be negative")
+        if not isinstance(self.dense_supervision, bool):
+            raise TypeError("dense_supervision must be bool")
+        if (
+            isinstance(self.early_stopping_patience, bool)
+            or not isinstance(self.early_stopping_patience, int)
+            or self.early_stopping_patience < 0
+        ):
+            raise ValueError("early_stopping_patience must be non-negative")
+        if (
+            isinstance(self.early_stopping_min_delta, bool)
+            or not isinstance(self.early_stopping_min_delta, (int, float))
+            or self.early_stopping_min_delta < 0
+        ):
+            raise ValueError("early_stopping_min_delta must be non-negative")
 
     @property
     def resolved_dataset_path(self) -> Path:
@@ -185,17 +215,30 @@ def validate_training_split_lineage(
     resolved_validation = Path(validation_path).resolve()
     if resolved_train.parent != resolved_validation.parent:
         raise ValueError("train and validation must share one split manifest directory")
-    manifest = validate_materialized_split_path(
-        resolved_train,
-        split_name="train",
+    standard_manifest_path = resolved_train.parent / "split_manifest.json"
+    if standard_manifest_path.is_file():
+        manifest = validate_materialized_split_path(
+            resolved_train,
+            split_name="train",
+        )
+        expected_validation = (
+            resolved_train.parent
+            / manifest["output_files"]["validation"]["relative_path"]
+        ).resolve()
+        if resolved_validation != expected_validation:
+            raise ValueError("validation path is not the manifest validation split")
+        return manifest
+    development_manifest_path = (
+        resolved_train.parent.parent / DEVELOPMENT_FOLD_MANIFEST_FILENAME
     )
-    expected_validation = (
-        resolved_train.parent
-        / manifest["output_files"]["validation"]["relative_path"]
-    ).resolve()
-    if resolved_validation != expected_validation:
-        raise ValueError("validation path is not the manifest validation split")
-    return manifest
+    if development_manifest_path.is_file():
+        return validate_development_fold_paths(
+            resolved_train,
+            resolved_validation,
+        )
+    raise FileNotFoundError(
+        "training data has neither a split manifest nor a development fold manifest"
+    )
 
 
 def build_run_provenance(
@@ -237,9 +280,18 @@ def build_run_provenance(
         )
     train_path = config.resolved_dataset_path
     validation_path = config.resolved_validation_dataset_path
-    split_manifest = validate_training_split_lineage(train_path, validation_path)
-    split_manifest_path = train_path.parent / "split_manifest.json"
-    return {
+    lineage = validate_training_split_lineage(train_path, validation_path)
+    is_development_fold = (
+        lineage.get("schema_version") == DEVELOPMENT_FOLD_MANIFEST_SCHEMA_VERSION
+    )
+    lexical_development_root = train_path.parent.parent
+    split_manifest_path = (
+        lexical_development_root
+        / lineage["source_split_manifest_relative_path"]
+        if is_development_fold
+        else train_path.parent / "split_manifest.json"
+    )
+    result = {
         "git_commit_sha": commit,
         "git_worktree_clean": True,
         "python_version": platform.python_version(),
@@ -261,12 +313,35 @@ def build_run_provenance(
             repo_root=root,
         ),
         "split_manifest_sha256": sha256_file(split_manifest_path),
-        "split_manifest_digest": split_manifest["manifest_digest"],
-        "canonical_batch_summary_digest": split_manifest[
+        "split_manifest_digest": (
+            lineage["source_split_manifest_digest"]
+            if is_development_fold
+            else lineage["manifest_digest"]
+        ),
+        "canonical_batch_summary_digest": lineage[
             "canonical_batch_summary_digest"
         ],
         "output_dir": _repository_relative_path(config.output_dir, repo_root=root),
     }
+    if is_development_fold:
+        lineage_manifest_path = (
+            lexical_development_root / DEVELOPMENT_FOLD_MANIFEST_FILENAME
+        )
+        result.update({
+            "data_lineage_type": "development_fold",
+            "development_fold_name": lineage["_fold_name"],
+            "development_fold_manifest_path": _repository_relative_path(
+                lineage_manifest_path,
+                repo_root=root,
+            ),
+            "development_fold_manifest_sha256": sha256_file(
+                lineage_manifest_path
+            ),
+            "development_fold_manifest_digest": lineage["manifest_digest"],
+        })
+    else:
+        result["data_lineage_type"] = "original_split"
+    return result
 
 
 def _prepare_run_output_dir(path: Path) -> None:
@@ -337,8 +412,9 @@ def build_data_loader(
     *,
     dataset_path: str | Path,
     shuffle: bool,
-) -> tuple[DataLoader, TWDToMDataset]:
-    dataset = TWDToMDataset.from_jsonl(
+) -> tuple[DataLoader, TWDToMDataset | DenseTWDToMDataset]:
+    dataset_class = DenseTWDToMDataset if config.dense_supervision else TWDToMDataset
+    dataset = dataset_class.from_jsonl(
         dataset_path,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
         enable_cyclic_rotation=shuffle,
@@ -352,33 +428,58 @@ def build_data_loader(
         batch_size=config.batch_size,
         shuffle=shuffle,
         num_workers=config.num_workers,
-        collate_fn=collate_twd_tom_samples,
+        collate_fn=(
+            collate_dense_twd_tom_games
+            if config.dense_supervision
+            else collate_twd_tom_samples
+        ),
         generator=generator if shuffle else None,
     ), dataset
 
 
 def _training_dataset_contract(
-    train_dataset: TWDToMDataset,
-    validation_dataset: TWDToMDataset,
+    train_dataset: TWDToMDataset | DenseTWDToMDataset,
+    validation_dataset: TWDToMDataset | DenseTWDToMDataset,
 ) -> dict[str, str]:
     for field_name in (
         "model_input_scope",
         "target_semantics",
         "target_conversion",
+        "supervision_version",
     ):
-        if getattr(train_dataset, field_name) != getattr(validation_dataset, field_name):
+        train_value = getattr(
+            train_dataset,
+            field_name,
+            "independent_pre_boundary_v1",
+        )
+        validation_value = getattr(
+            validation_dataset,
+            field_name,
+            "independent_pre_boundary_v1",
+        )
+        if train_value != validation_value:
             raise ValueError(f"train and validation {field_name} values differ")
     return {
         "source_schema_version": SAMPLE_SCHEMA_VERSION,
         "model_input_scope": train_dataset.model_input_scope,
         "target_semantics": train_dataset.target_semantics,
         "target_conversion": train_dataset.target_conversion,
+        "training_supervision": getattr(
+            train_dataset,
+            "supervision_version",
+            "independent_pre_boundary_v1",
+        ),
     }
 
 
 def build_training_data_loaders(
     config: TrainingConfig,
-) -> tuple[DataLoader, TWDToMDataset, DataLoader, TWDToMDataset]:
+) -> tuple[
+    DataLoader,
+    TWDToMDataset | DenseTWDToMDataset,
+    DataLoader,
+    TWDToMDataset | DenseTWDToMDataset,
+]:
     validate_training_split_lineage(
         config.resolved_dataset_path,
         config.resolved_validation_dataset_path,
@@ -413,31 +514,44 @@ _BATCH_TENSOR_FIELDS = (
     "observer_alive_mask",
     "diagonal_target_mask",
 )
+_DENSE_BATCH_TENSOR_FIELDS = (
+    "boundary_indices",
+    "boundary_valid_mask",
+)
 
 
 def _move_batch_to_device(
     batch: Mapping[str, Any], device: torch.device
 ) -> dict[str, torch.Tensor]:
-    missing = [field for field in _BATCH_TENSOR_FIELDS if field not in batch]
+    fields = list(_BATCH_TENSOR_FIELDS)
+    dense_fields_present = [field in batch for field in _DENSE_BATCH_TENSOR_FIELDS]
+    if any(dense_fields_present) and not all(dense_fields_present):
+        raise ValueError("dense batch boundary fields must be supplied together")
+    if all(dense_fields_present):
+        fields.extend(_DENSE_BATCH_TENSOR_FIELDS)
+    missing = [field for field in fields if field not in batch]
     if missing:
         raise ValueError(f"batch is missing required fields: {missing}")
-    return {field: batch[field].to(device) for field in _BATCH_TENSOR_FIELDS}
+    return {field: batch[field].to(device) for field in fields}
 
 
 def _forward_batch(
     model: ToMBeliefBackbone, batch: Mapping[str, torch.Tensor]
 ) -> dict[str, torch.Tensor]:
+    fields = [
+        "subject_ids",
+        "action_ids",
+        "object_ids",
+        "event_type_ids",
+        "phase_ids",
+        "day_values",
+        "attention_mask",
+    ]
+    if "boundary_indices" in batch:
+        fields.extend(_DENSE_BATCH_TENSOR_FIELDS)
     return model(**{
         field: batch[field]
-        for field in (
-            "subject_ids",
-            "action_ids",
-            "object_ids",
-            "event_type_ids",
-            "phase_ids",
-            "day_values",
-            "attention_mask",
-        )
+        for field in fields
     })
 
 
@@ -474,7 +588,7 @@ class MetricAccumulator:
     def finalize(self) -> dict[str, int | float]:
         if self.valid_observer_count == 0:
             raise ValueError("dataset contains no valid observer targets")
-        return {
+        result = {
             "valid_observer_count": self.valid_observer_count,
             "mean_loss": self.loss_sum / self.valid_observer_count,
             **{
@@ -482,6 +596,17 @@ class MetricAccumulator:
                 for name, value in self.metric_sums.items()
             },
         }
+        uniform_kl = (
+            result["uniform_non_self_baseline_mean_cross_entropy"]
+            - result["mean_belief_target_entropy"]
+        )
+        result["uniform_non_self_baseline_mean_kl_divergence"] = uniform_kl
+        result["normalized_reducible_gap_improvement"] = (
+            1.0 - result["mean_belief_kl_divergence"] / uniform_kl
+            if uniform_kl > 0.0
+            else 0.0
+        )
+        return result
 
 
 def count_supervised_observers(data_loader: DataLoader) -> int:
@@ -542,20 +667,95 @@ def _loss_and_update(
     accumulator: MetricAccumulator,
 ) -> torch.Tensor:
     logits = _forward_batch(model, batch)[MODEL_OUTPUT]
+    targets = batch["belief_targets"]
+    observer_alive_mask = batch["observer_alive_mask"]
+    diagonal_target_mask = batch["diagonal_target_mask"]
+    if logits.ndim == 4:
+        if targets.shape != logits.shape:
+            raise ValueError("dense belief targets must match dense logits")
+        logits = logits.flatten(0, 1)
+        targets = targets.flatten(0, 1)
+        observer_alive_mask = observer_alive_mask.flatten(0, 1)
+        diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
     loss = masked_belief_distribution_loss(
         logits,
-        batch["belief_targets"],
-        batch["observer_alive_mask"],
-        batch["diagonal_target_mask"],
+        targets,
+        observer_alive_mask,
+        diagonal_target_mask,
     )
     accumulator.update(
         loss=loss,
         logits=logits,
-        targets=batch["belief_targets"],
-        observer_alive_mask=batch["observer_alive_mask"],
-        diagonal_target_mask=batch["diagonal_target_mask"],
+        targets=targets,
+        observer_alive_mask=observer_alive_mask,
+        diagonal_target_mask=diagonal_target_mask,
     )
     return loss
+
+
+def _update_per_game_metrics(
+    *,
+    raw_batch: Mapping[str, Any],
+    logits: torch.Tensor,
+    batch: Mapping[str, torch.Tensor],
+    accumulators: dict[str, MetricAccumulator],
+) -> None:
+    metadata = raw_batch.get("metadata")
+    if isinstance(metadata, Mapping):
+        game_ids = metadata.get("game_id")
+        if (
+            isinstance(game_ids, (str, bytes))
+            or not isinstance(game_ids, Sequence)
+        ):
+            raise ValueError("evaluation metadata requires batched game_id values")
+        metadata = [
+            {
+                field_name: field_values[index]
+                for field_name, field_values in metadata.items()
+            }
+            for index in range(len(game_ids))
+        ]
+    if (
+        isinstance(metadata, (str, bytes))
+        or not isinstance(metadata, Sequence)
+        or len(metadata) != logits.shape[0]
+    ):
+        raise ValueError("evaluation metadata must identify every batch item")
+    for batch_index, item_metadata in enumerate(metadata):
+        if not isinstance(item_metadata, Mapping):
+            raise TypeError("evaluation metadata items must be mappings")
+        game_id = item_metadata.get("game_id")
+        if not isinstance(game_id, str) or not game_id.strip():
+            raise ValueError("evaluation metadata requires a game_id")
+        accumulator = accumulators.setdefault(game_id, MetricAccumulator())
+        item_logits = logits[batch_index]
+        item_targets = batch["belief_targets"][batch_index]
+        item_alive = batch["observer_alive_mask"][batch_index]
+        item_diagonal = batch["diagonal_target_mask"][batch_index]
+        if logits.ndim == 4:
+            valid_boundaries = batch["boundary_valid_mask"][batch_index]
+            item_logits = item_logits[valid_boundaries]
+            item_targets = item_targets[valid_boundaries]
+            item_alive = item_alive[valid_boundaries]
+            item_diagonal = item_diagonal[valid_boundaries]
+        else:
+            item_logits = item_logits.unsqueeze(0)
+            item_targets = item_targets.unsqueeze(0)
+            item_alive = item_alive.unsqueeze(0)
+            item_diagonal = item_diagonal.unsqueeze(0)
+        loss = masked_belief_distribution_loss(
+            item_logits,
+            item_targets,
+            item_alive,
+            item_diagonal,
+        )
+        accumulator.update(
+            loss=loss,
+            logits=item_logits,
+            targets=item_targets,
+            observer_alive_mask=item_alive,
+            diagonal_target_mask=item_diagonal,
+        )
 
 
 def train_one_epoch(
@@ -593,11 +793,60 @@ def evaluate_model(
     *,
     device: torch.device,
 ) -> dict[str, int | float]:
+    metrics, _ = evaluate_model_with_games(
+        model,
+        data_loader,
+        device=device,
+    )
+    return metrics
+
+
+@torch.no_grad()
+def evaluate_model_with_games(
+    model: ToMBeliefBackbone,
+    data_loader: DataLoader,
+    *,
+    device: torch.device,
+) -> tuple[dict[str, int | float], dict[str, dict[str, int | float]]]:
+    """Evaluate globally and retain observer-weighted metrics per game."""
+
     model.eval()
     accumulator = MetricAccumulator()
+    game_accumulators: dict[str, MetricAccumulator] = {}
     for raw_batch in data_loader:
-        _loss_and_update(model, _move_batch_to_device(raw_batch, device), accumulator)
-    return accumulator.finalize()
+        batch = _move_batch_to_device(raw_batch, device)
+        logits = _forward_batch(model, batch)[MODEL_OUTPUT]
+        _update_per_game_metrics(
+            raw_batch=raw_batch,
+            logits=logits,
+            batch=batch,
+            accumulators=game_accumulators,
+        )
+        targets = batch["belief_targets"]
+        observer_alive_mask = batch["observer_alive_mask"]
+        diagonal_target_mask = batch["diagonal_target_mask"]
+        if logits.ndim == 4:
+            logits = logits.flatten(0, 1)
+            targets = targets.flatten(0, 1)
+            observer_alive_mask = observer_alive_mask.flatten(0, 1)
+            diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
+        loss = masked_belief_distribution_loss(
+            logits,
+            targets,
+            observer_alive_mask,
+            diagonal_target_mask,
+        )
+        accumulator.update(
+            loss=loss,
+            logits=logits,
+            targets=targets,
+            observer_alive_mask=observer_alive_mask,
+            diagonal_target_mask=diagonal_target_mask,
+        )
+    return accumulator.finalize(), {
+        game_id: game_accumulators[game_id].finalize()
+        for game_id in sorted(game_accumulators)
+    }
 
 
 def checkpoint_payload(
@@ -611,6 +860,7 @@ def checkpoint_payload(
     best_epoch: int,
     best_validation_mean_loss: float,
     run_provenance: Mapping[str, Any],
+    validation_by_game: Mapping[str, Any] | None = None,
     dataset_contract: Mapping[str, Any] | None = None,
     learning_rate_schedule: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -624,6 +874,10 @@ def checkpoint_payload(
     return {
         "schema_version": dataset_contract["source_schema_version"],
         **checkpoint_task_contract(),
+        "training_supervision": dataset_contract.get(
+            "training_supervision",
+            "independent_pre_boundary_v1",
+        ),
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -646,6 +900,7 @@ def checkpoint_payload(
         "learning_rate_schedule": dict(learning_rate_schedule or {"name": "constant"}),
         "train_metrics": dict(train_metrics),
         "validation_metrics": dict(validation_metrics),
+        "validation_by_game": dict(validation_by_game or {}),
         "selection_metric_name": "validation_mean_loss",
         "selection_metric_value": float(validation_metrics["mean_loss"]),
         "best_epoch": best_epoch,
@@ -663,6 +918,21 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         build_training_data_loaders(config)
     )
     dataset_contract = _training_dataset_contract(train_dataset, validation_dataset)
+    validation_baselines: dict[str, Any] = {}
+    if config.dense_supervision:
+        _, unaugmented_train_dataset = build_data_loader(
+            config,
+            dataset_path=config.resolved_dataset_path,
+            shuffle=False,
+        )
+        if not isinstance(unaugmented_train_dataset, DenseTWDToMDataset):
+            raise RuntimeError("dense training requires a dense baseline dataset")
+        if not isinstance(validation_dataset, DenseTWDToMDataset):
+            raise RuntimeError("dense training requires a dense validation dataset")
+        validation_baselines = evaluate_dense_empirical_priors(
+            validation_dataset,
+            fit_dense_empirical_priors(unaugmented_train_dataset),
+        )
     model = build_model(config).to(device)
     optimizer = AdamW(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
@@ -673,6 +943,10 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     history: list[dict[str, Any]] = []
     best_epoch = 0
     best_loss = float("inf")
+    best_validation_metrics: dict[str, int | float] | None = None
+    best_validation_by_game: dict[str, dict[str, int | float]] | None = None
+    epochs_without_improvement = 0
+    stopped_early = False
     best_path = output_dir / "best.pt"
     for epoch in range(1, config.epochs + 1):
         train_dataset.set_epoch(epoch)
@@ -684,19 +958,43 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
             gradient_clip_norm=config.gradient_clip_norm,
             lr_scheduler=lr_scheduler,
         )
-        validation_metrics = evaluate_model(model, validation_loader, device=device)
+        validation_metrics, validation_by_game = evaluate_model_with_games(
+            model,
+            validation_loader,
+            device=device,
+        )
         current_loss = float(validation_metrics["mean_loss"])
-        is_best = epoch == 1 or current_loss < best_loss
+        if not math.isfinite(current_loss):
+            raise RuntimeError("validation mean loss must remain finite")
+        is_best = epoch == 1 or current_loss < (
+            best_loss - float(config.early_stopping_min_delta)
+        )
         if is_best:
             best_epoch, best_loss = epoch, current_loss
+            best_validation_metrics = dict(validation_metrics)
+            best_validation_by_game = {
+                game_id: dict(metrics)
+                for game_id, metrics in validation_by_game.items()
+            }
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+        stopped_early = (
+            config.early_stopping_patience > 0
+            and epochs_without_improvement >= config.early_stopping_patience
+        )
         record = {
             "epoch": epoch,
             **checkpoint_task_contract(),
             "train": train_metrics,
             "validation": validation_metrics,
+            "validation_by_game": validation_by_game,
+            "validation_baselines": validation_baselines,
             "is_best": is_best,
             "best_epoch": best_epoch,
             "best_validation_mean_loss": best_loss,
+            "epochs_without_improvement": epochs_without_improvement,
+            "stopped_early": stopped_early,
             "learning_rate_schedule": dict(schedule),
             "run_provenance": dict(run_provenance),
         }
@@ -709,21 +1007,25 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
                 epoch=epoch,
                 train_metrics=train_metrics,
                 validation_metrics=validation_metrics,
+                validation_by_game=validation_by_game,
                 best_epoch=best_epoch,
                 best_validation_mean_loss=best_loss,
                 run_provenance=run_provenance,
                 dataset_contract=dataset_contract,
                 learning_rate_schedule=schedule,
             ), best_path)
+        if stopped_early:
+            break
     final = history[-1]
     last_path = output_dir / "last.pt"
     _atomic_torch_save(checkpoint_payload(
         model=model,
         optimizer=optimizer,
         config=config,
-        epoch=config.epochs,
+        epoch=int(final["epoch"]),
         train_metrics=final["train"],
         validation_metrics=final["validation"],
+        validation_by_game=final["validation_by_game"],
         best_epoch=best_epoch,
         best_validation_mean_loss=best_loss,
         run_provenance=run_provenance,
@@ -733,6 +1035,8 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     history_path = output_dir / "history.json"
     _atomic_json_write(history, history_path)
     logical_output = Path(run_provenance["output_dir"])
+    if best_validation_metrics is None or best_validation_by_game is None:
+        raise RuntimeError("training completed without a best validation epoch")
     summary = {
         "status": "ok",
         **checkpoint_task_contract(),
@@ -740,14 +1044,31 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         "validation_dataset": run_provenance["validation_dataset_path"],
         "train_sample_count": len(train_dataset),
         "validation_sample_count": len(validation_dataset),
-        "epochs_completed": config.epochs,
+        "train_boundary_count": getattr(
+            train_dataset, "boundary_count", len(train_dataset)
+        ),
+        "validation_boundary_count": getattr(
+            validation_dataset, "boundary_count", len(validation_dataset)
+        ),
+        "epochs_completed": len(history),
+        "stopped_early": stopped_early,
+        "early_stopping": {
+            "patience": config.early_stopping_patience,
+            "min_delta": float(config.early_stopping_min_delta),
+        },
+        "training_supervision": dataset_contract["training_supervision"],
+        "training_config": asdict(config),
         "best_epoch": best_epoch,
         "best_validation_mean_loss": best_loss,
+        "best_validation_metrics": best_validation_metrics,
+        "best_validation_by_game": best_validation_by_game,
         "device": str(device),
         "backbone": model.backbone_name,
         "model_config": result_model_config(model),
         "final_train_metrics": final["train"],
         "final_validation_metrics": final["validation"],
+        "final_validation_by_game": final["validation_by_game"],
+        "validation_baselines": validation_baselines,
         "selection_metric_name": "validation_mean_loss",
         "learning_rate_schedule": dict(schedule),
         "run_provenance": dict(run_provenance),
@@ -777,6 +1098,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--max-seq-len", type=int, default=256)
+    parser.add_argument("--dense-supervision", action="store_true")
+    parser.add_argument("--early-stopping-patience", type=int, default=0)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser
 
 
@@ -799,6 +1123,9 @@ def main() -> int:
         num_workers=args.num_workers,
         gradient_clip_norm=args.gradient_clip_norm,
         max_seq_len=args.max_seq_len,
+        dense_supervision=args.dense_supervision,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     ))
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

@@ -47,6 +47,51 @@ def test_model_outputs_direct_observer_target_logits():
     }
 
 
+def test_model_outputs_every_dense_pre_boundary_without_future_attention():
+    model = make_model().eval()
+    features = make_features()
+    boundaries = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+    boundary_mask = torch.ones((2, 2), dtype=torch.bool)
+    with torch.no_grad():
+        output = model(
+            **features,
+            boundary_indices=boundaries,
+            boundary_valid_mask=boundary_mask,
+        )
+    assert output["belief_logits"].shape == (2, 2, 7, 7)
+    assert output["observer_hidden_states"].shape == (2, 2, 7, 256)
+
+    changed = make_features()
+    changed["object_ids"][:, 3] = 6
+    with torch.no_grad():
+        changed_output = model(
+            **changed,
+            boundary_indices=boundaries,
+            boundary_valid_mask=boundary_mask,
+        )
+    torch.testing.assert_close(
+        output["belief_logits"][0, 0],
+        changed_output["belief_logits"][0, 0],
+    )
+
+
+def test_dense_boundary_contract_rejects_future_or_non_monotonic_indices():
+    model = make_model()
+    features = make_features(batch_size=1)
+    with pytest.raises(ValueError, match="right padding|event sequence"):
+        model(
+            **features,
+            boundary_indices=torch.tensor([[0, 4]]),
+            boundary_valid_mask=torch.ones((1, 2), dtype=torch.bool),
+        )
+    with pytest.raises(ValueError, match="strictly increasing"):
+        model(
+            **features,
+            boundary_indices=torch.tensor([[2, 1]]),
+            boundary_valid_mask=torch.ones((1, 2), dtype=torch.bool),
+        )
+
+
 def test_model_has_no_legacy_objective_or_private_input_api():
     model = make_model()
     parameters = inspect.signature(model.forward).parameters

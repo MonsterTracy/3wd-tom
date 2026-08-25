@@ -163,10 +163,20 @@ def _stream_jsonl_identity(path: Path) -> tuple[int, set[str]]:
     return row_count, game_ids
 
 
-def validate_split_manifest(manifest_path: str | Path) -> dict[str, Any]:
-    """Validate one complete materialized train/validation/test lineage."""
+def validate_split_manifest(
+    manifest_path: str | Path,
+    *,
+    verify_split_files: tuple[str, ...] = SPLIT_NAMES,
+) -> dict[str, Any]:
+    """Validate materialized lineage and the selected physical split files."""
 
     path = Path(manifest_path).resolve()
+    if (
+        not isinstance(verify_split_files, tuple)
+        or not set(verify_split_files).issubset(SPLIT_NAMES)
+        or len(verify_split_files) != len(set(verify_split_files))
+    ):
+        raise ValueError("verify_split_files must be unique declared split names")
     manifest = _load_json_object(path)
     if set(manifest) != SPLIT_MANIFEST_FIELDS:
         raise ValueError("split manifest field set mismatch")
@@ -248,6 +258,8 @@ def validate_split_manifest(manifest_path: str | Path) -> dict[str, Any]:
             descriptor["sha256"],
             field_name=f"output_files[{split_name}].sha256",
         )
+        if split_name not in verify_split_files:
+            continue
         if _sha256(output_path) != expected_sha256:
             raise ValueError(f"split manifest {split_name} output SHA-256 mismatch")
         row_count, output_game_ids = _stream_jsonl_identity(output_path)

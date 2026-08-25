@@ -22,13 +22,69 @@ from werewolf.models.twd_tom.dataset import (
     deterministic_cyclic_shift,
     load_twd_tom_jsonl,
 )
+from werewolf.models.twd_tom.dense_dataset import (
+    DENSE_SUPERVISION_VERSION,
+    DenseTWDToMDataset,
+    collate_dense_twd_tom_games,
+)
 from werewolf.models.twd_tom.public_events import (
     completed_pre_speech_public_events,
     public_event_digest,
     structured_input_digest,
 )
 from werewolf.models.twd_tom.schema import PLAYER_TO_ID
-from werewolf.models.twd_tom.speech_annotations import speech_annotation_digest
+from werewolf.models.twd_tom.speech_annotations import (
+    make_speech_annotation,
+    speech_annotation_digest,
+)
+
+
+def _later_dense_snapshot(sample):
+    later = deepcopy(sample)
+    later["step_idx"] += 1
+    later["label_cutoff_step_idx"] = later["step_idx"]
+    previous_speaker = f"player{later['speaker_id']}"
+    speech_index = len(later["public_events"])
+    later["public_events"].extend(
+        [
+            {
+                "event_idx": speech_index,
+                "event_type": "public_speech",
+                "speaker": previous_speaker,
+                "raw_text": "later synthetic speech",
+            },
+            {
+                "event_idx": speech_index + 1,
+                "event_type": "turn_start",
+                "speaker": "player3",
+            },
+        ]
+    )
+    later["speech_annotations"].append(
+        make_speech_annotation(
+            event_idx=speech_index,
+            speaker=previous_speaker,
+            raw_text="later synthetic speech",
+            parser_model_id="synthetic_parser",
+            parser_call_id=f"synthetic_{speech_index:06d}",
+            annotation_source="llm_parser",
+            status="ok",
+            actions=[[previous_speaker, "support", "player4"]],
+            raw_response=None,
+            error_type=None,
+            error_message=None,
+        )
+    )
+    later["speaker_id"] = 3
+    later["public_action_count"] += 1
+    later["public_event_digest"] = public_event_digest(later["public_events"])
+    later["speech_annotation_digest"] = speech_annotation_digest(
+        later["speech_annotations"]
+    )
+    later["structured_input_digest"] = structured_input_digest(
+        later["public_events"], later["speech_annotations"]
+    )
+    return later
 
 
 def test_dataset_consumes_raw_self_report_and_emits_fixed_belief_contract(
@@ -394,3 +450,63 @@ def test_target_rows_follow_canonical_player_indices(suspicion_sample_factory):
     item = TWDToMDataset([sample])[0]
     assert item["belief_targets"][PLAYER_TO_ID["player2"] - 1, 5] > 0
     assert item["belief_targets"][PLAYER_TO_ID["player5"] - 1, 0] > 0
+
+
+def test_dense_dataset_groups_every_game_and_supervises_all_pre_boundaries(
+    suspicion_sample_factory,
+):
+    first = suspicion_sample_factory(game_id="dense_game", step_idx=1)
+    second = _later_dense_snapshot(first)
+    dataset = DenseTWDToMDataset([second, first])
+    item = dataset[0]
+
+    assert len(dataset) == 1
+    assert dataset.boundary_count == 2
+    assert item["metadata"]["supervision_version"] == DENSE_SUPERVISION_VERSION
+    assert item["metadata"]["step_idx"] == [1, 2]
+    assert item["boundary_indices"].shape == (2,)
+    assert item["boundary_indices"][0] < item["boundary_indices"][1]
+    assert item["boundary_indices"][-1] == item["subject_ids"].shape[0] - 1
+    assert item["belief_targets"].shape == (2, 7, 7)
+    assert item["observer_alive_mask"].shape == (2, 7)
+    assert item["diagonal_target_mask"].shape == (2, 7, 7)
+    assert item["boundary_valid_mask"].tolist() == [True, True]
+
+
+def test_dense_collate_right_pads_timelines_and_boundaries(
+    suspicion_sample_factory,
+):
+    first = suspicion_sample_factory(game_id="dense_a", step_idx=1)
+    second = _later_dense_snapshot(first)
+    other = suspicion_sample_factory(game_id="dense_b", step_idx=1)
+    dataset = DenseTWDToMDataset([first, second, other])
+    batch = collate_dense_twd_tom_games([dataset[0], dataset[1]])
+
+    assert batch["belief_targets"].shape == (2, 2, 7, 7)
+    assert batch["observer_alive_mask"].shape == (2, 2, 7)
+    assert batch["boundary_indices"].shape == (2, 2)
+    assert batch["boundary_valid_mask"].tolist() == [
+        [True, True],
+        [True, False],
+    ]
+    assert not batch["observer_alive_mask"][1, 1].any()
+    assert not batch["belief_targets"][1, 1].any()
+
+
+def test_dense_dataset_rejects_annotation_history_that_is_not_an_exact_prefix(
+    suspicion_sample_factory,
+):
+    first = suspicion_sample_factory(game_id="dense_game", step_idx=1)
+    second = _later_dense_snapshot(first)
+    second["speech_annotations"][0]["actions"] = [
+        ["player2", "oppose", "player4"]
+    ]
+    second["speech_annotation_digest"] = speech_annotation_digest(
+        second["speech_annotations"]
+    )
+    second["structured_input_digest"] = structured_input_digest(
+        second["public_events"], second["speech_annotations"]
+    )
+    dataset = DenseTWDToMDataset([first, second])
+    with pytest.raises(ValueError, match="exact prefixes"):
+        dataset[0]

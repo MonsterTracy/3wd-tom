@@ -49,3 +49,7 @@ Dataset 只以结构化公开事件作为模型特征。设 `R = known_werewolve
 `diagonal_target_mask` 排除自身列。不存在 21 类组合空间、pair 投影或私有知识输入。
 
 训练时可应用通用座位循环旋转：同一置换同时作用于 observer、target、公开事件中的玩家引用、belief target 的行列以及 mask；验证和 evaluation 不旋转。
+
+正式 dense 训练把同一局所有 snapshot 按 `step_idx` 排序，验证每个 encoded history 都是最终 PRE 序列的精确前缀，然后用 boundary-specific causal mask 输出 `belief_logits[B, Q, 7, 7]`。`Q` 是该局 strict-PRE 边界数，padding boundary 不参与损失；单边界 gameplay inference 仍保持 `belief_logits[B, 7, 7]`。若 256-token 窗口截断破坏精确前缀关系，数据审计和 Dataset 都直接失败，不改写历史或丢弃边界。
+
+模型选择只在原 train+validation 组成的开发集上执行 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。

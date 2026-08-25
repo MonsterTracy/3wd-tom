@@ -70,3 +70,87 @@ test ! -e "${SHADOW_ROOT}"
 3. 数据集写入 `/data/yuxiao/3wd-tom/datasets`，checkpoint 和 metrics 写入 `/data/yuxiao/3wd-tom/outputs`。
 4. 保存 commit、配置 SHA256、`run_id`、模型 ID、endpoint、seeds、环境版本、采集 plan/summary/failure、每局 call audit、数据 audit、split manifest、checkpoint 和 metrics。
 5. 模型服务与长任务交给服务器 service manager 或会话管理器；仓库不负责自动下载模型或守护进程。
+
+### 60 局 dense ToM 开发实验
+
+1. 原 48/6/6 split 中的 test 六局保持封存。模型选择阶段只合并 train 与 validation 为 54 局开发集并生成 5-fold；fold 目录没有 `test.jsonl`，训练入口会拒绝任何含 sealed test game ID 的 fold。
+2. 先分别审计原 train 与 validation 的 dense strict-PRE 契约。审计要求每个 earlier boundary 都是最终 encoded game sequence 的精确前缀；`max_seq_len=256` 截断破坏该关系时直接失败，不丢弃边界或改写数据。
+3. dense 训练的 `batch_size=8` 表示 8 局；每局只运行一次 causal backbone，并在该局所有 PRE boundaries 输出监督。初始候选固定 4 层、hidden 256 的当前 Qwen2 backbone，最多 80 epochs，warmup-cosine，patience 12。
+4. 先运行 Dense-A（learning rate `1e-4`、minimum `1e-5`、seed 42）。OOF 报告覆盖全部 54 局且每局只出现一次，主门槛为 observer-weighted normalized reducible-gap improvement `>=0.50`。同时比较 fold-train-only global prior 与 phase prior，并报告 game-level bootstrap 95% CI。
+5. 只有 Dense-A 未达门槛时才运行 Dense-B（learning rate `3e-4`、minimum `3e-5`，其余设置完全相同）。不能根据封存 test 选择 learning rate、epoch 或 seed。
+6. `run_development_oof` 会复用配置完全一致且已有成功 `summary.json` 的 fold；若某个 fold 只有不完整输出，则停止并要求检查该 fold，不删除其他已完成 fold，也不从 fold 0 重新训练。
+7. 在 OOF 方案冻结并完成开发集最终拟合前，不运行 `script.twd_tom.eval`。封存 test 只允许对最终选定的单一 checkpoint 评估一次。
+
+Dense-A 的服务器命令模板如下。路径使用项目内的 `datasets`、`outputs` 软链接，以便训练 provenance 保存 repository-relative path；物理文件仍写入 `/data/yuxiao/3wd-tom`。训练只使用项目 Python 环境，不需要启动 vLLM。
+
+```bash
+set -euo pipefail
+cd /home/dell/yuxiao/3wd-tom
+
+SOURCE_SPLIT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6"
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+AUDIT_ROOT="/data/yuxiao/3wd-tom/review/canonical60_dense_pre"
+
+mkdir -p "${AUDIT_ROOT}"
+test ! -e "${FOLD_ROOT}"
+test ! -e "${AUDIT_ROOT}/train_dense_pre.json"
+test ! -e "${AUDIT_ROOT}/validation_dense_pre.json"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.audit_dense_belief_dataset \
+  --dataset "${SOURCE_SPLIT}/train.jsonl" \
+  --split-name train \
+  --max-seq-len 256 \
+  --output "${AUDIT_ROOT}/train_dense_pre.json"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.audit_dense_belief_dataset \
+  --dataset "${SOURCE_SPLIT}/validation.jsonl" \
+  --split-name validation \
+  --max-seq-len 256 \
+  --output "${AUDIT_ROOT}/validation_dense_pre.json"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.materialize_development_folds \
+  --train "${SOURCE_SPLIT}/train.jsonl" \
+  --validation "${SOURCE_SPLIT}/validation.jsonl" \
+  --output-dir "${FOLD_ROOT}" \
+  --fold-count 5 \
+  --fold-seed 42
+```
+
+确认两个 audit 均为 `PASS`，fold manifest 的 `development_game_ids` 为 54、`sealed_test_game_ids` 为 6 后，后台启动 Dense-A：
+
+```bash
+cd /home/dell/yuxiao/3wd-tom
+
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+OOF_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/tom60_dense_a_lr1e-4_seed42_oof5"
+OOF_LOG="/data/yuxiao/3wd-tom/logs/tom60_dense_a_lr1e-4_seed42_oof5.console.log"
+
+test ! -e "${OOF_OUTPUT}"
+test ! -e "${OOF_LOG}"
+
+nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.run_development_oof \
+  --fold-root "${FOLD_ROOT}" \
+  --output-dir "${OOF_OUTPUT}" \
+  --epochs 80 \
+  --batch-size 8 \
+  --learning-rate 1e-4 \
+  --min-learning-rate 1e-5 \
+  --warmup-ratio 0.05 \
+  --early-stopping-patience 12 \
+  --early-stopping-min-delta 1e-4 \
+  --seed 42 \
+  --device cuda \
+  --bootstrap-samples 2000 \
+  --target-improvement 0.50 \
+  > "${OOF_LOG}" 2>&1 < /dev/null &
+
+OOF_PID=$!
+echo "OOF_PID=${OOF_PID}"
+echo "OOF_LOG=${OOF_LOG}"
+```
+
+用 `tail -f "${OOF_LOG}"` 查看日志；最终报告为 `${OOF_OUTPUT}/oof_summary.json`。SSH 断开不影响 `nohup` 进程。重新执行完全相同的 OOF 命令时，已完成且配置一致的 fold 会跳过；但首次命令中的 `test ! -e "${OOF_OUTPUT}"` 只用于防止误覆盖，恢复时应省略这一个检查。

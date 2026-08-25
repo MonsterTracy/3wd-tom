@@ -35,8 +35,9 @@ Classic-7 simulator
   -> canonical game-level train/validation/test materialization
   -> deterministic sparse suspicion-set conversion
   -> 7×7 observer-conditioned relative-suspicion Dataset
-  -> observer-query belief backbone
-  -> masked belief distribution training/evaluation
+  -> game-level dense strict-PRE Dataset
+  -> observer-query belief backbone at every PRE boundary
+  -> development-only 5-fold OOF training/evaluation
 ```
 
 public-only reporter、external offline annotation、PBM、ToM1/ToM2 双任务和旧 formal reporter 不属于 tom-v2 主线。
@@ -57,8 +58,13 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `werewolf/models/twd_tom/collector.py`：写入 raw JSONL。
 - `werewolf/models/twd_tom/belief_labels.py`：在 hard knowledge 约束下将相对怀疑集合确定性归一化为玩家 belief row；空集合只在 admissible players 上均分。
 - `werewolf/models/twd_tom/dataset.py`：唯一 tom-v2 Dataset；输出 7×7 target、observer alive mask 与 diagonal target mask。
+- `werewolf/models/twd_tom/dense_dataset.py`：将同一局的所有 strict-PRE snapshot 组织为共享公开序列与多监督边界；超过 `max_seq_len` 后无法保持精确前缀的数据直接拒绝。
+- `werewolf/models/twd_tom/baselines.py`：只用 fold 训练标签拟合 observer global prior 与 observer+phase prior，不读取 fold validation 或 test label。
 - `script/twd_tom/materialize_canonical_belief_dataset.py`：验证成功批次摘要链，将 canonical per-game snapshots 确定性分配为 game-level train/validation/test JSONL，并写入 split manifest。
 - `script/twd_tom/audit_canonical_belief_data.py`：在物化前验证成功批次摘要链和 canonical label 可训练性，并报告 support/sequence/truncation 统计。
+- `script/twd_tom/audit_dense_belief_dataset.py`：训练前证明每条监督对应 exact strict-PRE encoded prefix，并报告逐局边界与序列长度。
+- `script/twd_tom/materialize_development_folds.py`：只合并原 train+validation，生成开发集 5-fold；test 只保留 manifest 身份，不复制或读取其物理数据。
+- `script/twd_tom/run_development_oof.py`：按 8 局一个 batch 运行 dense 5-fold OOF、早停、逐局指标、game bootstrap CI 与训练集 prior 基线。
 - `script/twd_tom/audit_shadow_speech_parser.py`：只读重解析既有公开发言，比较 DeepSeek 与原 parser 的状态、动作顺序和动作集合；结果写入独立目录，不能替换 canonical annotation。
 - `script/twd_tom/collection_budget.py`：执行正式采集的 gameplay、belief、total call 和单局墙钟预算。
 - `script/twd_tom/replay_canonical_trajectory.py`：不调用模型地重放 canonical submitted actions，并核对逐步状态、公开事件和 observer views。
@@ -72,7 +78,7 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 
 当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1`、`classic7_public_speech_realization_prompt_v1`、`classic7_pre_speech_player_suspicion_v5` 和 `classic7_pre_speech_player_suspicion_prompt_v6`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
 
-训练 Dataset 默认启用通用座位循环旋转；验证与 evaluation 保持原始座位。旋转同时覆盖 observer、target、公开事件玩家引用、belief matrix 和 masks。
+训练 Dataset 默认启用通用座位循环旋转；验证与 evaluation 保持原始座位。旋转同时覆盖 observer、target、公开事件玩家引用、belief matrix 和 masks。dense 模式的 `batch_size` 表示局数而不是 snapshot 数；同一局所有合法 PRE 边界共同产生监督。
 
 ## 安装与测试
 

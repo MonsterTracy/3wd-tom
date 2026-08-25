@@ -8,6 +8,7 @@ from script.twd_tom.train import (
     MODEL_OUTPUT,
     OBJECTIVE,
     TrainingConfig,
+    _repository_relative_path,
     _forward_batch,
     _move_batch_to_device,
     build_data_loader,
@@ -15,6 +16,7 @@ from script.twd_tom.train import (
     checkpoint_payload,
     checkpoint_task_contract,
     evaluate_model,
+    evaluate_model_with_games,
     train_one_epoch,
 )
 from werewolf.models.twd_tom.dataset import (
@@ -23,10 +25,27 @@ from werewolf.models.twd_tom.dataset import (
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
 )
+from werewolf.models.twd_tom.dense_dataset import (
+    DENSE_SUPERVISION_VERSION,
+    DenseTWDToMDataset,
+)
 
 
 def write_jsonl(path, sample):
     path.write_text(json.dumps(sample) + "\n", encoding="utf-8")
+
+
+def test_provenance_preserves_repository_symlink_path(tmp_path):
+    repository = tmp_path / "repository"
+    physical_data = tmp_path / "physical_data"
+    repository.mkdir()
+    physical_data.mkdir()
+    (repository / "datasets").symlink_to(physical_data, target_is_directory=True)
+    dataset = repository / "datasets" / "fold_0" / "train.jsonl"
+
+    assert _repository_relative_path(dataset, repo_root=repository) == (
+        "datasets/fold_0/train.jsonl"
+    )
 
 
 def make_config(tmp_path, dataset_path):
@@ -98,6 +117,59 @@ def test_one_train_and_evaluation_batch_use_direct_belief_contract(
     assert evaluation["mean_belief_kl_divergence"] == pytest.approx(
         evaluation["mean_belief_cross_entropy"]
         - evaluation["mean_belief_target_entropy"]
+    )
+    assert evaluation["normalized_reducible_gap_improvement"] == pytest.approx(
+        1.0
+        - evaluation["mean_belief_kl_divergence"]
+        / evaluation["uniform_non_self_baseline_mean_kl_divergence"]
+    )
+
+
+def test_dense_game_batch_trains_every_pre_boundary(
+    tmp_path, training_sample_factory
+):
+    path = tmp_path / "dense.jsonl"
+    write_jsonl(path, training_sample_factory())
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path=str(path),
+        validation_dataset_path=str(path),
+        epochs=1,
+        batch_size=8,
+        max_seq_len=32,
+        backbone="gpt2_block",
+        device="cpu",
+        dense_supervision=True,
+    )
+    loader, dataset = build_data_loader(
+        config,
+        dataset_path=path,
+        shuffle=False,
+    )
+    assert isinstance(dataset, DenseTWDToMDataset)
+    assert dataset.supervision_version == DENSE_SUPERVISION_VERSION
+    model = build_model(config)
+    batch = _move_batch_to_device(next(iter(loader)), torch.device("cpu"))
+    assert _forward_batch(model, batch)[MODEL_OUTPUT].shape == (1, 1, 7, 7)
+    optimizer = AdamW(model.parameters(), lr=1e-4)
+    metrics = train_one_epoch(
+        model,
+        loader,
+        optimizer,
+        device=torch.device("cpu"),
+        gradient_clip_norm=1.0,
+    )
+    assert metrics["valid_observer_count"] == 4
+    assert metrics["mean_loss"] > 0
+    aggregate, by_game = evaluate_model_with_games(
+        model,
+        loader,
+        device=torch.device("cpu"),
+    )
+    assert set(by_game) == {"synthetic_game_001"}
+    assert by_game["synthetic_game_001"]["valid_observer_count"] == 4
+    assert aggregate["mean_loss"] == pytest.approx(
+        by_game["synthetic_game_001"]["mean_loss"]
     )
 
 
