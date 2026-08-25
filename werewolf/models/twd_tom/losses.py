@@ -17,6 +17,7 @@ def masked_belief_distribution_loss(
     observer_alive_mask: torch.Tensor,
     diagonal_target_mask: torch.Tensor,
     *,
+    observer_supervision_mask: torch.Tensor | None = None,
     reduction: str = "mean",
 ) -> torch.Tensor:
     """Compute soft-target cross entropy over alive observer rows."""
@@ -25,17 +26,21 @@ def masked_belief_distribution_loss(
         belief_logits,
         belief_targets,
         observer_alive_mask,
+        observer_supervision_mask,
         diagonal_target_mask,
     ) = _validate_belief_loss_inputs(
         belief_logits=belief_logits,
         belief_targets=belief_targets,
         observer_alive_mask=observer_alive_mask,
+        observer_supervision_mask=observer_supervision_mask,
         diagonal_target_mask=diagonal_target_mask,
         reduction=reduction,
     )
-    valid_observer_count = observer_alive_mask.sum()
+    valid_observer_count = observer_supervision_mask.sum()
     if valid_observer_count.item() == 0:
-        raise ValueError("observer_alive_mask must select at least one observer")
+        raise ValueError(
+            "observer supervision must select at least one observer among alive rows"
+        )
 
     masked_logits = belief_logits.masked_fill(~diagonal_target_mask, -torch.inf)
     log_probabilities = F.log_softmax(masked_logits, dim=-1)
@@ -45,7 +50,7 @@ def masked_belief_distribution_loss(
         torch.zeros_like(belief_targets),
     )
     per_observer_loss = per_target_loss.sum(dim=-1)
-    masked_loss = per_observer_loss * observer_alive_mask.to(
+    masked_loss = per_observer_loss * observer_supervision_mask.to(
         dtype=per_observer_loss.dtype
     )
     if reduction == "none":
@@ -91,9 +96,16 @@ def _validate_belief_loss_inputs(
     belief_logits: torch.Tensor,
     belief_targets: torch.Tensor,
     observer_alive_mask: torch.Tensor,
+    observer_supervision_mask: torch.Tensor | None,
     diagonal_target_mask: torch.Tensor,
     reduction: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     if reduction not in VALID_REDUCTIONS:
         raise ValueError(
             f"reduction must be one of {sorted(VALID_REDUCTIONS)}, got {reduction!r}"
@@ -104,6 +116,8 @@ def _validate_belief_loss_inputs(
         "observer_alive_mask": observer_alive_mask,
         "diagonal_target_mask": diagonal_target_mask,
     }
+    if observer_supervision_mask is not None:
+        tensors["observer_supervision_mask"] = observer_supervision_mask
     for field_name, tensor in tensors.items():
         if not isinstance(tensor, torch.Tensor):
             raise TypeError(f"{field_name} must be a tensor")
@@ -120,6 +134,11 @@ def _validate_belief_loss_inputs(
     expected_observer_shape = (belief_logits.shape[0], NUM_PLAYERS)
     if observer_alive_mask.shape != expected_observer_shape:
         raise ValueError("observer_alive_mask must have shape [B, 7]")
+    if (
+        observer_supervision_mask is not None
+        and observer_supervision_mask.shape != expected_observer_shape
+    ):
+        raise ValueError("observer_supervision_mask must have shape [B, 7]")
     if diagonal_target_mask.shape != belief_logits.shape:
         raise ValueError("diagonal_target_mask must have shape [B, 7, 7]")
     if not torch.is_floating_point(belief_logits):
@@ -128,6 +147,11 @@ def _validate_belief_loss_inputs(
         raise TypeError("belief_targets must use a floating-point dtype")
     if observer_alive_mask.dtype is not torch.bool:
         raise TypeError("observer_alive_mask must use torch.bool")
+    if (
+        observer_supervision_mask is not None
+        and observer_supervision_mask.dtype is not torch.bool
+    ):
+        raise TypeError("observer_supervision_mask must use torch.bool")
     if diagonal_target_mask.dtype is not torch.bool:
         raise TypeError("diagonal_target_mask must use torch.bool")
     if not torch.isfinite(belief_logits).all():
@@ -142,6 +166,13 @@ def _validate_belief_loss_inputs(
         dtype=belief_logits.dtype,
     )
     alive_mask = observer_alive_mask.to(device=belief_logits.device)
+    supervision_mask = (
+        alive_mask
+        if observer_supervision_mask is None
+        else observer_supervision_mask.to(device=belief_logits.device)
+    )
+    if torch.any(supervision_mask & ~alive_mask):
+        raise ValueError("observer_supervision_mask must be a subset of alive rows")
     target_mask = diagonal_target_mask.to(device=belief_logits.device)
     expected_target_mask = ~torch.eye(
         NUM_PLAYERS,
@@ -163,7 +194,7 @@ def _validate_belief_loss_inputs(
         raise ValueError("every alive observer target row must sum to one")
     if torch.any(targets[~alive_mask] != 0.0):
         raise ValueError("dead observer target rows must remain all zero")
-    return belief_logits, targets, alive_mask, target_mask
+    return belief_logits, targets, alive_mask, supervision_mask, target_mask
 
 
 __all__ = [

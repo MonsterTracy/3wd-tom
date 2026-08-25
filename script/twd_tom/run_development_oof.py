@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -14,16 +13,26 @@ from script.twd_tom.materialize_development_folds import (
     DEVELOPMENT_FOLD_MANIFEST_FILENAME,
     validate_development_fold_paths,
 )
-from script.twd_tom.train import TrainingConfig, run_training
+from script.twd_tom.train import (
+    TrainingConfig,
+    bootstrap_game_macro_metric,
+    game_macro_metrics,
+    run_training,
+    stratified_game_macro_metrics,
+)
 from werewolf.models.twd_tom.belief_backbone import (
     FULL_INPUT_FEATURE_PROFILE,
     QWEN2_BACKBONE_NAME,
     SUPPORTED_BACKBONE_NAMES,
     SUPPORTED_INPUT_FEATURE_PROFILES,
 )
+from werewolf.models.twd_tom.supervision import (
+    ALL_ALIVE_SCOPE,
+    SUPERVISION_SCOPES,
+)
 
 
-OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v2"
+OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v3"
 DEFAULT_TARGET_IMPROVEMENT = 0.50
 
 
@@ -56,40 +65,95 @@ def _weighted_metrics(
         raise ValueError("OOF metrics contain no supervised observers")
     names = set.intersection(
         *(
-            {name for name in metrics if name != "valid_observer_count"}
+            {
+                name
+                for name in metrics
+                if name not in {"valid_observer_count", "total_row_count"}
+            }
             for metrics in by_game.values()
         )
     )
-    result: dict[str, int | float] = {"valid_observer_count": total_count}
+    result: dict[str, int | float] = {
+        "total_row_count": total_count,
+        "valid_observer_count": total_count,
+    }
+    derived = {
+        "normalized_reducible_gap_improvement",
+        "private_admissible_normalized_reducible_gap_improvement",
+        "uniform_non_self_baseline_mean_kl_divergence",
+        "private_admissible_uniform_baseline_mean_kl_divergence",
+    }
     for name in sorted(names):
-        result[name] = sum(
-            float(metrics[name]) * int(metrics["valid_observer_count"])
+        if name.endswith("_row_count"):
+            result[name] = sum(
+                int(metrics[name]) for metrics in by_game.values()
+            )
+        elif name.endswith("_sum"):
+            result[name] = sum(
+                float(metrics[name]) for metrics in by_game.values()
+            )
+        elif name.startswith("max_"):
+            result[name] = max(
+                float(metrics[name]) for metrics in by_game.values()
+            )
+        elif name not in derived:
+            result[name] = sum(
+                float(metrics[name]) * int(metrics["valid_observer_count"])
+                for metrics in by_game.values()
+            ) / total_count
+    model_kl_sum = float(result.get(
+        "model_kl_sum",
+        sum(
+            float(metrics["mean_belief_kl_divergence"])
+            * int(metrics["valid_observer_count"])
             for metrics in by_game.values()
-        ) / total_count
-    uniform_kl = float(
-        result["uniform_non_self_baseline_mean_cross_entropy"]
-    ) - float(result["mean_belief_target_entropy"])
+        ),
+    ))
+    uniform_kl_sum = float(result.get(
+        "uniform_non_self_baseline_kl_sum",
+        sum(
+            float(metrics["uniform_non_self_baseline_mean_kl_divergence"])
+            * int(metrics["valid_observer_count"])
+            for metrics in by_game.values()
+        ),
+    ))
+    result["model_kl_sum"] = model_kl_sum
+    result["uniform_non_self_baseline_kl_sum"] = uniform_kl_sum
+    uniform_kl = uniform_kl_sum / total_count
     result["uniform_non_self_baseline_mean_kl_divergence"] = uniform_kl
     result["normalized_reducible_gap_improvement"] = (
-        1.0 - float(result["mean_belief_kl_divergence"]) / uniform_kl
-        if uniform_kl > 0.0
+        1.0 - model_kl_sum / uniform_kl_sum
+        if uniform_kl_sum > 0.0
         else 0.0
     )
     private_cross_entropy = result.get(
         "private_admissible_uniform_baseline_mean_cross_entropy"
     )
     if private_cross_entropy is not None:
-        private_kl = float(private_cross_entropy) - float(
-            result["mean_belief_target_entropy"]
-        )
+        private_kl_sum = float(result.get(
+            "private_admissible_uniform_baseline_kl_sum",
+            sum(
+                float(metrics.get(
+                    "private_admissible_uniform_baseline_mean_kl_divergence",
+                    float(metrics[
+                        "private_admissible_uniform_baseline_mean_cross_entropy"
+                    ]) - float(metrics["mean_belief_target_entropy"]),
+                )) * int(metrics["valid_observer_count"])
+                for metrics in by_game.values()
+            ),
+        ))
+        result[
+            "private_admissible_uniform_baseline_kl_sum"
+        ] = private_kl_sum
+        private_kl = private_kl_sum / total_count
         result[
             "private_admissible_uniform_baseline_mean_kl_divergence"
         ] = private_kl
         result[
             "private_admissible_normalized_reducible_gap_improvement"
         ] = (
-            1.0 - float(result["mean_belief_kl_divergence"]) / private_kl
-            if private_kl > 0.0
+            1.0 - model_kl_sum / private_kl_sum
+            if private_kl_sum > 0.0
             else 0.0
         )
     return result
@@ -98,31 +162,7 @@ def _weighted_metrics(
 def _macro_metrics(
     by_game: Mapping[str, Mapping[str, int | float]],
 ) -> dict[str, float]:
-    names = set.intersection(
-        *(
-            {
-                name
-                for name in metrics
-                if name != "valid_observer_count"
-                and isinstance(metrics[name], (int, float))
-            }
-            for metrics in by_game.values()
-        )
-    )
-    return {
-        name: sum(float(metrics[name]) for metrics in by_game.values())
-        / len(by_game)
-        for name in sorted(names)
-    }
-
-
-def _percentile(values: list[float], probability: float) -> float:
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * probability
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+    return game_macro_metrics(by_game)
 
 
 def _bootstrap_game_macro(
@@ -132,24 +172,12 @@ def _bootstrap_game_macro(
     samples: int,
     seed: int,
 ) -> dict[str, Any]:
-    if samples <= 0:
-        raise ValueError("bootstrap_samples must be positive")
-    values = [float(by_game[game_id][metric_name]) for game_id in sorted(by_game)]
-    rng = random.Random(seed)
-    means = [
-        sum(rng.choice(values) for _ in values) / len(values)
-        for _ in range(samples)
-    ]
-    return {
-        "unit": "game",
-        "metric": metric_name,
-        "game_count": len(values),
-        "bootstrap_samples": samples,
-        "seed": seed,
-        "point_estimate": sum(values) / len(values),
-        "ci95_lower": _percentile(means, 0.025),
-        "ci95_upper": _percentile(means, 0.975),
-    }
+    return bootstrap_game_macro_metric(
+        by_game,
+        metric_name=metric_name,
+        samples=samples,
+        seed=seed,
+    )
 
 
 def _validate_completed_fold_summary(
@@ -194,6 +222,8 @@ def run_development_oof(
     private_conditioning: bool = False,
     backbone: str = QWEN2_BACKBONE_NAME,
     input_feature_profile: str = FULL_INPUT_FEATURE_PROFILE,
+    role_sidecar_path: str | Path | None = None,
+    supervision_scope: str = ALL_ALIVE_SCOPE,
 ) -> dict[str, Any]:
     """Train every fold, resume completed folds, and aggregate OOF games."""
 
@@ -206,6 +236,17 @@ def run_development_oof(
             "input_feature_profile must be one of "
             f"{SUPPORTED_INPUT_FEATURE_PROFILES}"
         )
+    if supervision_scope not in SUPERVISION_SCOPES:
+        raise ValueError(f"supervision_scope must be one of {SUPERVISION_SCOPES}")
+    if role_sidecar_path is None:
+        raise ValueError(
+            "diagnostic OOF requires a role sidecar for complete role strata"
+        )
+    resolved_role_sidecar = (
+        None
+        if role_sidecar_path is None
+        else str(Path(os.path.abspath(role_sidecar_path)))
+    )
 
     # Keep the lexical project path so repository symlinks remain valid
     # provenance paths; validators resolve their physical targets separately.
@@ -234,6 +275,8 @@ def run_development_oof(
         "dense_supervision": True,
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_min_delta": early_stopping_min_delta,
+        "role_sidecar_path": resolved_role_sidecar,
+        "supervision_scope": supervision_scope,
     }
     if private_conditioning:
         requested_config["private_conditioning"] = True
@@ -274,18 +317,34 @@ def run_development_oof(
                 input_feature_profile=input_feature_profile,
                 dense_supervision=True,
                 private_conditioning=private_conditioning,
+                role_sidecar_path=resolved_role_sidecar,
+                supervision_scope=supervision_scope,
                 early_stopping_patience=early_stopping_patience,
                 early_stopping_min_delta=early_stopping_min_delta,
             ))
         fold_summaries[fold_name] = summary
 
     oof_by_game: dict[str, dict[str, int | float]] = {}
+    oof_stratified_by_game: dict[str, dict[str, Any]] = {}
     baseline_by_name: dict[str, dict[str, dict[str, int | float]]] = {}
     for fold_name, summary in fold_summaries.items():
         for game_id, metrics in summary["best_validation_by_game"].items():
             if game_id in oof_by_game:
                 raise ValueError(f"OOF game appears in multiple folds: {game_id}")
             oof_by_game[game_id] = metrics
+        fold_stratified_by_game = summary.get(
+            "best_validation_stratified_by_game"
+        )
+        if not isinstance(fold_stratified_by_game, Mapping):
+            raise ValueError(
+                f"{fold_name} has no per-game stratified metrics"
+            )
+        overlap = set(oof_stratified_by_game) & set(fold_stratified_by_game)
+        if overlap:
+            raise ValueError(
+                f"stratified OOF games repeat across folds: {sorted(overlap)[:3]}"
+            )
+        oof_stratified_by_game.update(fold_stratified_by_game)
         for baseline_name, baseline_report in summary[
             "validation_baselines"
         ].items():
@@ -306,6 +365,28 @@ def run_development_oof(
         raise ValueError("OOF results do not cover every development game exactly once")
 
     weighted = _weighted_metrics(oof_by_game)
+    if set(oof_stratified_by_game) != set(oof_by_game):
+        raise ValueError("stratified OOF results do not cover every OOF game")
+    oof_stratified: dict[str, dict[str, dict[str, int | float]]] = {}
+    dimensions = sorted({
+        dimension
+        for game in oof_stratified_by_game.values()
+        for dimension in game
+    })
+    for dimension in dimensions:
+        oof_stratified[dimension] = {}
+        strata = sorted({
+            stratum
+            for game in oof_stratified_by_game.values()
+            for stratum in game.get(dimension, {})
+        })
+        for stratum in strata:
+            reports = {
+                game_id: game[dimension][stratum]
+                for game_id, game in oof_stratified_by_game.items()
+                if stratum in game.get(dimension, {})
+            }
+            oof_stratified[dimension][stratum] = _weighted_metrics(reports)
     baselines = {
         name: {
             "observer_weighted": _weighted_metrics(by_game),
@@ -346,6 +427,10 @@ def run_development_oof(
         "oof_game_count": len(oof_by_game),
         "oof_observer_weighted_metrics": weighted,
         "oof_game_macro_metrics": _macro_metrics(oof_by_game),
+        "oof_stratified_observer_weighted_metrics": oof_stratified,
+        "oof_stratified_game_macro_metrics": stratified_game_macro_metrics(
+            oof_stratified_by_game
+        ),
         "oof_game_bootstrap_ci": _bootstrap_game_macro(
             oof_by_game,
             metric_name=primary_metric,
@@ -360,6 +445,7 @@ def run_development_oof(
             "passed": achieved >= target_improvement,
         },
         "oof_by_game": dict(sorted(oof_by_game.items())),
+        "oof_stratified_by_game": dict(sorted(oof_stratified_by_game.items())),
     }
     _atomic_json_write(result, resolved_output / "oof_summary.json")
     return result
@@ -388,6 +474,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_BACKBONE_NAMES,
         default=QWEN2_BACKBONE_NAME,
     )
+    parser.add_argument("--role-sidecar", required=True)
+    parser.add_argument(
+        "--supervision-scope",
+        choices=SUPERVISION_SCOPES,
+        default=ALL_ALIVE_SCOPE,
+    )
     parser.add_argument(
         "--input-feature-profile",
         choices=SUPPORTED_INPUT_FEATURE_PROFILES,
@@ -415,6 +507,8 @@ def main() -> int:
         private_conditioning=args.private_conditioning,
         backbone=args.backbone,
         input_feature_profile=args.input_feature_profile,
+        role_sidecar_path=args.role_sidecar,
+        supervision_scope=args.supervision_scope,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

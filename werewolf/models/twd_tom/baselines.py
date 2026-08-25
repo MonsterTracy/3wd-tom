@@ -19,47 +19,75 @@ EMPIRICAL_PRIOR_SMOOTHING = 1.0
 class _MetricMean:
     def __init__(self) -> None:
         self.count = 0
-        self.sums: dict[str, float] = {}
+        self.weighted_sums: dict[str, float] = {}
+        self.direct_sums: dict[str, float] = {}
+        self.count_sums: dict[str, int] = {}
+        self.max_values: dict[str, float] = {}
 
     def update(self, metrics: Mapping[str, int | float]) -> None:
         count = int(metrics["valid_observer_count"])
         self.count += count
         for name, value in metrics.items():
-            if name != "valid_observer_count":
-                self.sums[name] = self.sums.get(name, 0.0) + float(value) * count
+            if name in {"valid_observer_count", "total_row_count"}:
+                continue
+            if name.endswith("_row_count"):
+                self.count_sums[name] = self.count_sums.get(name, 0) + int(value)
+            elif name.endswith("_sum"):
+                self.direct_sums[name] = self.direct_sums.get(name, 0.0) + float(value)
+            elif name.startswith("max_"):
+                self.max_values[name] = max(
+                    self.max_values.get(name, float("-inf")),
+                    float(value),
+                )
+            elif name not in {
+                "normalized_reducible_gap_improvement",
+                "private_admissible_normalized_reducible_gap_improvement",
+                "uniform_non_self_baseline_mean_kl_divergence",
+                "private_admissible_uniform_baseline_mean_kl_divergence",
+            }:
+                self.weighted_sums[name] = self.weighted_sums.get(
+                    name, 0.0
+                ) + float(value) * count
 
     def finalize(self) -> dict[str, int | float]:
         if self.count <= 0:
             raise ValueError("baseline evaluation has no valid observers")
         result: dict[str, int | float] = {
+            "total_row_count": self.count,
             "valid_observer_count": self.count,
-            **{name: value / self.count for name, value in self.sums.items()},
+            **self.count_sums,
+            **self.direct_sums,
+            **self.max_values,
+            **{
+                name: value / self.count
+                for name, value in self.weighted_sums.items()
+            },
         }
         result["mean_loss"] = result["mean_belief_cross_entropy"]
-        uniform_kl = float(
-            result["uniform_non_self_baseline_mean_cross_entropy"]
-        ) - float(result["mean_belief_target_entropy"])
+        uniform_kl_sum = float(result["uniform_non_self_baseline_kl_sum"])
+        uniform_kl = uniform_kl_sum / self.count
         result["uniform_non_self_baseline_mean_kl_divergence"] = uniform_kl
         result["normalized_reducible_gap_improvement"] = (
-            1.0 - float(result["mean_belief_kl_divergence"]) / uniform_kl
-            if uniform_kl > 0.0
+            1.0 - float(result["model_kl_sum"]) / uniform_kl_sum
+            if uniform_kl_sum > 0.0
             else 0.0
         )
         private_cross_entropy = result.get(
             "private_admissible_uniform_baseline_mean_cross_entropy"
         )
         if private_cross_entropy is not None:
-            private_kl = float(private_cross_entropy) - float(
-                result["mean_belief_target_entropy"]
+            private_kl_sum = float(
+                result["private_admissible_uniform_baseline_kl_sum"]
             )
+            private_kl = private_kl_sum / self.count
             result[
                 "private_admissible_uniform_baseline_mean_kl_divergence"
             ] = private_kl
             result[
                 "private_admissible_normalized_reducible_gap_improvement"
             ] = (
-                1.0 - float(result["mean_belief_kl_divergence"]) / private_kl
-                if private_kl > 0.0
+                1.0 - float(result["model_kl_sum"]) / private_kl_sum
+                if private_kl_sum > 0.0
                 else 0.0
             )
         return result
@@ -105,9 +133,9 @@ def fit_dense_empirical_priors(
     for item_index in range(len(dataset)):
         item = dataset[item_index]
         targets = item["belief_targets"].to(dtype=torch.float64)
-        alive = item["observer_alive_mask"]
-        global_sums += (targets * alive.unsqueeze(-1)).sum(dim=0)
-        global_counts += alive.sum(dim=0)
+        supervision = item["observer_supervision_mask"]
+        global_sums += (targets * supervision.unsqueeze(-1)).sum(dim=0)
+        global_counts += supervision.sum(dim=0)
         for boundary_index, phase in enumerate(item["metadata"]["phase"]):
             phase_sums.setdefault(
                 phase,
@@ -118,9 +146,10 @@ def fit_dense_empirical_priors(
                 torch.zeros_like(global_counts),
             )
             phase_sums[phase] += (
-                targets[boundary_index] * alive[boundary_index].unsqueeze(-1)
+                targets[boundary_index]
+                * supervision[boundary_index].unsqueeze(-1)
             )
-            phase_counts[phase] += alive[boundary_index]
+            phase_counts[phase] += supervision[boundary_index]
 
     uniform = _uniform_non_self()
     global_prior = _smoothed_prior(
@@ -169,7 +198,10 @@ def _evaluate_prior_for_game(
         item["belief_targets"],
         item["observer_alive_mask"],
         item["diagonal_target_mask"],
-        known_non_werewolf_mask=item.get("known_non_werewolf_mask"),
+        observer_supervision_mask=item["observer_supervision_mask"],
+        known_non_werewolf_mask=item[
+            "supervision_known_non_werewolf_mask"
+        ],
     )
 
 
@@ -187,6 +219,7 @@ def _evaluate_private_uniform_for_game(
         item["belief_targets"],
         item["observer_alive_mask"],
         item["diagonal_target_mask"],
+        observer_supervision_mask=item["observer_supervision_mask"],
         known_non_werewolf_mask=known_non_wolves,
     )
 

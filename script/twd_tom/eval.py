@@ -16,10 +16,13 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
 )
 from script.twd_tom.train import (
     REPO_ROOT,
+    bootstrap_game_macro_metric,
     count_supervised_observers,
-    evaluate_model,
+    evaluate_model_with_games_and_strata,
+    game_macro_metrics,
     resolve_device,
     sha256_file,
+    stratified_game_macro_metrics,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.checkpoint import (
@@ -34,6 +37,11 @@ from werewolf.models.twd_tom.dataset import (
     load_twd_tom_jsonl,
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.models.twd_tom.supervision import (
+    ALL_ALIVE_SCOPE,
+    load_role_sidecar,
+    load_role_sidecar_report,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,7 @@ class EvaluationConfig:
     dataset_path: str
     output_path: str | None = None
     training_dataset_path: str | None = None
+    role_sidecar_path: str | None = None
     batch_size: int = 32
     device: str = "auto"
     num_workers: int = 0
@@ -51,7 +60,11 @@ class EvaluationConfig:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} is required")
-        for field_name in ("output_path", "training_dataset_path"):
+        for field_name in (
+            "output_path",
+            "training_dataset_path",
+            "role_sidecar_path",
+        ):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise ValueError(f"{field_name} must be non-empty text or None")
@@ -121,6 +134,42 @@ def _write_json(value: Mapping[str, Any], path: Path) -> None:
     temporary.replace(path)
 
 
+def resolve_role_sidecar_path(
+    checkpoint: Mapping[str, Any],
+    *,
+    override_path: str | None,
+) -> Path | None:
+    provenance = checkpoint.get("run_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("checkpoint must record run_provenance")
+    recorded_path = provenance.get("role_sidecar_path")
+    expected_sha256 = provenance.get("role_sidecar_sha256")
+    if recorded_path is None:
+        if override_path is not None:
+            raise ValueError("checkpoint did not use role sidecar metadata")
+        return None
+    if (
+        not isinstance(recorded_path, str)
+        or Path(recorded_path).is_absolute()
+        or ".." in Path(recorded_path).parts
+    ):
+        raise ValueError("role sidecar path must be repository-relative")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise ValueError("checkpoint role sidecar SHA-256 is invalid")
+    path = (
+        Path(override_path).resolve()
+        if override_path is not None
+        else (REPO_ROOT / recorded_path).resolve()
+    )
+    if sha256_file(path) != expected_sha256:
+        raise ValueError("role sidecar SHA-256 mismatch")
+    return path
+
+
 def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     device = resolve_device(config.device)
     checkpoint_path = Path(config.checkpoint_path).resolve()
@@ -170,10 +219,25 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
             "evaluation game IDs must be disjoint from train and validation data; "
             f"overlap_count={len(overlap)}, examples={list(overlap[:5])}"
         )
+    supervision_scope = checkpoint.get("supervision_scope", ALL_ALIVE_SCOPE)
+    role_sidecar_path = resolve_role_sidecar_path(
+        checkpoint,
+        override_path=config.role_sidecar_path,
+    )
+    observer_roles = None
+    if role_sidecar_path is not None:
+        role_report = load_role_sidecar_report(role_sidecar_path)
+        if role_report["split_manifest_digest"] != evaluation_manifest[
+            "manifest_digest"
+        ]:
+            raise ValueError("role sidecar and evaluation split digests differ")
+        observer_roles = load_role_sidecar(role_sidecar_path)
     dataset = TWDToMDataset(
         samples,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=model.config.max_seq_len),
         include_private_features=model.config.private_conditioning,
+        observer_roles_by_game=observer_roles,
+        supervision_scope=supervision_scope,
     )
     if dataset.model_input_scope != checkpoint.get("model_input_scope"):
         raise ValueError("evaluation Dataset model_input_scope mismatch")
@@ -191,7 +255,30 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     supervised = count_supervised_observers(loader)
     if supervised == 0:
         raise ValueError("evaluation dataset contains no valid observer targets")
-    metrics = evaluate_model(model, loader, device=device)
+    (
+        metrics,
+        by_game,
+        stratified,
+        stratified_by_game,
+    ) = evaluate_model_with_games_and_strata(
+        model,
+        loader,
+        device=device,
+    )
+    game_macro = game_macro_metrics(by_game)
+    game_bootstrap = {
+        name: bootstrap_game_macro_metric(
+            by_game,
+            metric_name=name,
+            samples=2000,
+            seed=42,
+        )
+        for name in (
+            "normalized_reducible_gap_improvement",
+            "private_admissible_normalized_reducible_gap_improvement",
+        )
+        if all(name in game_metrics for game_metrics in by_game.values())
+    }
     epoch = checkpoint.get("epoch")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
         raise ValueError("checkpoint has an invalid epoch")
@@ -207,6 +294,8 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "evaluation_sample_count": len(dataset),
         "evaluation_game_ids": list(evaluation_game_ids),
         "evaluation_supervised_observer_count": supervised,
+        "supervision_scope": supervision_scope,
+        "role_metadata_usage": "supervision_metadata_only",
         "training_dataset_path": str(training_path),
         "training_game_ids": list(training_game_ids),
         "validation_game_ids": list(validation_game_ids),
@@ -214,6 +303,14 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "split_manifest_digest": evaluation_manifest["manifest_digest"],
         "model_config": result_model_config(model),
         "metrics": metrics,
+        "metrics_by_game": by_game,
+        "stratified_metrics": stratified,
+        "stratified_by_game": stratified_by_game,
+        "stratified_game_macro": stratified_game_macro_metrics(
+            stratified_by_game
+        ),
+        "game_macro_metrics": game_macro,
+        "game_bootstrap": game_bootstrap,
     }
     if config.output_path is not None:
         output_path = Path(config.output_path).resolve()
@@ -228,6 +325,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", default=None)
     parser.add_argument("--training-dataset", default=None)
+    parser.add_argument("--role-sidecar", default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -241,6 +339,7 @@ def main() -> int:
         dataset_path=args.dataset,
         output_path=args.output,
         training_dataset_path=args.training_dataset,
+        role_sidecar_path=args.role_sidecar,
         batch_size=args.batch_size,
         device=args.device,
         num_workers=args.num_workers,

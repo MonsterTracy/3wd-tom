@@ -87,7 +87,17 @@ def suspicion_sample_factory():
 
 @pytest.fixture
 def canonical_belief_batch_factory():
-    def make(root, samples_by_game, *, reverse=False):
+    default_roles = (
+        "Werewolf",
+        "Werewolf",
+        "Villager",
+        "Villager",
+        "Villager",
+        "Seer",
+        "Witch",
+    )
+
+    def make(root, samples_by_game, *, reverse=False, roles_by_game=None):
         from script.twd_tom.collect_canonical_trajectories import (
             BATCH_PLAN_SCHEMA_VERSION,
             BATCH_SUMMARY_SCHEMA_VERSION,
@@ -111,6 +121,17 @@ def canonical_belief_batch_factory():
                 ),
                 encoding="utf-8",
             )
+            role_values = (roles_by_game or {}).get(game_id, default_roles)
+            trajectory = {
+                "game_id": game_id,
+                "players": [
+                    {"player_id": player_id, "role": role}
+                    for player_id, role in enumerate(role_values, start=1)
+                ],
+            }
+            trajectory["trajectory_digest"] = canonical_digest(trajectory)
+            trajectory_path = game_dir / "trajectory.json"
+            _write_json(trajectory_path, trajectory)
             game_summary = {
                 "schema_version": GAME_SUMMARY_SCHEMA_VERSION,
                 "collection_mode": "canonical",
@@ -127,6 +148,8 @@ def canonical_belief_batch_factory():
                 "belief_snapshot_missing_pre_step_indices": [],
                 "speech_annotation_error_count": 0,
                 "belief_snapshots_sha256": _sha256(belief_path),
+                "trajectory_digest": trajectory["trajectory_digest"],
+                "trajectory_sha256": _sha256(trajectory_path),
                 "call_audit": {
                     "gameplay_fallback_count": 0,
                     "label_snapshot_failure_count": 0,

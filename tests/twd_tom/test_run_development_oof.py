@@ -13,6 +13,7 @@ from werewolf.models.twd_tom.belief_backbone import (
     GPT2_BLOCK_BACKBONE_NAME,
     NO_DAY_INPUT_FEATURE_PROFILE,
 )
+from werewolf.models.twd_tom.supervision import VILLAGER_ALIVE_SCOPE
 
 
 def _game_metrics(*, count, model_kl, target_entropy=0.5, uniform_ce=1.8):
@@ -44,6 +45,38 @@ def test_oof_weighting_recomputes_reducible_gap_from_all_observers():
     )
     assert result["normalized_reducible_gap_improvement"] == pytest.approx(
         1.0 - 0.5 / 1.3
+    )
+
+
+def test_oof_gap_closed_uses_additive_kl_sums_and_preserves_row_counts():
+    by_game = {
+        "game_a": {
+            **_game_metrics(count=3, model_kl=0.4),
+            "total_row_count": 3,
+            "positive_uniform_baseline_gap_row_count": 2,
+            "zero_uniform_baseline_gap_row_count": 1,
+            "model_kl_sum": 1.2,
+            "uniform_non_self_baseline_kl_sum": 2.0,
+        },
+        "game_b": {
+            **_game_metrics(count=1, model_kl=0.8),
+            "total_row_count": 1,
+            "positive_uniform_baseline_gap_row_count": 1,
+            "zero_uniform_baseline_gap_row_count": 0,
+            "model_kl_sum": 0.8,
+            "uniform_non_self_baseline_kl_sum": 1.0,
+        },
+    }
+
+    result = _weighted_metrics(by_game)
+
+    assert result["total_row_count"] == 4
+    assert result["positive_uniform_baseline_gap_row_count"] == 3
+    assert result["zero_uniform_baseline_gap_row_count"] == 1
+    assert result["model_kl_sum"] == pytest.approx(2.0)
+    assert result["uniform_non_self_baseline_kl_sum"] == pytest.approx(3.0)
+    assert result["normalized_reducible_gap_improvement"] == pytest.approx(
+        1.0 - 2.0 / 3.0
     )
 
 
@@ -100,6 +133,8 @@ def test_oof_cli_accepts_backbone_and_input_feature_profile():
         "folds",
         "--output-dir",
         "output",
+        "--role-sidecar",
+        "roles.json",
         "--backbone",
         GPT2_BLOCK_BACKBONE_NAME,
         "--input-feature-profile",
@@ -108,6 +143,22 @@ def test_oof_cli_accepts_backbone_and_input_feature_profile():
 
     assert args.backbone == GPT2_BLOCK_BACKBONE_NAME
     assert args.input_feature_profile == NO_DAY_INPUT_FEATURE_PROFILE
+
+
+def test_oof_cli_accepts_supervision_sidecar_and_scope():
+    args = build_arg_parser().parse_args([
+        "--fold-root",
+        "folds",
+        "--output-dir",
+        "output",
+        "--role-sidecar",
+        "roles.json",
+        "--supervision-scope",
+        VILLAGER_ALIVE_SCOPE,
+    ])
+
+    assert args.role_sidecar == "roles.json"
+    assert args.supervision_scope == VILLAGER_ALIVE_SCOPE
 
 
 def test_oof_threads_backbone_and_input_profile_into_every_fold(
@@ -148,6 +199,11 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
             "epochs_completed": 1,
             "best_validation_mean_loss": 1.0,
             "best_validation_by_game": {"game_a": game_metrics},
+            "best_validation_stratified_by_game": {
+                "game_a": {
+                    "game_id": {"game_a": game_metrics},
+                }
+            },
             "validation_baselines": {},
         }
 
@@ -159,6 +215,7 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
         private_conditioning=True,
         backbone=GPT2_BLOCK_BACKBONE_NAME,
         input_feature_profile=NO_DAY_INPUT_FEATURE_PROFILE,
+        role_sidecar_path=tmp_path / "roles.json",
         bootstrap_samples=10,
     )
 

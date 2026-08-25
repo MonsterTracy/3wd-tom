@@ -21,6 +21,12 @@ from werewolf.models.twd_tom.dataset import (
     deterministic_cyclic_shift,
 )
 from werewolf.models.twd_tom.schema import NUM_PLAYERS
+from werewolf.models.twd_tom.supervision import (
+    ALL_ALIVE_SCOPE,
+    SUPERVISION_SCOPES,
+    normalize_observer_roles,
+    rotate_observer_roles,
+)
 
 
 DENSE_SUPERVISION_VERSION = "game_level_dense_pre_boundary_v1"
@@ -63,6 +69,8 @@ class DenseTWDToMDataset(Dataset):
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
         include_private_features: bool = False,
+        observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
+        supervision_scope: str = ALL_ALIVE_SCOPE,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -72,6 +80,12 @@ class DenseTWDToMDataset(Dataset):
             raise TypeError("enable_cyclic_rotation must be bool")
         if not isinstance(include_private_features, bool):
             raise TypeError("include_private_features must be bool")
+        if supervision_scope not in SUPERVISION_SCOPES:
+            raise ValueError(f"supervision_scope must be one of {SUPERVISION_SCOPES}")
+        if observer_roles_by_game is not None and not isinstance(
+            observer_roles_by_game, Mapping
+        ):
+            raise TypeError("observer_roles_by_game must be a mapping or None")
         deterministic_cyclic_shift(
             seed=augmentation_seed,
             epoch=0,
@@ -83,6 +97,11 @@ class DenseTWDToMDataset(Dataset):
         self.enable_cyclic_rotation = enable_cyclic_rotation
         self.augmentation_seed = augmentation_seed
         self.include_private_features = include_private_features
+        self.observer_roles_by_game = {
+            game_id: normalize_observer_roles(roles)
+            for game_id, roles in (observer_roles_by_game or {}).items()
+        }
+        self.supervision_scope = supervision_scope
         self._epoch = 0
         self.model_input_scope = (
             PRIVATE_MODEL_INPUT_SCOPE
@@ -101,6 +120,10 @@ class DenseTWDToMDataset(Dataset):
                 feature_builder=self.feature_builder,
                 target_dtype=self.target_dtype,
                 include_private_features=self.include_private_features,
+                observer_roles_by_game=(
+                    self.observer_roles_by_game or None
+                ),
+                supervision_scope=self.supervision_scope,
             )
 
     @classmethod
@@ -137,6 +160,7 @@ class DenseTWDToMDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         raw_game = self._raw_games[index]
+        shift = 0
         if self.enable_cyclic_rotation:
             shift = deterministic_cyclic_shift(
                 seed=self.augmentation_seed,
@@ -148,11 +172,19 @@ class DenseTWDToMDataset(Dataset):
                 for sample in raw_game
             ]
 
+        game_id = raw_game[0]["game_id"]
+        roles = self.observer_roles_by_game.get(game_id)
+        if roles is not None and shift:
+            roles = rotate_observer_roles(roles, shift=shift)
+        roles_by_game = {game_id: roles} if roles is not None else None
+
         snapshot_dataset = TWDToMDataset(
             raw_game,
             feature_builder=self.feature_builder,
             target_dtype=self.target_dtype,
             include_private_features=self.include_private_features,
+            observer_roles_by_game=roles_by_game,
+            supervision_scope=self.supervision_scope,
         )
         snapshots = [
             snapshot_dataset[snapshot_index]
@@ -191,8 +223,17 @@ class DenseTWDToMDataset(Dataset):
             "observer_alive_mask": torch.stack(
                 [snapshot["observer_alive_mask"] for snapshot in snapshots]
             ),
+            "observer_supervision_mask": torch.stack(
+                [snapshot["observer_supervision_mask"] for snapshot in snapshots]
+            ),
             "diagonal_target_mask": torch.stack(
                 [snapshot["diagonal_target_mask"] for snapshot in snapshots]
+            ),
+            "supervision_known_non_werewolf_mask": torch.stack(
+                [
+                    snapshot["supervision_known_non_werewolf_mask"]
+                    for snapshot in snapshots
+                ]
             ),
             "metadata": {
                 "game_id": snapshots[0]["metadata"]["game_id"],
@@ -205,6 +246,31 @@ class DenseTWDToMDataset(Dataset):
                 "speaker_id": [
                     snapshot["metadata"]["speaker_id"] for snapshot in snapshots
                 ],
+                "observer_roles": snapshots[0]["metadata"]["observer_roles"],
+                "raw_support_size": [
+                    snapshot["metadata"]["raw_support_size"]
+                    for snapshot in snapshots
+                ],
+                "raw_empty": [
+                    snapshot["metadata"]["raw_empty"] for snapshot in snapshots
+                ],
+                "hard_knowledge_count": [
+                    snapshot["metadata"]["hard_knowledge_count"]
+                    for snapshot in snapshots
+                ],
+                "day": [snapshot["metadata"]["day"] for snapshot in snapshots],
+                "public_action_count": [
+                    snapshot["metadata"]["public_action_count"]
+                    for snapshot in snapshots
+                ],
+                "speaker_vs_non_speaker": [
+                    snapshot["metadata"]["speaker_vs_non_speaker"]
+                    for snapshot in snapshots
+                ],
+                "alive_count": [
+                    snapshot["metadata"]["alive_count"] for snapshot in snapshots
+                ],
+                "supervision_scope": self.supervision_scope,
                 "supervision_version": DENSE_SUPERVISION_VERSION,
                 "target_semantics": TARGET_SEMANTICS,
                 "target_conversion": TARGET_CONVERSION,
@@ -246,10 +312,14 @@ def collate_dense_twd_tom_games(
     observer_alive_mask = torch.zeros(
         (len(batch), max_boundaries, NUM_PLAYERS), dtype=torch.bool
     )
+    observer_supervision_mask = torch.zeros_like(observer_alive_mask)
     diagonal = ~torch.eye(NUM_PLAYERS, dtype=torch.bool)
     diagonal_target_mask = diagonal.view(1, 1, NUM_PLAYERS, NUM_PLAYERS).expand(
         len(batch), max_boundaries, -1, -1
     ).clone()
+    supervision_known_non_werewolf_mask = torch.zeros_like(
+        diagonal_target_mask
+    )
     private_fields = ("known_werewolf_mask", "known_non_werewolf_mask")
     private_presence = [
         tuple(field in item for field in private_fields)
@@ -286,6 +356,12 @@ def collate_dense_twd_tom_games(
         observer_alive_mask[batch_index, :boundary_count] = item[
             "observer_alive_mask"
         ]
+        observer_supervision_mask[batch_index, :boundary_count] = item[
+            "observer_supervision_mask"
+        ]
+        supervision_known_non_werewolf_mask[
+            batch_index, :boundary_count
+        ] = item["supervision_known_non_werewolf_mask"]
         if not torch.equal(
             item["diagonal_target_mask"],
             diagonal_target_mask[batch_index, :boundary_count],
@@ -301,7 +377,11 @@ def collate_dense_twd_tom_games(
         "boundary_valid_mask": boundary_valid_mask,
         "belief_targets": belief_targets,
         "observer_alive_mask": observer_alive_mask,
+        "observer_supervision_mask": observer_supervision_mask,
         "diagonal_target_mask": diagonal_target_mask,
+        "supervision_known_non_werewolf_mask": (
+            supervision_known_non_werewolf_mask
+        ),
         "metadata": [deepcopy(item["metadata"]) for item in batch],
     }
 

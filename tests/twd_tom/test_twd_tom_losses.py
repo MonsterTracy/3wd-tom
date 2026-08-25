@@ -63,3 +63,27 @@ def test_no_alive_observer_is_rejected():
     alive.zero_()
     with pytest.raises(ValueError, match="at least one observer"):
         masked_belief_distribution_loss(logits, targets, alive, diagonal)
+
+
+def test_supervision_mask_changes_only_selected_loss_rows():
+    logits, targets, alive, diagonal = make_contract()
+    original_targets = targets.clone()
+    supervision = torch.tensor(
+        [[False, True, False, False, False, False, False]]
+    )
+    with torch.no_grad():
+        logits[0, 1, 2] = 1.0
+
+    loss = masked_belief_distribution_loss(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        observer_supervision_mask=supervision,
+    )
+    loss.backward()
+
+    assert loss.item() > math.log(6)
+    assert torch.equal(targets, original_targets)
+    assert torch.count_nonzero(logits.grad[0, 0]) == 0
+    assert torch.count_nonzero(logits.grad[0, 1]) > 0

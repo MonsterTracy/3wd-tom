@@ -3,6 +3,7 @@ import json
 import pytest
 import torch
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
 
 from script.twd_tom.train import (
     MODEL_OUTPUT,
@@ -17,6 +18,7 @@ from script.twd_tom.train import (
     checkpoint_task_contract,
     evaluate_model,
     evaluate_model_with_games,
+    evaluate_model_with_games_and_strata,
     train_one_epoch,
 )
 from werewolf.models.twd_tom.belief_backbone import (
@@ -28,6 +30,8 @@ from werewolf.models.twd_tom.dataset import (
     PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
+    TWDToMDataset,
+    collate_twd_tom_samples,
 )
 from werewolf.models.twd_tom.dense_dataset import (
     DENSE_SUPERVISION_VERSION,
@@ -98,6 +102,57 @@ def test_training_loader_uses_rotation_only_for_training(
     _, validation = build_data_loader(config, dataset_path=path, shuffle=False)
     assert training.enable_cyclic_rotation is True
     assert validation.enable_cyclic_rotation is False
+
+
+def test_supervision_role_metadata_never_enters_model_forward(
+    training_sample_factory,
+):
+    sample = training_sample_factory()
+    roles = {
+        sample["game_id"]: {
+            "player1": "Werewolf",
+            "player2": "Werewolf",
+            "player3": "Villager",
+            "player4": "Villager",
+            "player5": "Villager",
+            "player6": "Seer",
+            "player7": "Witch",
+        }
+    }
+    dataset = TWDToMDataset(
+        [sample],
+        observer_roles_by_game=roles,
+        supervision_scope="villager_alive",
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        collate_fn=collate_twd_tom_samples,
+    )
+    batch = _move_batch_to_device(next(iter(loader)), torch.device("cpu"))
+    captured = {}
+
+    class RecordingModel:
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            return {MODEL_OUTPUT: torch.zeros(1, 7, 7)}
+
+    _forward_batch(RecordingModel(), batch)
+
+    assert set(captured) == {
+        "subject_ids",
+        "action_ids",
+        "object_ids",
+        "event_type_ids",
+        "phase_ids",
+        "day_values",
+        "attention_mask",
+    }
+    assert not any(
+        marker in name
+        for name in captured
+        for marker in ("role", "is_werewolf", "is_villager")
+    )
 
 
 def test_private_training_path_threads_knowledge_masks_and_metrics(
@@ -211,6 +266,22 @@ def test_dense_game_batch_trains_every_pre_boundary(
     assert aggregate["mean_loss"] == pytest.approx(
         by_game["synthetic_game_001"]["mean_loss"]
     )
+    _, _, strata, strata_by_game = evaluate_model_with_games_and_strata(
+        model,
+        loader,
+        device=torch.device("cpu"),
+    )
+    assert "true" not in strata["raw_empty"]
+    assert strata["raw_empty"]["false"]["total_row_count"] == 4
+    assert strata["game_id"]["synthetic_game_001"][
+        "total_row_count"
+    ] == 4
+    assert strata["speaker_vs_non_speaker"]["speaker"][
+        "total_row_count"
+    ] == 1
+    assert strata_by_game["synthetic_game_001"]["raw_empty"]["false"][
+        "total_row_count"
+    ] == 4
 
 
 def test_checkpoint_payload_contains_no_removed_objective_fields(tmp_path):
@@ -257,6 +328,16 @@ def test_training_config_has_no_order_argument(tmp_path):
             output_dir=str(tmp_path),
             dataset_path="train.jsonl",
             validation_dataset_path="validation.jsonl",
+        )
+
+
+def test_role_scope_requires_explicit_supervision_sidecar(tmp_path):
+    with pytest.raises(ValueError, match="role_sidecar_path"):
+        TrainingConfig(
+            output_dir=str(tmp_path / "run"),
+            dataset_path="train.jsonl",
+            validation_dataset_path="validation.jsonl",
+            supervision_scope="villager_alive",
         )
 
 

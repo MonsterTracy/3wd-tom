@@ -39,6 +39,13 @@ from werewolf.models.twd_tom.schema import (
     normalize_player,
     validate_player_suspicion,
 )
+from werewolf.models.twd_tom.supervision import (
+    ALL_ALIVE_SCOPE,
+    SUPERVISION_SCOPES,
+    build_observer_supervision_mask,
+    normalize_observer_roles,
+    rotate_observer_roles,
+)
 from werewolf.models.twd_tom.speech_annotations import (
     SPEECH_ACTION_ONTOLOGY_VERSION,
     SPEECH_ANNOTATION_SCHEMA_VERSION,
@@ -433,6 +440,8 @@ class TWDToMDataset(Dataset):
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
         include_private_features: bool = False,
+        observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
+        supervision_scope: str = ALL_ALIVE_SCOPE,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -442,6 +451,13 @@ class TWDToMDataset(Dataset):
             raise TypeError("enable_cyclic_rotation must be bool")
         if not isinstance(include_private_features, bool):
             raise TypeError("include_private_features must be bool")
+        if supervision_scope not in SUPERVISION_SCOPES:
+            raise ValueError(f"supervision_scope must be one of {SUPERVISION_SCOPES}")
+        if observer_roles_by_game is not None and not isinstance(
+            observer_roles_by_game, Mapping
+        ):
+            raise TypeError("observer_roles_by_game must be a mapping or None")
+        role_metadata_supplied = observer_roles_by_game is not None
         deterministic_cyclic_shift(
             seed=augmentation_seed,
             epoch=0,
@@ -466,6 +482,21 @@ class TWDToMDataset(Dataset):
         self.enable_cyclic_rotation = enable_cyclic_rotation
         self.augmentation_seed = augmentation_seed
         self.include_private_features = include_private_features
+        self.observer_roles_by_game = {
+            game_id: normalize_observer_roles(roles)
+            for game_id, roles in (observer_roles_by_game or {}).items()
+        }
+        sample_game_ids = {sample["game_id"] for sample in self.samples}
+        missing_roles = sorted(sample_game_ids - set(self.observer_roles_by_game))
+        if (
+            role_metadata_supplied
+            or supervision_scope in {"non_wolf_alive", "villager_alive"}
+        ) and missing_roles:
+            raise ValueError(
+                "role sidecar metadata must cover every dataset game; "
+                f"missing={missing_roles[:10]}"
+            )
+        self.supervision_scope = supervision_scope
         self._epoch = 0
         self.model_input_scope = (
             PRIVATE_MODEL_INPUT_SCOPE
@@ -485,6 +516,8 @@ class TWDToMDataset(Dataset):
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
         include_private_features: bool = False,
+        observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
+        supervision_scope: str = ALL_ALIVE_SCOPE,
     ) -> "TWDToMDataset":
         return cls(
             load_twd_tom_jsonl(path),
@@ -493,6 +526,8 @@ class TWDToMDataset(Dataset):
             enable_cyclic_rotation=enable_cyclic_rotation,
             augmentation_seed=augmentation_seed,
             include_private_features=include_private_features,
+            observer_roles_by_game=observer_roles_by_game,
+            supervision_scope=supervision_scope,
         )
 
     def __len__(self) -> int:
@@ -506,6 +541,7 @@ class TWDToMDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
+        shift = 0
         if self.enable_cyclic_rotation:
             shift = deterministic_cyclic_shift(
                 seed=self.augmentation_seed,
@@ -518,6 +554,9 @@ class TWDToMDataset(Dataset):
                     shift=shift,
                 )
             )
+        observer_roles = self.observer_roles_by_game.get(sample["game_id"])
+        if observer_roles is not None and shift:
+            observer_roles = rotate_observer_roles(observer_roles, shift=shift)
         model_public_events = completed_pre_speech_public_events(
             sample["public_events"],
             speaker_id=sample["speaker_id"],
@@ -542,13 +581,19 @@ class TWDToMDataset(Dataset):
                 dtype=self.target_dtype
             )
             observer_alive_mask[row_index] = True
-            if self.include_private_features:
-                for player in sample["known_werewolves"][subject]:
-                    known_werewolf_mask[row_index, PLAYER_TO_ID[player] - 1] = True
-                for player in sample["known_non_werewolves"][subject]:
-                    known_non_werewolf_mask[
-                        row_index, PLAYER_TO_ID[player] - 1
-                    ] = True
+            for player in sample["known_werewolves"][subject]:
+                known_werewolf_mask[row_index, PLAYER_TO_ID[player] - 1] = True
+            for player in sample["known_non_werewolves"][subject]:
+                known_non_werewolf_mask[
+                    row_index, PLAYER_TO_ID[player] - 1
+                ] = True
+
+        observer_supervision_mask = build_observer_supervision_mask(
+            alive_mask=observer_alive_mask,
+            observer_roles=observer_roles,
+            speaker_id=sample["speaker_id"],
+            scope=self.supervision_scope,
+        )
 
         diagonal_target_mask = ~torch.eye(NUM_PLAYERS, dtype=torch.bool)
         metadata = {
@@ -558,6 +603,46 @@ class TWDToMDataset(Dataset):
             "phase": sample["phase"],
             "speaker_id": sample["speaker_id"],
             "observer_ids": deepcopy(sample["observer_ids"]),
+            "observer_roles": (
+                [observer_roles[player] for player in PLAYER_NAMES]
+                if observer_roles is not None
+                else None
+            ),
+            "raw_support_size": [
+                (
+                    len(sample["suspected_werewolves"][player])
+                    if player in sample["suspected_werewolves"]
+                    else None
+                )
+                for player in PLAYER_NAMES
+            ],
+            "raw_empty": [
+                (
+                    len(sample["suspected_werewolves"][player]) == 0
+                    if player in sample["suspected_werewolves"]
+                    else None
+                )
+                for player in PLAYER_NAMES
+            ],
+            "hard_knowledge_count": [
+                (
+                    len(
+                        set(sample["known_werewolves"][player])
+                        | set(sample["known_non_werewolves"][player])
+                    )
+                    if player in sample["known_werewolves"]
+                    else None
+                )
+                for player in PLAYER_NAMES
+            ],
+            "day": parse_public_phase(sample["phase"])[0],
+            "public_action_count": sample["public_action_count"],
+            "speaker_vs_non_speaker": [
+                player_id == sample["speaker_id"]
+                for player_id in range(1, NUM_PLAYERS + 1)
+            ],
+            "alive_count": len(sample["observer_ids"]),
+            "supervision_scope": self.supervision_scope,
             "report_trigger": sample["report_trigger"],
             "label_provenance": sample["label_provenance"],
             "target_semantics": TARGET_SEMANTICS,
@@ -567,7 +652,9 @@ class TWDToMDataset(Dataset):
             **features,
             "belief_targets": belief_targets,
             "observer_alive_mask": observer_alive_mask,
+            "observer_supervision_mask": observer_supervision_mask,
             "diagonal_target_mask": diagonal_target_mask,
+            "supervision_known_non_werewolf_mask": known_non_werewolf_mask,
             "metadata": metadata,
         }
         if self.include_private_features:
@@ -589,7 +676,9 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
     required_fields = {
         "belief_targets",
         "observer_alive_mask",
+        "observer_supervision_mask",
         "diagonal_target_mask",
+        "supervision_known_non_werewolf_mask",
         "metadata",
     }
     if any(not required_fields.issubset(item) for item in batch):
@@ -631,8 +720,14 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         "observer_alive_mask": torch.stack(
             [item["observer_alive_mask"] for item in batch]
         ),
+        "observer_supervision_mask": torch.stack(
+            [item["observer_supervision_mask"] for item in batch]
+        ),
         "diagonal_target_mask": torch.stack(
             [item["diagonal_target_mask"] for item in batch]
+        ),
+        "supervision_known_non_werewolf_mask": torch.stack(
+            [item["supervision_known_non_werewolf_mask"] for item in batch]
         ),
         "metadata": {
             field_name: [deepcopy(item["metadata"][field_name]) for item in batch]

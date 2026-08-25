@@ -18,24 +18,27 @@ def make_contract():
 def test_uniform_prediction_matches_uniform_target():
     logits, targets, alive, diagonal = make_contract()
     metrics = compute_belief_metrics(logits, targets, alive, diagonal)
-    assert metrics == {
-        "valid_observer_count": 1,
-        "mean_belief_cross_entropy": pytest.approx(math.log(6)),
-        "mean_belief_target_entropy": pytest.approx(math.log(6)),
-        "mean_belief_kl_divergence": pytest.approx(0.0, abs=1e-7),
-        "mean_belief_total_variation": pytest.approx(0.0, abs=1e-7),
-        "mean_belief_absolute_error": pytest.approx(0.0, abs=1e-7),
-        "mean_belief_top1_support_hit": pytest.approx(1.0),
-        "uniform_non_self_baseline_mean_cross_entropy": pytest.approx(math.log(6)),
-        "uniform_non_self_baseline_mean_total_variation": pytest.approx(
-            0.0,
-            abs=1e-7,
-        ),
-        "uniform_non_self_baseline_mean_absolute_error": pytest.approx(
-            0.0,
-            abs=1e-7,
-        ),
-    }
+    assert metrics["total_row_count"] == 1
+    assert metrics["valid_observer_count"] == 1
+    assert metrics["zero_uniform_baseline_gap_row_count"] == 1
+    assert metrics["positive_uniform_baseline_gap_row_count"] == 0
+    assert metrics["model_kl_sum"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["uniform_non_self_baseline_kl_sum"] == pytest.approx(0.0)
+    assert metrics["mean_belief_cross_entropy"] == pytest.approx(math.log(6))
+    assert metrics["mean_belief_target_entropy"] == pytest.approx(math.log(6))
+    assert metrics["mean_belief_kl_divergence"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["mean_belief_total_variation"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["mean_belief_absolute_error"] == pytest.approx(0.0, abs=1e-7)
+    assert metrics["mean_belief_max_probability_error"] == pytest.approx(
+        0.0, abs=1e-7
+    )
+    assert metrics["max_belief_probability_error"] == pytest.approx(
+        0.0, abs=1e-7
+    )
+    assert metrics["mean_belief_max_set_support_hit"] == pytest.approx(1.0)
+    assert metrics[
+        "mean_belief_deterministic_top1_support_hit"
+    ] == pytest.approx(1.0)
 
 
 def test_dead_observer_rows_do_not_affect_metrics():
@@ -51,7 +54,7 @@ def test_metrics_expose_no_pair_or_order_specific_names():
     assert all("order" not in name for name in metrics)
 
 
-def test_top1_is_a_support_hit_for_soft_targets():
+def test_max_set_and_deterministic_top1_have_frozen_tie_semantics():
     logits, targets, alive, diagonal = make_contract()
     targets.zero_()
     targets[0, 0, 1] = 0.5
@@ -59,12 +62,33 @@ def test_top1_is_a_support_hit_for_soft_targets():
     logits[0, 0, 2] = 10.0
 
     metrics = compute_belief_metrics(logits, targets, alive, diagonal)
-    assert metrics["mean_belief_top1_support_hit"] == pytest.approx(1.0)
+    assert metrics["mean_belief_max_set_support_hit"] == pytest.approx(1.0)
+    assert metrics[
+        "mean_belief_deterministic_top1_support_hit"
+    ] == pytest.approx(1.0)
 
     logits[0, 0, 2] = 0.0
     logits[0, 0, 3] = 10.0
     metrics = compute_belief_metrics(logits, targets, alive, diagonal)
-    assert metrics["mean_belief_top1_support_hit"] == pytest.approx(0.0)
+    assert metrics["mean_belief_max_set_support_hit"] == pytest.approx(0.0)
+    assert metrics[
+        "mean_belief_deterministic_top1_support_hit"
+    ] == pytest.approx(0.0)
+
+    logits.zero_()
+    metrics = compute_belief_metrics(logits, targets, alive, diagonal)
+    assert metrics["mean_belief_max_set_support_hit"] == pytest.approx(1.0)
+    assert metrics[
+        "mean_belief_deterministic_top1_support_hit"
+    ] == pytest.approx(1.0)
+
+    targets.zero_()
+    targets[0, 0, 3] = 1.0
+    metrics = compute_belief_metrics(logits, targets, alive, diagonal)
+    assert metrics["mean_belief_max_set_support_hit"] == pytest.approx(1.0)
+    assert metrics[
+        "mean_belief_deterministic_top1_support_hit"
+    ] == pytest.approx(0.0)
 
 
 def test_uniform_non_self_baseline_is_reported_for_sparse_target():
@@ -133,3 +157,4 @@ def test_private_admissible_uniform_baseline_excludes_known_non_werewolves():
     assert metrics[
         "private_admissible_uniform_baseline_mean_absolute_error"
     ] == pytest.approx(0.0)
+    assert metrics["mean_illegal_known_nonwolf_mass"] == pytest.approx(5 / 6)

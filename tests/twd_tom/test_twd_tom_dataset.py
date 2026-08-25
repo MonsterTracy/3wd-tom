@@ -241,6 +241,52 @@ def test_dataset_rotation_is_deterministic_and_epoch_conditioned(
     assert torch.equal(second["belief_targets"], repeated["belief_targets"])
 
 
+def test_rotation_keeps_supervision_roles_aligned_with_rotated_targets(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory(observers=(1, 2, 3, 5))
+    roles = {
+        sample["game_id"]: {
+            "player1": "Werewolf",
+            "player2": "Werewolf",
+            "player3": "Villager",
+            "player4": "Villager",
+            "player5": "Villager",
+            "player6": "Seer",
+            "player7": "Witch",
+        }
+    }
+    dataset = TWDToMDataset(
+        [sample],
+        enable_cyclic_rotation=True,
+        augmentation_seed=2,
+        observer_roles_by_game=roles,
+        supervision_scope="villager_alive",
+    )
+    dataset.set_epoch(1)
+
+    item = dataset[0]
+
+    assert item["observer_supervision_mask"].tolist() == [
+        True,
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert item["metadata"]["observer_roles"] == [
+        "Villager",
+        "Seer",
+        "Witch",
+        "Werewolf",
+        "Werewolf",
+        "Villager",
+        "Villager",
+    ]
+
+
 def test_rotation_preserves_targetless_public_action_object(
     suspicion_sample_factory,
 ):

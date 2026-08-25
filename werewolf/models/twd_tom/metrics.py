@@ -15,6 +15,10 @@ def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
     return float(selected.mean().item()) if selected.numel() else 0.0
 
 
+def _masked_sum(values: torch.Tensor, mask: torch.Tensor) -> float:
+    return float(values[mask].sum().item())
+
+
 @torch.no_grad()
 def compute_belief_metrics(
     belief_logits: torch.Tensor,
@@ -22,9 +26,10 @@ def compute_belief_metrics(
     observer_alive_mask: torch.Tensor,
     diagonal_target_mask: torch.Tensor,
     *,
+    observer_supervision_mask: torch.Tensor | None = None,
     known_non_werewolf_mask: torch.Tensor | None = None,
 ) -> dict[str, int | float]:
-    """Measure predictions only for living observers and non-self targets."""
+    """Measure predictions for the selected subset of valid living observers."""
 
     per_observer_loss = masked_belief_distribution_loss(
         belief_logits,
@@ -33,10 +38,24 @@ def compute_belief_metrics(
         diagonal_target_mask,
         reduction="none",
     )
-    valid_observers = observer_alive_mask.to(
+    alive_observers = observer_alive_mask.to(
         device=belief_logits.device,
         dtype=torch.bool,
     )
+    if observer_supervision_mask is None:
+        valid_observers = alive_observers
+    else:
+        if not isinstance(observer_supervision_mask, torch.Tensor):
+            raise TypeError("observer_supervision_mask must be a tensor")
+        if observer_supervision_mask.shape != alive_observers.shape:
+            raise ValueError("observer_supervision_mask must match alive rows")
+        if observer_supervision_mask.dtype is not torch.bool:
+            raise TypeError("observer_supervision_mask must use torch.bool")
+        valid_observers = observer_supervision_mask.to(device=belief_logits.device)
+        if torch.any(valid_observers & ~alive_observers):
+            raise ValueError("observer supervision must be a subset of alive rows")
+    if not torch.any(valid_observers):
+        raise ValueError("metrics require at least one supervised observer")
     target_mask = diagonal_target_mask.to(
         device=belief_logits.device,
         dtype=torch.bool,
@@ -61,6 +80,7 @@ def compute_belief_metrics(
     uniform_probabilities /= target_mask.sum(dim=-1, keepdim=True).clamp_min(1)
 
     total_variation = 0.5 * (probabilities - targets).abs().sum(dim=-1)
+    max_probability_error = (probabilities - targets).abs().max(dim=-1).values
     absolute_error = torch.where(
         target_mask,
         (probabilities - targets).abs(),
@@ -69,9 +89,14 @@ def compute_belief_metrics(
     top_probability = probabilities.max(dim=-1, keepdim=True).values
     predicted_top_support = probabilities == top_probability
     target_support = targets > 0
-    top1_support_hit = (
+    max_set_support_hit = (
         predicted_top_support & target_support & target_mask
     ).any(dim=-1).to(dtype=belief_logits.dtype)
+    deterministic_top_index = probabilities.argmax(dim=-1, keepdim=True)
+    deterministic_top1_support_hit = target_support.gather(
+        dim=-1,
+        index=deterministic_top_index,
+    ).squeeze(-1).to(dtype=belief_logits.dtype)
 
     uniform_cross_entropy = -(
         targets
@@ -87,9 +112,22 @@ def compute_belief_metrics(
         (uniform_probabilities - targets).abs(),
         torch.zeros_like(uniform_probabilities),
     ).sum(dim=-1) / target_mask.sum(dim=-1).clamp_min(1)
+    uniform_kl = (uniform_cross_entropy - target_entropy).clamp_min(0.0)
+    zero_gap = uniform_kl <= 1e-8
+    model_kl_sum = _masked_sum(kl_divergence, valid_observers)
+    uniform_kl_sum = _masked_sum(uniform_kl, valid_observers)
 
     result = {
+        "total_row_count": int(valid_observers.sum().item()),
         "valid_observer_count": int(valid_observers.sum().item()),
+        "positive_uniform_baseline_gap_row_count": int(
+            (valid_observers & ~zero_gap).sum().item()
+        ),
+        "zero_uniform_baseline_gap_row_count": int(
+            (valid_observers & zero_gap).sum().item()
+        ),
+        "model_kl_sum": model_kl_sum,
+        "uniform_non_self_baseline_kl_sum": uniform_kl_sum,
         "mean_belief_cross_entropy": _masked_mean(
             per_observer_loss,
             valid_observers,
@@ -110,8 +148,19 @@ def compute_belief_metrics(
             absolute_error,
             valid_observers,
         ),
-        "mean_belief_top1_support_hit": _masked_mean(
-            top1_support_hit,
+        "mean_belief_max_probability_error": _masked_mean(
+            max_probability_error,
+            valid_observers,
+        ),
+        "max_belief_probability_error": float(
+            max_probability_error[valid_observers].max().item()
+        ),
+        "mean_belief_max_set_support_hit": _masked_mean(
+            max_set_support_hit,
+            valid_observers,
+        ),
+        "mean_belief_deterministic_top1_support_hit": _masked_mean(
+            deterministic_top1_support_hit,
             valid_observers,
         ),
         "uniform_non_self_baseline_mean_cross_entropy": _masked_mean(
@@ -125,6 +174,14 @@ def compute_belief_metrics(
         "uniform_non_self_baseline_mean_absolute_error": _masked_mean(
             uniform_absolute_error,
             valid_observers,
+        ),
+        "uniform_non_self_baseline_mean_kl_divergence": (
+            uniform_kl_sum / int(valid_observers.sum().item())
+        ),
+        "normalized_reducible_gap_improvement": (
+            1.0 - model_kl_sum / uniform_kl_sum
+            if uniform_kl_sum > 0.0
+            else 0.0
         ),
     }
     if known_non_werewolf_mask is not None:
@@ -162,7 +219,21 @@ def compute_belief_metrics(
             (private_uniform - targets).abs(),
             torch.zeros_like(private_uniform),
         ).sum(dim=-1) / target_mask.sum(dim=-1).clamp_min(1)
+        private_kl = (private_cross_entropy - target_entropy).clamp_min(0.0)
+        private_zero_gap = private_kl <= 1e-8
+        private_kl_sum = _masked_sum(private_kl, valid_observers)
+        illegal_mass = (probabilities * known_non_wolves).sum(dim=-1)
         result.update({
+            "positive_private_admissible_baseline_gap_row_count": int(
+                (valid_observers & ~private_zero_gap).sum().item()
+            ),
+            "zero_private_admissible_baseline_gap_row_count": int(
+                (valid_observers & private_zero_gap).sum().item()
+            ),
+            "private_admissible_uniform_baseline_kl_sum": private_kl_sum,
+            "mean_illegal_known_nonwolf_mass": _masked_mean(
+                illegal_mass, valid_observers
+            ),
             "private_admissible_uniform_baseline_mean_cross_entropy": _masked_mean(
                 private_cross_entropy, valid_observers
             ),
@@ -171,6 +242,14 @@ def compute_belief_metrics(
             ),
             "private_admissible_uniform_baseline_mean_absolute_error": _masked_mean(
                 private_absolute_error, valid_observers
+            ),
+            "private_admissible_uniform_baseline_mean_kl_divergence": (
+                private_kl_sum / int(valid_observers.sum().item())
+            ),
+            "private_admissible_normalized_reducible_gap_improvement": (
+                1.0 - model_kl_sum / private_kl_sum
+                if private_kl_sum > 0.0
+                else 0.0
             ),
         })
     return result

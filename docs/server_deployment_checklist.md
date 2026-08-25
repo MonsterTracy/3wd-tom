@@ -81,7 +81,7 @@ test ! -e "${SHADOW_ROOT}"
 6. `run_development_oof` 会复用配置完全一致且已有成功 `summary.json` 的 fold；若某个 fold 只有不完整输出，则停止并要求检查该 fold，不删除其他已完成 fold，也不从 fold 0 重新训练。
 7. 在 OOF 方案冻结并完成开发集最终拟合前，不运行 `script.twd_tom.eval`。封存 test 只允许对最终选定的单一 checkpoint 评估一次。
 
-当前一阶私有 ToM 是与 public-only Dense-A 并行的实验，不复用或覆盖其输出。它使用完全相同的 54 局开发 folds、Qwen2 4×256、dense boundaries、batch size 8、epoch/scheduler/early-stopping 设置和原始 self-report targets；唯一模型变量是 `--private-conditioning`，输入只增加每个 observer 当时已有的 `known_werewolves / known_non_werewolves`。主门槛改为相对 `private_admissible_uniform` 的 observer-weighted normalized reducible-gap improvement `>=0.50`；public uniform、fold-train-only global/phase prior 仍同时保留作诊断。
+当前 `public + hard-knowledge masks` ToM 是与 public-only Dense-A 并行的实验，不复用或覆盖其输出。它使用完全相同的 54 局开发 folds、Qwen2 4×256、dense boundaries、batch size 8、epoch/scheduler/early-stopping 设置和原始 self-report targets；唯一模型变量是内部兼容参数 `--private-conditioning`，输入只增加每个 observer 当时已有的 `known_werewolves / known_non_werewolves`。主门槛改为相对 `private_admissible_uniform` 的 observer-weighted normalized reducible-gap improvement `>=0.50`；public uniform、fold-train-only global/phase prior 仍同时保留作诊断。
 
 Dense-A 的服务器命令模板如下。路径使用项目内的 `datasets`、`outputs` 软链接，以便训练 provenance 保存 repository-relative path；物理文件仍写入 `/data/yuxiao/3wd-tom`。训练只使用项目 Python 环境，不需要启动 vLLM。
 
@@ -121,12 +121,13 @@ test ! -e "${AUDIT_ROOT}/validation_dense_pre.json"
   --fold-seed 42
 ```
 
-确认两个 audit 均为 `PASS`，fold manifest 的 `development_game_ids` 为 54、`sealed_test_game_ids` 为 6 后，后台启动 Dense-A：
+确认两个 audit 均为 `PASS`，fold manifest 的 `development_game_ids` 为 54、`sealed_test_game_ids` 为 6，并先按下文 Batch 1 命令生成 role sidecar 后，后台启动 Dense-A：
 
 ```bash
 cd /home/dell/yuxiao/3wd-tom
 
 FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6/role_sidecar.json"
 OOF_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/tom60_dense_a_lr1e-4_seed42_oof5"
 OOF_LOG="/data/yuxiao/3wd-tom/logs/tom60_dense_a_lr1e-4_seed42_oof5.console.log"
 
@@ -136,6 +137,7 @@ test ! -e "${OOF_LOG}"
 nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
   -m script.twd_tom.run_development_oof \
   --fold-root "${FOLD_ROOT}" \
+  --role-sidecar "${ROLE_SIDECAR}" \
   --output-dir "${OOF_OUTPUT}" \
   --epochs 80 \
   --batch-size 8 \
@@ -157,12 +159,75 @@ echo "OOF_LOG=${OOF_LOG}"
 
 用 `tail -f "${OOF_LOG}"` 查看日志；最终报告为 `${OOF_OUTPUT}/oof_summary.json`。SSH 断开不影响 `nohup` 进程。重新执行完全相同的 OOF 命令时，已完成且配置一致的 fold 会跳过；但首次命令中的 `test ! -e "${OOF_OUTPUT}"` 只用于防止误覆盖，恢复时应省略这一个检查。
 
-一阶私有 Dense-A 使用新的输出和日志名，并在同一个入口增加一个显式参数：
+### 冻结的任务定义诊断（Batch 1）
+
+该批只增加监督与评估基础设施，不修改 canonical60、belief targets、结构化 parser 或模型输入。角色 sidecar 是 `game_id -> player_id -> role` 的只读、digest-bound supervision metadata；它只生成 `observer_supervision_mask` 和角色分层指标，绝不传入 `model.forward`。
+
+先从 canonical trajectory 与原 split manifest 生成一份 sidecar：
+
+```bash
+set -euo pipefail
+cd /home/dell/yuxiao/3wd-tom
+
+CANONICAL_ROOT="/home/dell/yuxiao/3wd-tom/canonical_data/canonical60_qwen35_cc81f96_20260825_023121"
+SOURCE_SPLIT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6"
+ROLE_SIDECAR="${SOURCE_SPLIT}/role_sidecar.json"
+
+test ! -e "${ROLE_SIDECAR}"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.materialize_role_sidecar \
+  --canonical-root "${CANONICAL_ROOT}" \
+  --split-manifest "${SOURCE_SPLIT}/split_manifest.json" \
+  --output "${ROLE_SIDECAR}"
+```
+
+M1/M2 使用 fold 训练文件作为 lineage-bound source，但从中确定性选择 1 局或 4 局，并对所选游戏执行 `train == eval`。座位 rotation 固定关闭，默认关闭 dropout；验收条件是最佳 train/eval KL `<1e-3`，同时报告 `CE-H`、最大概率误差和 TV。
 
 ```bash
 cd /home/dell/yuxiao/3wd-tom
 
 FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6/role_sidecar.json"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.run_memorization_sanity \
+  --dataset "${FOLD_ROOT}/fold_0/train.jsonl" \
+  --output-dir /home/dell/yuxiao/3wd-tom/outputs/tom60_memorization_m1_qwen2_seed42 \
+  --game-count 1 \
+  --epochs 500 \
+  --batch-size 1 \
+  --learning-rate 3e-4 \
+  --input-feature-profile no_phase_day \
+  --seed 42 \
+  --device cuda \
+  --role-sidecar "${ROLE_SIDECAR}" \
+  --supervision-scope all_alive
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.run_memorization_sanity \
+  --dataset "${FOLD_ROOT}/fold_0/train.jsonl" \
+  --output-dir /home/dell/yuxiao/3wd-tom/outputs/tom60_memorization_m2_qwen2_seed42 \
+  --game-count 4 \
+  --epochs 500 \
+  --batch-size 4 \
+  --learning-rate 3e-4 \
+  --input-feature-profile no_phase_day \
+  --seed 42 \
+  --device cuda \
+  --role-sidecar "${ROLE_SIDECAR}" \
+  --supervision-scope all_alive
+```
+
+后续 All / Non-wolf / Villager 三组 5-fold OOF 复用同一 sidecar、folds、Qwen2、seed、优化参数、`no_phase_day` 输入 profile 和 targets；唯一实验变量分别为 `--supervision-scope all_alive`、`non_wolf_alive`、`villager_alive`。每个 scope 在自身监督行内单独累计 model KL sum、uniform KL sum 与 GapClosed，不共用 all-role denominator。`speaker_alive` 仅为 diagnostic scope，不升级为主任务。
+
+`public + hard-knowledge masks` Dense-A 使用新的输出和日志名，并在同一个入口增加内部兼容参数：
+
+```bash
+cd /home/dell/yuxiao/3wd-tom
+
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6/role_sidecar.json"
 OOF_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/tom60_dense_private_a_lr1e-4_seed42_oof5"
 OOF_LOG="/data/yuxiao/3wd-tom/logs/tom60_dense_private_a_lr1e-4_seed42_oof5.console.log"
 
@@ -172,6 +237,7 @@ test ! -e "${OOF_LOG}"
 nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
   -m script.twd_tom.run_development_oof \
   --fold-root "${FOLD_ROOT}" \
+  --role-sidecar "${ROLE_SIDECAR}" \
   --output-dir "${OOF_OUTPUT}" \
   --epochs 80 \
   --batch-size 8 \
