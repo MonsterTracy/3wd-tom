@@ -7,7 +7,7 @@ from script.twd_tom.audit_belief_label_repeatability import (
     REPEATABILITY_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.belief_backbone import (
-    NO_DAY_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
 )
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
@@ -82,9 +82,10 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
         "villager_alive",
     }
     assert all(
-        call["input_feature_profile"] == NO_DAY_INPUT_FEATURE_PROFILE
+        call["input_feature_profile"] == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
         for call in calls
     )
+    assert result["input_feature_profile"] == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     assert result["benchmark_status"] == "exploratory"
     assert result["repeatability_audit"]["status"] == "not_provided"
     assert result["experiments"][

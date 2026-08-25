@@ -14,7 +14,7 @@ from script.twd_tom.audit_belief_label_repeatability import (
     REPEATABILITY_SCHEMA_VERSION,
 )
 from werewolf.models.twd_tom.belief_backbone import (
-    NO_DAY_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
     QWEN2_BACKBONE_NAME,
 )
 from werewolf.models.twd_tom.annotation_v2 import (
@@ -151,7 +151,7 @@ def run_annotation_v2_ablation(
                 bootstrap_samples=bootstrap_samples,
                 private_conditioning=False,
                 backbone=QWEN2_BACKBONE_NAME,
-                input_feature_profile=NO_DAY_INPUT_FEATURE_PROFILE,
+                input_feature_profile=NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
                 role_sidecar_path=role_sidecar_path,
                 supervision_scope=scope,
                 speech_annotation_source=speech_source,
@@ -186,7 +186,7 @@ def run_annotation_v2_ablation(
         ),
         "task": "public_only_subjective_suspicion",
         "backbone": QWEN2_BACKBONE_NAME,
-        "input_feature_profile": NO_DAY_INPUT_FEATURE_PROFILE,
+        "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
         "shared_training_parameters": {
             "epochs": epochs,
             "batch_size": batch_size,
