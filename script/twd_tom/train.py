@@ -30,8 +30,10 @@ from script.twd_tom.materialize_development_folds import (
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.belief_backbone import (
+    FULL_INPUT_FEATURE_PROFILE,
     QWEN2_BACKBONE_NAME,
     SUPPORTED_BACKBONE_NAMES,
+    SUPPORTED_INPUT_FEATURE_PROFILES,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
 )
@@ -97,6 +99,7 @@ class TrainingConfig:
     gradient_clip_norm: float = 1.0
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
+    input_feature_profile: str = FULL_INPUT_FEATURE_PROFILE
     dense_supervision: bool = False
     private_conditioning: bool = False
     early_stopping_patience: int = 0
@@ -109,6 +112,11 @@ class TrainingConfig:
                 raise ValueError(f"{field_name} must be non-empty text")
         if self.backbone not in SUPPORTED_BACKBONE_NAMES:
             raise ValueError(f"backbone must be one of {SUPPORTED_BACKBONE_NAMES}")
+        if self.input_feature_profile not in SUPPORTED_INPUT_FEATURE_PROFILES:
+            raise ValueError(
+                "input_feature_profile must be one of "
+                f"{SUPPORTED_INPUT_FEATURE_PROFILES}"
+            )
         _positive_integer(self.epochs, field_name="epochs")
         _positive_integer(self.batch_size, field_name="batch_size")
         _positive_integer(self.max_seq_len, field_name="max_seq_len")
@@ -409,6 +417,7 @@ def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
         ToMBeliefBackboneConfig(
             max_seq_len=config.max_seq_len,
             private_conditioning=config.private_conditioning,
+            input_feature_profile=config.input_feature_profile,
         ),
         backbone_name=config.backbone,
     )
@@ -1149,6 +1158,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--validation-dataset", required=True)
     parser.add_argument("--backbone", choices=SUPPORTED_BACKBONE_NAMES, default=QWEN2_BACKBONE_NAME)
+    parser.add_argument(
+        "--input-feature-profile",
+        choices=SUPPORTED_INPUT_FEATURE_PROFILES,
+        default=FULL_INPUT_FEATURE_PROFILE,
+    )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
@@ -1175,6 +1189,7 @@ def main() -> int:
         dataset_path=args.dataset,
         validation_dataset_path=args.validation_dataset,
         backbone=args.backbone,
+        input_feature_profile=args.input_feature_profile,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

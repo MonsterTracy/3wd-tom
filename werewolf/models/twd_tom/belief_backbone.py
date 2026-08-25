@@ -54,6 +54,14 @@ SUPPORTED_BACKBONE_NAMES = (
     QWEN2_BACKBONE_NAME,
     GPT2_BLOCK_BACKBONE_NAME,
 )
+FULL_INPUT_FEATURE_PROFILE = "full"
+NO_DAY_INPUT_FEATURE_PROFILE = "no_day"
+NO_PHASE_DAY_INPUT_FEATURE_PROFILE = "no_phase_day"
+SUPPORTED_INPUT_FEATURE_PROFILES = (
+    FULL_INPUT_FEATURE_PROFILE,
+    NO_DAY_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+)
 HIDDEN_SIZE = 256
 INTERMEDIATE_SIZE = 768
 NUM_HIDDEN_LAYERS = 4
@@ -212,6 +220,7 @@ class ToMBeliefBackboneConfig:
     num_players: int = NUM_PLAYERS
     max_seq_len: int = 256
     private_conditioning: bool = False
+    input_feature_profile: str = FULL_INPUT_FEATURE_PROFILE
 
     def __post_init__(self) -> None:
         if (
@@ -229,6 +238,11 @@ class ToMBeliefBackboneConfig:
             raise ValueError("max_seq_len must be a positive integer")
         if not isinstance(self.private_conditioning, bool):
             raise TypeError("private_conditioning must be bool")
+        if self.input_feature_profile not in SUPPORTED_INPUT_FEATURE_PROFILES:
+            raise ValueError(
+                "input_feature_profile must be one of "
+                f"{SUPPORTED_INPUT_FEATURE_PROFILES}"
+            )
 
 
 class ToMBeliefBackbone(nn.Module):
@@ -474,9 +488,13 @@ class ToMBeliefBackbone(nn.Module):
             + self.action_embedding(action_ids)
             + self.object_embedding(object_ids)
             + self.event_type_embedding(event_type_ids)
-            + self.phase_embedding(phase_ids)
-            + self.day_projection(day_values.unsqueeze(-1))
         )
+        if self.config.input_feature_profile != NO_PHASE_DAY_INPUT_FEATURE_PROFILE:
+            base_embeddings = base_embeddings + self.phase_embedding(phase_ids)
+        if self.config.input_feature_profile == FULL_INPUT_FEATURE_PROFILE:
+            base_embeddings = base_embeddings + self.day_projection(
+                day_values.unsqueeze(-1)
+            )
 
         hidden_states = base_embeddings
 
@@ -1007,13 +1025,17 @@ class ToMBeliefBackbone(nn.Module):
 
 
 __all__ = [
+    "FULL_INPUT_FEATURE_PROFILE",
     "GPT2_BLOCK_BACKBONE_NAME",
     "GPT2BlockStack",
     "HIDDEN_SIZE",
+    "NO_DAY_INPUT_FEATURE_PROFILE",
+    "NO_PHASE_DAY_INPUT_FEATURE_PROFILE",
     "NONE_RELATIVE_PLAYER_INDEX",
     "NONE_PLAYER_ID",
     "QWEN2_BACKBONE_NAME",
     "SUPPORTED_BACKBONE_NAMES",
+    "SUPPORTED_INPUT_FEATURE_PROFILES",
     "ToMBeliefBackboneConfig",
     "ToMBeliefBackbone",
     "relative_player_indices",

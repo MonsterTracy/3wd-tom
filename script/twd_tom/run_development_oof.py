@@ -15,7 +15,12 @@ from script.twd_tom.materialize_development_folds import (
     validate_development_fold_paths,
 )
 from script.twd_tom.train import TrainingConfig, run_training
-from werewolf.models.twd_tom.belief_backbone import QWEN2_BACKBONE_NAME
+from werewolf.models.twd_tom.belief_backbone import (
+    FULL_INPUT_FEATURE_PROFILE,
+    QWEN2_BACKBONE_NAME,
+    SUPPORTED_BACKBONE_NAMES,
+    SUPPORTED_INPUT_FEATURE_PROFILES,
+)
 
 
 OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v2"
@@ -187,11 +192,20 @@ def run_development_oof(
     bootstrap_samples: int = 2000,
     target_improvement: float = DEFAULT_TARGET_IMPROVEMENT,
     private_conditioning: bool = False,
+    backbone: str = QWEN2_BACKBONE_NAME,
+    input_feature_profile: str = FULL_INPUT_FEATURE_PROFILE,
 ) -> dict[str, Any]:
     """Train every fold, resume completed folds, and aggregate OOF games."""
 
     if not isinstance(private_conditioning, bool):
         raise TypeError("private_conditioning must be bool")
+    if backbone not in SUPPORTED_BACKBONE_NAMES:
+        raise ValueError(f"backbone must be one of {SUPPORTED_BACKBONE_NAMES}")
+    if input_feature_profile not in SUPPORTED_INPUT_FEATURE_PROFILES:
+        raise ValueError(
+            "input_feature_profile must be one of "
+            f"{SUPPORTED_INPUT_FEATURE_PROFILES}"
+        )
 
     # Keep the lexical project path so repository symlinks remain valid
     # provenance paths; validators resolve their physical targets separately.
@@ -215,7 +229,8 @@ def run_development_oof(
         "seed": seed,
         "device": device,
         "max_seq_len": 256,
-        "backbone": QWEN2_BACKBONE_NAME,
+        "backbone": backbone,
+        "input_feature_profile": input_feature_profile,
         "dense_supervision": True,
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_min_delta": early_stopping_min_delta,
@@ -255,7 +270,8 @@ def run_development_oof(
                 seed=seed,
                 device=device,
                 max_seq_len=256,
-                backbone=QWEN2_BACKBONE_NAME,
+                backbone=backbone,
+                input_feature_profile=input_feature_profile,
                 dense_supervision=True,
                 private_conditioning=private_conditioning,
                 early_stopping_patience=early_stopping_patience,
@@ -367,6 +383,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--target-improvement", type=float, default=0.50)
     parser.add_argument("--private-conditioning", action="store_true")
+    parser.add_argument(
+        "--backbone",
+        choices=SUPPORTED_BACKBONE_NAMES,
+        default=QWEN2_BACKBONE_NAME,
+    )
+    parser.add_argument(
+        "--input-feature-profile",
+        choices=SUPPORTED_INPUT_FEATURE_PROFILES,
+        default=FULL_INPUT_FEATURE_PROFILE,
+    )
     return parser
 
 
@@ -387,6 +413,8 @@ def main() -> int:
         bootstrap_samples=args.bootstrap_samples,
         target_improvement=args.target_improvement,
         private_conditioning=args.private_conditioning,
+        backbone=args.backbone,
+        input_feature_profile=args.input_feature_profile,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

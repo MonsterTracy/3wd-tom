@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from werewolf.models.twd_tom.belief_backbone import (
+    FULL_INPUT_FEATURE_PROFILE,
     GPT2_BLOCK_BACKBONE_NAME,
+    NO_DAY_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
     ToMBeliefBackbone,
     ToMBeliefBackboneConfig,
     relative_player_indices,
@@ -201,3 +204,35 @@ def test_empty_public_history_is_rejected():
 def test_config_rejects_non_classic_player_count():
     with pytest.raises(ValueError, match="num_players"):
         ToMBeliefBackboneConfig(num_players=8)
+
+
+def test_config_rejects_unknown_input_feature_profile():
+    with pytest.raises(ValueError, match="input_feature_profile"):
+        ToMBeliefBackboneConfig(input_feature_profile="unknown")
+
+
+@pytest.mark.parametrize(
+    "profile,phase_has_gradient,day_has_gradient",
+    [
+        (FULL_INPUT_FEATURE_PROFILE, True, True),
+        (NO_DAY_INPUT_FEATURE_PROFILE, True, False),
+        (NO_PHASE_DAY_INPUT_FEATURE_PROFILE, False, False),
+    ],
+)
+def test_input_feature_profiles_exclude_only_declared_fields(
+    profile,
+    phase_has_gradient,
+    day_has_gradient,
+):
+    model = ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(
+            max_seq_len=16,
+            input_feature_profile=profile,
+        ),
+        backbone_name=GPT2_BLOCK_BACKBONE_NAME,
+    )
+
+    model(**make_features())["belief_logits"].sum().backward()
+
+    assert (model.phase_embedding.weight.grad is not None) is phase_has_gradient
+    assert (model.day_projection.weight.grad is not None) is day_has_gradient

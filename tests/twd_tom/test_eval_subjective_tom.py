@@ -19,6 +19,10 @@ from script.twd_tom.train import (
     checkpoint_payload,
     sha256_file,
 )
+from werewolf.models.twd_tom.belief_backbone import (
+    FULL_INPUT_FEATURE_PROFILE,
+    NO_DAY_INPUT_FEATURE_PROFILE,
+)
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.trajectory import canonical_digest
 
@@ -80,6 +84,7 @@ def make_checkpoint(
     *,
     validation_path=None,
     split_manifest_digest=None,
+    input_feature_profile=FULL_INPUT_FEATURE_PROFILE,
 ):
     validation_path = validation_path or training_path
     config = TrainingConfig(
@@ -89,6 +94,7 @@ def make_checkpoint(
         epochs=1,
         batch_size=1,
         backbone="gpt2_block",
+        input_feature_profile=input_feature_profile,
     )
     model = build_model(config)
     optimizer = AdamW(model.parameters())
@@ -122,6 +128,37 @@ def test_checkpoint_restores_direct_belief_model(tmp_path, training_sample_facto
     model = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
     assert model.output_projection.out_features == 7
     assert not hasattr(model, "tom_order")
+
+
+def test_checkpoint_restores_declared_input_feature_profile(
+    tmp_path,
+    training_sample_factory,
+):
+    training_path = tmp_path / "training.jsonl"
+    write_jsonl(training_path, training_sample_factory(game_id="train"))
+    _, checkpoint = make_checkpoint(
+        tmp_path,
+        training_path,
+        input_feature_profile=NO_DAY_INPUT_FEATURE_PROFILE,
+    )
+
+    model = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+    assert model.config.input_feature_profile == NO_DAY_INPUT_FEATURE_PROFILE
+
+
+def test_legacy_checkpoint_without_input_profile_restores_as_full(
+    tmp_path,
+    training_sample_factory,
+):
+    training_path = tmp_path / "training.jsonl"
+    write_jsonl(training_path, training_sample_factory(game_id="train"))
+    _, checkpoint = make_checkpoint(tmp_path, training_path)
+    checkpoint["model_config"].pop("input_feature_profile")
+
+    model = build_model_from_checkpoint(checkpoint, device=torch.device("cpu"))
+
+    assert model.config.input_feature_profile == FULL_INPUT_FEATURE_PROFILE
 
 
 @pytest.mark.parametrize(

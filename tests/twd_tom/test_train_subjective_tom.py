@@ -19,6 +19,9 @@ from script.twd_tom.train import (
     evaluate_model_with_games,
     train_one_epoch,
 )
+from werewolf.models.twd_tom.belief_backbone import (
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+)
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
@@ -255,3 +258,20 @@ def test_training_config_has_no_order_argument(tmp_path):
             dataset_path="train.jsonl",
             validation_dataset_path="validation.jsonl",
         )
+
+
+def test_training_config_threads_input_profile_into_model(tmp_path):
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path="train.jsonl",
+        validation_dataset_path="validation.jsonl",
+        backbone="gpt2_block",
+        input_feature_profile=NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+    )
+
+    model = build_model(config)
+
+    assert (
+        model.config.input_feature_profile
+        == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
+    )
