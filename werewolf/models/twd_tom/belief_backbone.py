@@ -21,8 +21,9 @@ relation embeddings to the public hidden sequence, then uses one shared query
 per observer. Each query directly predicts a distribution over the seven
 canonical target seats.
 
-This module does not consume raw public text, true roles, truth-derived
-labels, alive masks, or private event fields.
+The optional private-conditioned path additionally consumes only each
+observer's explicit hard-knowledge sets. It never consumes true roles,
+truth-derived labels, another observer's private events, or alive masks.
 """
 
 from __future__ import annotations
@@ -210,6 +211,7 @@ class ToMBeliefBackboneConfig:
 
     num_players: int = NUM_PLAYERS
     max_seq_len: int = 256
+    private_conditioning: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -225,6 +227,8 @@ class ToMBeliefBackboneConfig:
             or self.max_seq_len <= 0
         ):
             raise ValueError("max_seq_len must be a positive integer")
+        if not isinstance(self.private_conditioning, bool):
+            raise TypeError("private_conditioning must be bool")
 
 
 class ToMBeliefBackbone(nn.Module):
@@ -314,6 +318,15 @@ class ToMBeliefBackbone(nn.Module):
             self.config.num_players,
             HIDDEN_SIZE,
         )
+        if self.config.private_conditioning:
+            self.known_werewolf_relative_embedding = nn.Embedding(
+                NUM_PLAYERS,
+                HIDDEN_SIZE,
+            )
+            self.known_non_werewolf_relative_embedding = nn.Embedding(
+                NUM_PLAYERS,
+                HIDDEN_SIZE,
+            )
         self.speaker_relative_embedding = nn.Embedding(
             NUM_PLAYERS + 1,
             HIDDEN_SIZE,
@@ -364,6 +377,17 @@ class ToMBeliefBackbone(nn.Module):
                 mean=0.0,
                 std=0.02,
             )
+        if self.config.private_conditioning:
+            nn.init.normal_(
+                self.known_werewolf_relative_embedding.weight,
+                mean=0.0,
+                std=0.02,
+            )
+            nn.init.normal_(
+                self.known_non_werewolf_relative_embedding.weight,
+                mean=0.0,
+                std=0.02,
+            )
 
         for embedding in (
             self.speaker_relative_embedding,
@@ -405,6 +429,8 @@ class ToMBeliefBackbone(nn.Module):
         day_values: torch.Tensor | None = None,
         boundary_indices: torch.Tensor | None = None,
         boundary_valid_mask: torch.Tensor | None = None,
+        known_werewolf_mask: torch.Tensor | None = None,
+        known_non_werewolf_mask: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Encode public actions and predict observer belief logits.
 
@@ -509,6 +535,16 @@ class ToMBeliefBackbone(nn.Module):
             .unsqueeze(0)
             .expand(batch_size, -1, -1)
         )
+        private_context = self._private_observer_context(
+            known_werewolf_mask=known_werewolf_mask,
+            known_non_werewolf_mask=known_non_werewolf_mask,
+            batch_size=batch_size,
+            boundary_count=(
+                None if boundary_indices is None else boundary_indices.shape[1]
+            ),
+            device=subject_ids.device,
+            dtype=observer_queries.dtype,
+        )
         speaker_token_mask = (
             (event_type_ids == STRUCTURED_TOKEN_TO_ID["turn_start"])
             | (event_type_ids == STRUCTURED_TOKEN_TO_ID["public_speech"])
@@ -560,6 +596,8 @@ class ToMBeliefBackbone(nn.Module):
         )
 
         if boundary_indices is None and boundary_valid_mask is None:
+            if private_context is not None:
+                observer_queries = observer_queries + private_context
             flattened_queries = observer_queries.reshape(
                 batch_size * self.config.num_players,
                 1,
@@ -593,6 +631,8 @@ class ToMBeliefBackbone(nn.Module):
             dense_queries = observer_queries.unsqueeze(2).expand(
                 -1, -1, boundary_count, -1
             )
+            if private_context is not None:
+                dense_queries = dense_queries + private_context.transpose(1, 2)
             flattened_queries = dense_queries.reshape(
                 batch_size * self.config.num_players,
                 boundary_count,
@@ -659,6 +699,68 @@ class ToMBeliefBackbone(nn.Module):
             "relative_public_hidden_states": relative_public_hidden_states,
             "belief_logits": belief_logits,
         }
+
+    def _private_observer_context(
+        self,
+        *,
+        known_werewolf_mask: torch.Tensor | None,
+        known_non_werewolf_mask: torch.Tensor | None,
+        batch_size: int,
+        boundary_count: int | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        supplied = (
+            known_werewolf_mask is not None,
+            known_non_werewolf_mask is not None,
+        )
+        if any(supplied) and not all(supplied):
+            raise ValueError("private knowledge masks must be supplied together")
+        if not self.config.private_conditioning:
+            if all(supplied):
+                raise ValueError("public model does not accept private knowledge masks")
+            return None
+        if not all(supplied):
+            raise ValueError("private-conditioned model requires knowledge masks")
+        assert known_werewolf_mask is not None
+        assert known_non_werewolf_mask is not None
+        expected_shape = (
+            (batch_size, NUM_PLAYERS, NUM_PLAYERS)
+            if boundary_count is None
+            else (batch_size, boundary_count, NUM_PLAYERS, NUM_PLAYERS)
+        )
+        for field_name, mask in (
+            ("known_werewolf_mask", known_werewolf_mask),
+            ("known_non_werewolf_mask", known_non_werewolf_mask),
+        ):
+            if not isinstance(mask, torch.Tensor):
+                raise TypeError(f"{field_name} must be a tensor")
+            if mask.shape != expected_shape:
+                raise ValueError(f"{field_name} must have shape {expected_shape}")
+            if mask.dtype is not torch.bool:
+                raise TypeError(f"{field_name} must use torch.bool")
+        known_wolves = known_werewolf_mask.to(device=device)
+        known_non_wolves = known_non_werewolf_mask.to(device=device)
+        if torch.any(known_wolves & known_non_wolves):
+            raise ValueError("private knowledge masks must be disjoint")
+
+        observer_indices = torch.arange(NUM_PLAYERS, device=device).view(-1, 1)
+        target_indices = torch.arange(NUM_PLAYERS, device=device).view(1, -1)
+        relative_indices = (target_indices - observer_indices) % NUM_PLAYERS
+        known_wolf_embeddings = self.known_werewolf_relative_embedding(
+            relative_indices
+        ).to(dtype=dtype)
+        known_non_wolf_embeddings = self.known_non_werewolf_relative_embedding(
+            relative_indices
+        ).to(dtype=dtype)
+        prefix_dims = (1,) * (known_wolves.ndim - 2)
+        embedding_shape = (*prefix_dims, NUM_PLAYERS, NUM_PLAYERS, HIDDEN_SIZE)
+        return (
+            known_wolves.to(dtype=dtype).unsqueeze(-1)
+            * known_wolf_embeddings.view(embedding_shape)
+            + known_non_wolves.to(dtype=dtype).unsqueeze(-1)
+            * known_non_wolf_embeddings.view(embedding_shape)
+        ).sum(dim=-2)
 
     @staticmethod
     def _validate_dense_boundaries(

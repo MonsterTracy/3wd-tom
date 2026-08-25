@@ -22,6 +22,7 @@ from script.twd_tom.train import (
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
+    PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
 )
@@ -76,6 +77,14 @@ def test_checkpoint_contract_is_single_belief_objective():
     assert all("order" not in key for key in contract)
 
 
+def test_private_checkpoint_contract_is_explicit_and_parallel():
+    contract = checkpoint_task_contract(private_conditioning=True)
+    assert contract["objective"] == OBJECTIVE
+    assert contract["model_input_scope"] == PRIVATE_MODEL_INPUT_SCOPE
+    assert contract["private_conditioning"] is True
+    assert contract["model_output"] == "belief_logits"
+
+
 def test_training_loader_uses_rotation_only_for_training(
     tmp_path, training_sample_factory
 ):
@@ -86,6 +95,34 @@ def test_training_loader_uses_rotation_only_for_training(
     _, validation = build_data_loader(config, dataset_path=path, shuffle=False)
     assert training.enable_cyclic_rotation is True
     assert validation.enable_cyclic_rotation is False
+
+
+def test_private_training_path_threads_knowledge_masks_and_metrics(
+    tmp_path, training_sample_factory
+):
+    path = tmp_path / "private.jsonl"
+    write_jsonl(path, training_sample_factory())
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path=str(path),
+        validation_dataset_path=str(path),
+        epochs=1,
+        batch_size=1,
+        max_seq_len=32,
+        backbone="gpt2_block",
+        device="cpu",
+        dense_supervision=True,
+        private_conditioning=True,
+    )
+    loader, dataset = build_data_loader(config, dataset_path=path, shuffle=False)
+    batch = _move_batch_to_device(next(iter(loader)), torch.device("cpu"))
+    model = build_model(config)
+
+    assert dataset.include_private_features is True
+    assert model.config.private_conditioning is True
+    assert _forward_batch(model, batch)[MODEL_OUTPUT].shape == (1, 1, 7, 7)
+    metrics = evaluate_model(model, loader, device=torch.device("cpu"))
+    assert "private_admissible_normalized_reducible_gap_improvement" in metrics
 
 
 def test_one_train_and_evaluation_batch_use_direct_belief_contract(

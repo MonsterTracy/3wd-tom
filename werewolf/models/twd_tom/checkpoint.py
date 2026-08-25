@@ -17,6 +17,7 @@ from werewolf.models.twd_tom.belief_backbone import (
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
+    PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
 )
@@ -33,18 +34,29 @@ OBJECTIVE = "observer_conditioned_belief_distribution_v1"
 MODEL_OUTPUT = "belief_logits"
 
 
-def checkpoint_task_contract() -> dict[str, Any]:
-    """Return the single frozen task contract stored in every checkpoint."""
+def checkpoint_task_contract(
+    private_conditioning: bool = False,
+) -> dict[str, Any]:
+    """Return the frozen public or private-conditioned task contract."""
 
-    return {
+    if not isinstance(private_conditioning, bool):
+        raise TypeError("private_conditioning must be bool")
+    contract = {
         "objective": OBJECTIVE,
-        "model_input_scope": MODEL_INPUT_SCOPE,
+        "model_input_scope": (
+            PRIVATE_MODEL_INPUT_SCOPE
+            if private_conditioning
+            else MODEL_INPUT_SCOPE
+        ),
         "model_output": MODEL_OUTPUT,
         "output_shape": [NUM_PLAYERS, NUM_PLAYERS],
         "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
         "train_player_augmentation": CYCLIC_ROTATION_VERSION,
     }
+    if private_conditioning:
+        contract["private_conditioning"] = True
+    return contract
 
 
 def result_model_config(model: ToMBeliefBackbone) -> dict[str, Any]:
@@ -74,9 +86,16 @@ def build_model_from_checkpoint(
             "checkpoint backbone mismatch: expected one of "
             f"{SUPPORTED_BACKBONE_NAMES!r}, got {backbone_name!r}"
         )
+    raw_model_config = checkpoint.get("model_config")
+    if not isinstance(raw_model_config, Mapping):
+        raise TypeError("checkpoint has no valid model_config")
+    try:
+        model_config = ToMBeliefBackboneConfig(**dict(raw_model_config))
+    except TypeError as exc:
+        raise ValueError("checkpoint model_config is incompatible") from exc
     expected = {
         "schema_version": SAMPLE_SCHEMA_VERSION,
-        **checkpoint_task_contract(),
+        **checkpoint_task_contract(model_config.private_conditioning),
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -89,13 +108,6 @@ def build_model_from_checkpoint(
                 f"checkpoint {field_name} mismatch: expected "
                 f"{expected_value!r}, got {checkpoint.get(field_name)!r}"
             )
-    raw_model_config = checkpoint.get("model_config")
-    if not isinstance(raw_model_config, Mapping):
-        raise TypeError("checkpoint has no valid model_config")
-    try:
-        model_config = ToMBeliefBackboneConfig(**dict(raw_model_config))
-    except TypeError as exc:
-        raise ValueError("checkpoint model_config is incompatible") from exc
     state_dict = checkpoint.get("model_state_dict")
     if not isinstance(state_dict, Mapping):
         raise TypeError("checkpoint has no valid model_state_dict")

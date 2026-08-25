@@ -173,6 +173,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     dataset = TWDToMDataset(
         samples,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=model.config.max_seq_len),
+        include_private_features=model.config.private_conditioning,
     )
     if dataset.model_input_scope != checkpoint.get("model_input_scope"):
         raise ValueError("evaluation Dataset model_input_scope mismatch")
@@ -197,7 +198,7 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "status": "ok",
         "schema_version": SAMPLE_SCHEMA_VERSION,
-        **checkpoint_task_contract(),
+        **checkpoint_task_contract(model.config.private_conditioning),
         "backbone": model.backbone_name,
         "device": str(device),
         "checkpoint_path": str(checkpoint_path),

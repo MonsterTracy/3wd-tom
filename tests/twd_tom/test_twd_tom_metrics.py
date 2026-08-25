@@ -107,3 +107,29 @@ def test_sparse_target_has_zero_entropy():
     metrics = compute_belief_metrics(logits, targets, alive, diagonal)
     assert metrics["mean_belief_target_entropy"] == pytest.approx(0.0)
     assert metrics["mean_belief_kl_divergence"] == pytest.approx(math.log(6))
+
+
+def test_private_admissible_uniform_baseline_excludes_known_non_werewolves():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    targets[0, 0, 1] = 1.0
+    known_non_wolf = torch.zeros_like(diagonal)
+    known_non_wolf[0, 0, [0, 2, 3, 4, 5, 6]] = True
+
+    metrics = compute_belief_metrics(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        known_non_werewolf_mask=known_non_wolf,
+    )
+
+    assert metrics[
+        "private_admissible_uniform_baseline_mean_cross_entropy"
+    ] == pytest.approx(0.0)
+    assert metrics[
+        "private_admissible_uniform_baseline_mean_total_variation"
+    ] == pytest.approx(0.0)
+    assert metrics[
+        "private_admissible_uniform_baseline_mean_absolute_error"
+    ] == pytest.approx(0.0)

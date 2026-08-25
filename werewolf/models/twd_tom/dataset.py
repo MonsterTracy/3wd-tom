@@ -51,6 +51,13 @@ from werewolf.speech.private_belief_perceiver import STATUS_OK
 MODEL_INPUT_SCOPE = (
     "completed_structured_public_events_without_terminal_turn_start_v1"
 )
+PRIVATE_MODEL_INPUT_SCOPE = (
+    "completed_structured_public_events_plus_observer_hard_knowledge_v1"
+)
+PRIVATE_FEATURE_FIELDS = (
+    "known_werewolves",
+    "known_non_werewolves",
+)
 TARGET_SEMANTICS = "relative_suspicion_matrix_v1"
 TARGET_CONVERSION = (
     "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
@@ -415,7 +422,7 @@ def load_twd_tom_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 class TWDToMDataset(Dataset):
-    """The sole tom-v2 Dataset: public history to observer belief matrix."""
+    """Map strict-PRE history to an observer belief matrix."""
 
     def __init__(
         self,
@@ -425,6 +432,7 @@ class TWDToMDataset(Dataset):
         target_dtype: torch.dtype = torch.float32,
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
+        include_private_features: bool = False,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -432,6 +440,8 @@ class TWDToMDataset(Dataset):
             raise TypeError("target_dtype must be a floating-point dtype")
         if not isinstance(enable_cyclic_rotation, bool):
             raise TypeError("enable_cyclic_rotation must be bool")
+        if not isinstance(include_private_features, bool):
+            raise TypeError("include_private_features must be bool")
         deterministic_cyclic_shift(
             seed=augmentation_seed,
             epoch=0,
@@ -455,8 +465,13 @@ class TWDToMDataset(Dataset):
         self.target_dtype = target_dtype
         self.enable_cyclic_rotation = enable_cyclic_rotation
         self.augmentation_seed = augmentation_seed
+        self.include_private_features = include_private_features
         self._epoch = 0
-        self.model_input_scope = MODEL_INPUT_SCOPE
+        self.model_input_scope = (
+            PRIVATE_MODEL_INPUT_SCOPE
+            if include_private_features
+            else MODEL_INPUT_SCOPE
+        )
         self.target_semantics = TARGET_SEMANTICS
         self.target_conversion = TARGET_CONVERSION
 
@@ -469,6 +484,7 @@ class TWDToMDataset(Dataset):
         target_dtype: torch.dtype = torch.float32,
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
+        include_private_features: bool = False,
     ) -> "TWDToMDataset":
         return cls(
             load_twd_tom_jsonl(path),
@@ -476,6 +492,7 @@ class TWDToMDataset(Dataset):
             target_dtype=target_dtype,
             enable_cyclic_rotation=enable_cyclic_rotation,
             augmentation_seed=augmentation_seed,
+            include_private_features=include_private_features,
         )
 
     def __len__(self) -> int:
@@ -514,6 +531,10 @@ class TWDToMDataset(Dataset):
             dtype=self.target_dtype,
         )
         observer_alive_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
+        known_werewolf_mask = torch.zeros(
+            (NUM_PLAYERS, NUM_PLAYERS), dtype=torch.bool
+        )
+        known_non_werewolf_mask = torch.zeros_like(known_werewolf_mask)
         for observer_id in sample["observer_ids"]:
             subject = normalize_player(observer_id)
             row_index = observer_id - 1
@@ -521,6 +542,13 @@ class TWDToMDataset(Dataset):
                 dtype=self.target_dtype
             )
             observer_alive_mask[row_index] = True
+            if self.include_private_features:
+                for player in sample["known_werewolves"][subject]:
+                    known_werewolf_mask[row_index, PLAYER_TO_ID[player] - 1] = True
+                for player in sample["known_non_werewolves"][subject]:
+                    known_non_werewolf_mask[
+                        row_index, PLAYER_TO_ID[player] - 1
+                    ] = True
 
         diagonal_target_mask = ~torch.eye(NUM_PLAYERS, dtype=torch.bool)
         metadata = {
@@ -535,13 +563,20 @@ class TWDToMDataset(Dataset):
             "target_semantics": TARGET_SEMANTICS,
             "target_conversion": TARGET_CONVERSION,
         }
-        return {
+        result = {
             **features,
             "belief_targets": belief_targets,
             "observer_alive_mask": observer_alive_mask,
             "diagonal_target_mask": diagonal_target_mask,
             "metadata": metadata,
         }
+        if self.include_private_features:
+            metadata["private_feature_fields"] = list(PRIVATE_FEATURE_FIELDS)
+            result.update({
+                "known_werewolf_mask": known_werewolf_mask,
+                "known_non_werewolf_mask": known_non_werewolf_mask,
+            })
+        return result
 
 
 def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -559,6 +594,15 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
     }
     if any(not required_fields.issubset(item) for item in batch):
         raise ValueError("every sample must contain the tom-v2 belief contract")
+    private_fields = ("known_werewolf_mask", "known_non_werewolf_mask")
+    private_presence = [
+        tuple(field in item for field in private_fields)
+        for item in batch
+    ]
+    if any(any(presence) and not all(presence) for presence in private_presence):
+        raise ValueError("private knowledge masks must be supplied together")
+    if len(set(private_presence)) != 1:
+        raise ValueError("batch cannot mix public and private-conditioned samples")
 
     feature_fields = (
         "subject_ids",
@@ -581,7 +625,7 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
                 raise ValueError(f"feature length mismatch for {field_name}")
             padded[field_name][batch_index, :length] = item[field_name]
 
-    return {
+    result = {
         **padded,
         "belief_targets": torch.stack([item["belief_targets"] for item in batch]),
         "observer_alive_mask": torch.stack(
@@ -595,11 +639,19 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
             for field_name in batch[0]["metadata"]
         },
     }
+    if all(private_presence[0]):
+        result.update({
+            field: torch.stack([item[field] for item in batch])
+            for field in private_fields
+        })
+    return result
 
 
 __all__ = [
     "CYCLIC_ROTATION_VERSION",
     "MODEL_INPUT_SCOPE",
+    "PRIVATE_FEATURE_FIELDS",
+    "PRIVATE_MODEL_INPUT_SCOPE",
     "TARGET_SEMANTICS",
     "TARGET_CONVERSION",
     "TWDToMDataset",

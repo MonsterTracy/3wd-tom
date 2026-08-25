@@ -56,3 +56,20 @@ def test_dense_empirical_prior_contract_rejects_unknown_version(
 
     with pytest.raises(ValueError, match="version"):
         evaluate_dense_empirical_priors(dataset, priors)
+
+
+def test_private_dataset_reports_private_admissible_uniform_baseline(
+    training_sample_factory,
+):
+    dataset = DenseTWDToMDataset(
+        [training_sample_factory()],
+        include_private_features=True,
+    )
+    report = evaluate_dense_empirical_priors(
+        dataset,
+        fit_dense_empirical_priors(dataset),
+    )
+
+    assert "private_admissible_uniform" in report
+    aggregate = report["private_admissible_uniform"]["aggregate"]
+    assert "private_admissible_normalized_reducible_gap_improvement" in aggregate

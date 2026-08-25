@@ -47,6 +47,7 @@ from werewolf.models.twd_tom.checkpoint import (
 )
 from werewolf.models.twd_tom.dataset import (
     MODEL_INPUT_SCOPE,
+    PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
     TWDToMDataset,
@@ -97,6 +98,7 @@ class TrainingConfig:
     max_seq_len: int = 256
     backbone: str = QWEN2_BACKBONE_NAME
     dense_supervision: bool = False
+    private_conditioning: bool = False
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
 
@@ -144,6 +146,8 @@ class TrainingConfig:
             raise ValueError("gradient_clip_norm cannot be negative")
         if not isinstance(self.dense_supervision, bool):
             raise TypeError("dense_supervision must be bool")
+        if not isinstance(self.private_conditioning, bool):
+            raise TypeError("private_conditioning must be bool")
         if (
             isinstance(self.early_stopping_patience, bool)
             or not isinstance(self.early_stopping_patience, int)
@@ -402,7 +406,10 @@ def resolve_device(requested_device: str) -> torch.device:
 
 def build_model(config: TrainingConfig) -> ToMBeliefBackbone:
     return ToMBeliefBackbone(
-        ToMBeliefBackboneConfig(max_seq_len=config.max_seq_len),
+        ToMBeliefBackboneConfig(
+            max_seq_len=config.max_seq_len,
+            private_conditioning=config.private_conditioning,
+        ),
         backbone_name=config.backbone,
     )
 
@@ -419,6 +426,7 @@ def build_data_loader(
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
         enable_cyclic_rotation=shuffle,
         augmentation_seed=config.seed,
+        include_private_features=config.private_conditioning,
     )
     if len(dataset) == 0:
         raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
@@ -518,6 +526,10 @@ _DENSE_BATCH_TENSOR_FIELDS = (
     "boundary_indices",
     "boundary_valid_mask",
 )
+_PRIVATE_BATCH_TENSOR_FIELDS = (
+    "known_werewolf_mask",
+    "known_non_werewolf_mask",
+)
 
 
 def _move_batch_to_device(
@@ -529,6 +541,11 @@ def _move_batch_to_device(
         raise ValueError("dense batch boundary fields must be supplied together")
     if all(dense_fields_present):
         fields.extend(_DENSE_BATCH_TENSOR_FIELDS)
+    private_fields_present = [field in batch for field in _PRIVATE_BATCH_TENSOR_FIELDS]
+    if any(private_fields_present) and not all(private_fields_present):
+        raise ValueError("private knowledge masks must be supplied together")
+    if all(private_fields_present):
+        fields.extend(_PRIVATE_BATCH_TENSOR_FIELDS)
     missing = [field for field in fields if field not in batch]
     if missing:
         raise ValueError(f"batch is missing required fields: {missing}")
@@ -549,6 +566,8 @@ def _forward_batch(
     ]
     if "boundary_indices" in batch:
         fields.extend(_DENSE_BATCH_TENSOR_FIELDS)
+    if "known_werewolf_mask" in batch:
+        fields.extend(_PRIVATE_BATCH_TENSOR_FIELDS)
     return model(**{
         field: batch[field]
         for field in fields
@@ -571,12 +590,14 @@ class MetricAccumulator:
         targets: torch.Tensor,
         observer_alive_mask: torch.Tensor,
         diagonal_target_mask: torch.Tensor,
+        known_non_werewolf_mask: torch.Tensor | None = None,
     ) -> None:
         metrics = compute_belief_metrics(
             logits,
             targets,
             observer_alive_mask,
             diagonal_target_mask,
+            known_non_werewolf_mask=known_non_werewolf_mask,
         )
         count = int(metrics["valid_observer_count"])
         self.valid_observer_count += count
@@ -606,6 +627,23 @@ class MetricAccumulator:
             if uniform_kl > 0.0
             else 0.0
         )
+        private_cross_entropy = result.get(
+            "private_admissible_uniform_baseline_mean_cross_entropy"
+        )
+        if private_cross_entropy is not None:
+            private_kl = private_cross_entropy - result[
+                "mean_belief_target_entropy"
+            ]
+            result[
+                "private_admissible_uniform_baseline_mean_kl_divergence"
+            ] = private_kl
+            result[
+                "private_admissible_normalized_reducible_gap_improvement"
+            ] = (
+                1.0 - result["mean_belief_kl_divergence"] / private_kl
+                if private_kl > 0.0
+                else 0.0
+            )
         return result
 
 
@@ -670,6 +708,7 @@ def _loss_and_update(
     targets = batch["belief_targets"]
     observer_alive_mask = batch["observer_alive_mask"]
     diagonal_target_mask = batch["diagonal_target_mask"]
+    known_non_werewolf_mask = batch.get("known_non_werewolf_mask")
     if logits.ndim == 4:
         if targets.shape != logits.shape:
             raise ValueError("dense belief targets must match dense logits")
@@ -677,6 +716,8 @@ def _loss_and_update(
         targets = targets.flatten(0, 1)
         observer_alive_mask = observer_alive_mask.flatten(0, 1)
         diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
+        if known_non_werewolf_mask is not None:
+            known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
     loss = masked_belief_distribution_loss(
         logits,
         targets,
@@ -689,6 +730,7 @@ def _loss_and_update(
         targets=targets,
         observer_alive_mask=observer_alive_mask,
         diagonal_target_mask=diagonal_target_mask,
+        known_non_werewolf_mask=known_non_werewolf_mask,
     )
     return loss
 
@@ -732,17 +774,26 @@ def _update_per_game_metrics(
         item_targets = batch["belief_targets"][batch_index]
         item_alive = batch["observer_alive_mask"][batch_index]
         item_diagonal = batch["diagonal_target_mask"][batch_index]
+        item_known_non_wolf = (
+            batch["known_non_werewolf_mask"][batch_index]
+            if "known_non_werewolf_mask" in batch
+            else None
+        )
         if logits.ndim == 4:
             valid_boundaries = batch["boundary_valid_mask"][batch_index]
             item_logits = item_logits[valid_boundaries]
             item_targets = item_targets[valid_boundaries]
             item_alive = item_alive[valid_boundaries]
             item_diagonal = item_diagonal[valid_boundaries]
+            if item_known_non_wolf is not None:
+                item_known_non_wolf = item_known_non_wolf[valid_boundaries]
         else:
             item_logits = item_logits.unsqueeze(0)
             item_targets = item_targets.unsqueeze(0)
             item_alive = item_alive.unsqueeze(0)
             item_diagonal = item_diagonal.unsqueeze(0)
+            if item_known_non_wolf is not None:
+                item_known_non_wolf = item_known_non_wolf.unsqueeze(0)
         loss = masked_belief_distribution_loss(
             item_logits,
             item_targets,
@@ -755,6 +806,7 @@ def _update_per_game_metrics(
             targets=item_targets,
             observer_alive_mask=item_alive,
             diagonal_target_mask=item_diagonal,
+            known_non_werewolf_mask=item_known_non_wolf,
         )
 
 
@@ -825,11 +877,14 @@ def evaluate_model_with_games(
         targets = batch["belief_targets"]
         observer_alive_mask = batch["observer_alive_mask"]
         diagonal_target_mask = batch["diagonal_target_mask"]
+        known_non_werewolf_mask = batch.get("known_non_werewolf_mask")
         if logits.ndim == 4:
             logits = logits.flatten(0, 1)
             targets = targets.flatten(0, 1)
             observer_alive_mask = observer_alive_mask.flatten(0, 1)
             diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
+            if known_non_werewolf_mask is not None:
+                known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
         loss = masked_belief_distribution_loss(
             logits,
             targets,
@@ -842,6 +897,7 @@ def evaluate_model_with_games(
             targets=targets,
             observer_alive_mask=observer_alive_mask,
             diagonal_target_mask=diagonal_target_mask,
+            known_non_werewolf_mask=known_non_werewolf_mask,
         )
     return accumulator.finalize(), {
         game_id: game_accumulators[game_id].finalize()
@@ -866,14 +922,21 @@ def checkpoint_payload(
 ) -> dict[str, Any]:
     dataset_contract = dict(dataset_contract or {
         "source_schema_version": SAMPLE_SCHEMA_VERSION,
-        "model_input_scope": MODEL_INPUT_SCOPE,
+        "model_input_scope": (
+            PRIVATE_MODEL_INPUT_SCOPE
+            if model.config.private_conditioning
+            else MODEL_INPUT_SCOPE
+        ),
         "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
     })
+    task_contract = checkpoint_task_contract(model.config.private_conditioning)
+    if dataset_contract["model_input_scope"] != task_contract["model_input_scope"]:
+        raise ValueError("checkpoint model and Dataset input scopes differ")
     serialized_config = asdict(config)
     return {
         "schema_version": dataset_contract["source_schema_version"],
-        **checkpoint_task_contract(),
+        **task_contract,
         "training_supervision": dataset_contract.get(
             "training_supervision",
             "independent_pre_boundary_v1",
@@ -985,7 +1048,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         )
         record = {
             "epoch": epoch,
-            **checkpoint_task_contract(),
+            **checkpoint_task_contract(config.private_conditioning),
             "train": train_metrics,
             "validation": validation_metrics,
             "validation_by_game": validation_by_game,
@@ -1039,7 +1102,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         raise RuntimeError("training completed without a best validation epoch")
     summary = {
         "status": "ok",
-        **checkpoint_task_contract(),
+        **checkpoint_task_contract(config.private_conditioning),
         "train_dataset": run_provenance["train_dataset_path"],
         "validation_dataset": run_provenance["validation_dataset_path"],
         "train_sample_count": len(train_dataset),
@@ -1099,6 +1162,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--max-seq-len", type=int, default=256)
     parser.add_argument("--dense-supervision", action="store_true")
+    parser.add_argument("--private-conditioning", action="store_true")
     parser.add_argument("--early-stopping-patience", type=int, default=0)
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     return parser
@@ -1124,6 +1188,7 @@ def main() -> int:
         gradient_clip_norm=args.gradient_clip_norm,
         max_seq_len=args.max_seq_len,
         dense_supervision=args.dense_supervision,
+        private_conditioning=args.private_conditioning,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
     ))

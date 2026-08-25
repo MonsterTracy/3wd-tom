@@ -31,6 +31,21 @@ def make_model():
     )
 
 
+def make_private_model():
+    return ToMBeliefBackbone(
+        ToMBeliefBackboneConfig(max_seq_len=16, private_conditioning=True),
+        backbone_name=GPT2_BLOCK_BACKBONE_NAME,
+    )
+
+
+def make_private_masks(batch_size=2, boundary_count=None):
+    prefix = (batch_size,) if boundary_count is None else (batch_size, boundary_count)
+    known_wolf = torch.zeros((*prefix, 7, 7), dtype=torch.bool)
+    known_non_wolf = torch.eye(7, dtype=torch.bool).expand(*prefix, -1, -1).clone()
+    known_wolf[..., 0, 1] = True
+    return known_wolf, known_non_wolf
+
+
 def test_model_outputs_direct_observer_target_logits():
     model = make_model().eval()
     with torch.no_grad():
@@ -92,14 +107,72 @@ def test_dense_boundary_contract_rejects_future_or_non_monotonic_indices():
         )
 
 
-def test_model_has_no_legacy_objective_or_private_input_api():
+def test_public_model_has_no_private_parameters_or_legacy_objective():
     model = make_model()
     parameters = inspect.signature(model.forward).parameters
-    assert "known_werewolves" not in parameters
-    assert "known_non_werewolves" not in parameters
+    assert "known_werewolf_mask" in parameters
+    assert "known_non_werewolf_mask" in parameters
+    assert not hasattr(model, "known_werewolf_relative_embedding")
+    assert not hasattr(model, "known_non_werewolf_relative_embedding")
     assert model.output_projection.out_features == 7
     assert not hasattr(model, "tom_order")
     assert not hasattr(model.config, "pair_class_count")
+    known_wolf, known_non_wolf = make_private_masks()
+    with pytest.raises(ValueError, match="public model"):
+        model(
+            **make_features(),
+            known_werewolf_mask=known_wolf,
+            known_non_werewolf_mask=known_non_wolf,
+        )
+
+
+def test_private_model_requires_both_disjoint_knowledge_masks():
+    model = make_private_model()
+    features = make_features()
+    known_wolf, known_non_wolf = make_private_masks()
+    with pytest.raises(ValueError, match="requires"):
+        model(**features)
+    with pytest.raises(ValueError, match="together"):
+        model(**features, known_werewolf_mask=known_wolf)
+    known_non_wolf[..., 0, 1] = True
+    with pytest.raises(ValueError, match="disjoint"):
+        model(
+            **features,
+            known_werewolf_mask=known_wolf,
+            known_non_werewolf_mask=known_non_wolf,
+        )
+
+
+def test_private_masks_condition_ordinary_and_dense_observer_queries():
+    model = make_private_model().eval()
+    features = make_features()
+    known_wolf, known_non_wolf = make_private_masks()
+    changed_wolf = known_wolf.clone()
+    changed_wolf[..., 0, 1] = False
+    with torch.no_grad():
+        output = model(
+            **features,
+            known_werewolf_mask=known_wolf,
+            known_non_werewolf_mask=known_non_wolf,
+        )
+        changed = model(
+            **features,
+            known_werewolf_mask=changed_wolf,
+            known_non_werewolf_mask=known_non_wolf,
+        )
+    assert output["belief_logits"].shape == (2, 7, 7)
+    assert not torch.allclose(output["belief_logits"][:, 0], changed["belief_logits"][:, 0])
+
+    dense_wolf, dense_non_wolf = make_private_masks(boundary_count=2)
+    with torch.no_grad():
+        dense = model(
+            **features,
+            boundary_indices=torch.tensor([[0, 2], [1, 3]]),
+            boundary_valid_mask=torch.ones((2, 2), dtype=torch.bool),
+            known_werewolf_mask=dense_wolf,
+            known_non_werewolf_mask=dense_non_wolf,
+        )
+    assert dense["belief_logits"].shape == (2, 2, 7, 7)
 
 
 def test_observer_query_uses_one_shared_attention_module():

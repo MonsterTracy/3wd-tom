@@ -18,7 +18,7 @@ from script.twd_tom.train import TrainingConfig, run_training
 from werewolf.models.twd_tom.belief_backbone import QWEN2_BACKBONE_NAME
 
 
-OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v1"
+OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v2"
 DEFAULT_TARGET_IMPROVEMENT = 0.50
 
 
@@ -70,6 +70,23 @@ def _weighted_metrics(
         if uniform_kl > 0.0
         else 0.0
     )
+    private_cross_entropy = result.get(
+        "private_admissible_uniform_baseline_mean_cross_entropy"
+    )
+    if private_cross_entropy is not None:
+        private_kl = float(private_cross_entropy) - float(
+            result["mean_belief_target_entropy"]
+        )
+        result[
+            "private_admissible_uniform_baseline_mean_kl_divergence"
+        ] = private_kl
+        result[
+            "private_admissible_normalized_reducible_gap_improvement"
+        ] = (
+            1.0 - float(result["mean_belief_kl_divergence"]) / private_kl
+            if private_kl > 0.0
+            else 0.0
+        )
     return result
 
 
@@ -169,8 +186,12 @@ def run_development_oof(
     device: str = "auto",
     bootstrap_samples: int = 2000,
     target_improvement: float = DEFAULT_TARGET_IMPROVEMENT,
+    private_conditioning: bool = False,
 ) -> dict[str, Any]:
     """Train every fold, resume completed folds, and aggregate OOF games."""
+
+    if not isinstance(private_conditioning, bool):
+        raise TypeError("private_conditioning must be bool")
 
     # Keep the lexical project path so repository symlinks remain valid
     # provenance paths; validators resolve their physical targets separately.
@@ -199,6 +220,8 @@ def run_development_oof(
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_min_delta": early_stopping_min_delta,
     }
+    if private_conditioning:
+        requested_config["private_conditioning"] = True
     fold_summaries: dict[str, dict[str, Any]] = {}
     for fold_name in fold_names:
         fold_dir = resolved_fold_root / fold_name
@@ -234,6 +257,7 @@ def run_development_oof(
                 max_seq_len=256,
                 backbone=QWEN2_BACKBONE_NAME,
                 dense_supervision=True,
+                private_conditioning=private_conditioning,
                 early_stopping_patience=early_stopping_patience,
                 early_stopping_min_delta=early_stopping_min_delta,
             ))
@@ -246,9 +270,16 @@ def run_development_oof(
             if game_id in oof_by_game:
                 raise ValueError(f"OOF game appears in multiple folds: {game_id}")
             oof_by_game[game_id] = metrics
-        for baseline_name in ("train_global_prior", "train_phase_prior"):
+        for baseline_name, baseline_report in summary[
+            "validation_baselines"
+        ].items():
+            if (
+                not isinstance(baseline_report, Mapping)
+                or "by_game" not in baseline_report
+            ):
+                continue
             target = baseline_by_name.setdefault(baseline_name, {})
-            by_game = summary["validation_baselines"][baseline_name]["by_game"]
+            by_game = baseline_report["by_game"]
             overlap = set(target) & set(by_game)
             if overlap:
                 raise ValueError(
@@ -266,7 +297,12 @@ def run_development_oof(
         }
         for name, by_game in baseline_by_name.items()
     }
-    achieved = float(weighted["normalized_reducible_gap_improvement"])
+    primary_metric = (
+        "private_admissible_normalized_reducible_gap_improvement"
+        if private_conditioning
+        else "normalized_reducible_gap_improvement"
+    )
+    achieved = float(weighted[primary_metric])
     result = {
         "schema_version": OOF_SUMMARY_SCHEMA_VERSION,
         "status": "ok",
@@ -296,13 +332,13 @@ def run_development_oof(
         "oof_game_macro_metrics": _macro_metrics(oof_by_game),
         "oof_game_bootstrap_ci": _bootstrap_game_macro(
             oof_by_game,
-            metric_name="normalized_reducible_gap_improvement",
+            metric_name=primary_metric,
             samples=bootstrap_samples,
             seed=seed,
         ),
         "oof_baselines": baselines,
         "acceptance_gate": {
-            "metric": "observer_weighted_normalized_reducible_gap_improvement",
+            "metric": f"observer_weighted_{primary_metric}",
             "threshold": target_improvement,
             "achieved": achieved,
             "passed": achieved >= target_improvement,
@@ -330,6 +366,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--target-improvement", type=float, default=0.50)
+    parser.add_argument("--private-conditioning", action="store_true")
     return parser
 
 
@@ -349,6 +386,7 @@ def main() -> int:
         device=args.device,
         bootstrap_samples=args.bootstrap_samples,
         target_improvement=args.target_improvement,
+        private_conditioning=args.private_conditioning,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

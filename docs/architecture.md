@@ -5,7 +5,8 @@
 tom-v2 预测目标玩家在时间 `t` 的主观狼人怀疑：
 
 ```text
-输入：public_history <= t + observer_id
+公开模型输入：public_history < t + observer_id
+一阶私有模型输入：public_history < t + observer_id + K+_observer + K-_observer
 输出：B_t(observer, target_player)
 ```
 
@@ -39,17 +40,17 @@ flowchart LR
 - online shadow inference；
 - tom-v1 formal reporter 与 pilot pipeline。
 
-Dataset 只以结构化公开事件作为模型特征。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合仅在 `P - F` 上均分，并且仅当 `R` 为空时合法。`observer_alive_mask` 控制有效行，`diagonal_target_mask` 只排除自身列。死亡玩家仍保留为 target；hard knowledge 不进入模型特征。
+Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合仅在 `P - F` 上均分，并且仅当 `R` 为空时合法。`observer_alive_mask` 控制有效行，`diagonal_target_mask` 只排除自身列，死亡玩家仍保留为 target。公开模型不返回 hard knowledge；并行的一阶私有模型额外返回每个 observer 自己的 `K+ / K-` mask，不使用 role truth 或其他人的私有 observation。
 
 ## 模型目标
 
 模型通过结构化公开事件的因果编码和共享 observer query，直接输出
 `belief_logits[B, 7, 7]`。第二维对应 observer，第三维对应 target player。
 训练损失仅聚合 `observer_alive_mask` 选中的行，并在每行 softmax 前用
-`diagonal_target_mask` 排除自身列。不存在 21 类组合空间、pair 投影或私有知识输入。
+`diagonal_target_mask` 排除自身列。公开版本直接使用 observer query；一阶私有版本把 `K+ / K-` 中每个 target 转成 observer-relative seat embedding 并求和，再加入相同的 query。私有 mask 不参与 hard masking 或 label conversion。不存在 21 类组合空间或 pair 投影。
 
 训练时可应用通用座位循环旋转：同一置换同时作用于 observer、target、公开事件中的玩家引用、belief target 的行列以及 mask；验证和 evaluation 不旋转。
 
 正式 dense 训练把同一局所有 snapshot 按 `step_idx` 排序，验证每个 encoded history 都是最终 PRE 序列的精确前缀，然后用 boundary-specific causal mask 输出 `belief_logits[B, Q, 7, 7]`。`Q` 是该局 strict-PRE 边界数，padding boundary 不参与损失；单边界 gameplay inference 仍保持 `belief_logits[B, 7, 7]`。若 256-token 窗口截断破坏精确前缀关系，数据审计和 Dataset 都直接失败，不改写历史或丢弃边界。
 
-模型选择只在原 train+validation 组成的开发集上执行 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。
+模型选择只在原 train+validation 组成的开发集上执行 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。一阶私有实验使用独立输出目录和 checkpoint scope，并以相对 `private_admissible_uniform` 的 normalized reducible-gap improvement 为主门槛；它与公开模型结果并列报告，不覆盖公开模型。

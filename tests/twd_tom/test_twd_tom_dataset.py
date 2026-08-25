@@ -14,6 +14,7 @@ from werewolf.models.twd_tom.belief_labels import (
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
+    PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
     TWDToMDataset,
@@ -442,6 +443,54 @@ def test_model_features_do_not_depend_on_private_knowledge(
     assert "known_non_werewolves" not in second_item
 
 
+def test_private_conditioned_dataset_emits_only_observer_knowledge_masks(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory(
+        suspicions_by_observer={1: ["player2"]}
+    )
+    sample["known_werewolves"]["player1"] = ["player2"]
+    item = TWDToMDataset([sample], include_private_features=True)[0]
+
+    assert item["known_werewolf_mask"].shape == (7, 7)
+    assert item["known_non_werewolf_mask"].shape == (7, 7)
+    assert item["known_werewolf_mask"].dtype == torch.bool
+    assert item["known_non_werewolf_mask"].dtype == torch.bool
+    assert item["known_werewolf_mask"][0, 1]
+    assert item["known_non_werewolf_mask"][0, 0]
+    assert not torch.any(
+        item["known_werewolf_mask"] & item["known_non_werewolf_mask"]
+    )
+    assert item["metadata"]["private_feature_fields"] == [
+        "known_werewolves",
+        "known_non_werewolves",
+    ]
+    assert TWDToMDataset(
+        [sample], include_private_features=True
+    ).model_input_scope == PRIVATE_MODEL_INPUT_SCOPE
+
+
+def test_private_knowledge_masks_follow_cyclic_seat_rotation(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory(
+        observers=(1, 2, 5),
+        suspicions_by_observer={1: ["player4"], 2: ["player7"], 5: ["player3"]},
+    )
+    sample["known_non_werewolves"]["player1"] = ["player1", "player6"]
+    baseline = TWDToMDataset([sample], include_private_features=True)[0]
+    rotated = TWDToMDataset(
+        [cyclically_rotate_belief_sample(sample, shift=2)],
+        include_private_features=True,
+    )[0]
+
+    for field_name in ("known_werewolf_mask", "known_non_werewolf_mask"):
+        assert torch.equal(
+            rotated[field_name],
+            torch.roll(baseline[field_name], shifts=(2, 2), dims=(0, 1)),
+        )
+
+
 def test_target_rows_follow_canonical_player_indices(suspicion_sample_factory):
     sample = suspicion_sample_factory(
         observers=(2, 5),
@@ -491,6 +540,24 @@ def test_dense_collate_right_pads_timelines_and_boundaries(
     ]
     assert not batch["observer_alive_mask"][1, 1].any()
     assert not batch["belief_targets"][1, 1].any()
+
+
+def test_dense_private_masks_are_stacked_and_padded_per_boundary(
+    suspicion_sample_factory,
+):
+    first = suspicion_sample_factory(game_id="dense_a", step_idx=1)
+    second = _later_dense_snapshot(first)
+    other = suspicion_sample_factory(game_id="dense_b", step_idx=1)
+    dataset = DenseTWDToMDataset(
+        [first, second, other],
+        include_private_features=True,
+    )
+    batch = collate_dense_twd_tom_games([dataset[0], dataset[1]])
+
+    assert batch["known_werewolf_mask"].shape == (2, 2, 7, 7)
+    assert batch["known_non_werewolf_mask"].shape == (2, 2, 7, 7)
+    assert not batch["known_werewolf_mask"][1, 1].any()
+    assert not batch["known_non_werewolf_mask"][1, 1].any()
 
 
 def test_dense_dataset_rejects_annotation_history_that_is_not_an_exact_prefix(

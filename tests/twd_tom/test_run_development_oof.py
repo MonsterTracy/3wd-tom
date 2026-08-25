@@ -61,3 +61,25 @@ def test_game_bootstrap_is_deterministic_and_uses_games_as_units():
     assert first["unit"] == "game"
     assert first["game_count"] == 2
     assert first["ci95_lower"] <= first["point_estimate"] <= first["ci95_upper"]
+
+
+def test_oof_weighting_recomputes_private_admissible_reducible_gap():
+    by_game = {
+        "game_a": {
+            **_game_metrics(count=3, model_kl=0.4),
+            "private_admissible_uniform_baseline_mean_cross_entropy": 1.5,
+        },
+        "game_b": {
+            **_game_metrics(count=1, model_kl=0.8),
+            "private_admissible_uniform_baseline_mean_cross_entropy": 1.5,
+        },
+    }
+
+    result = _weighted_metrics(by_game)
+
+    assert result[
+        "private_admissible_uniform_baseline_mean_kl_divergence"
+    ] == pytest.approx(1.0)
+    assert result[
+        "private_admissible_normalized_reducible_gap_improvement"
+    ] == pytest.approx(0.5)

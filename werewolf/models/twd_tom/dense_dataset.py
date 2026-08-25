@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.dataset import (
     MODEL_INPUT_SCOPE,
+    PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
     TWDToMDataset,
@@ -61,6 +62,7 @@ class DenseTWDToMDataset(Dataset):
         target_dtype: torch.dtype = torch.float32,
         enable_cyclic_rotation: bool = False,
         augmentation_seed: int = 0,
+        include_private_features: bool = False,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -68,6 +70,8 @@ class DenseTWDToMDataset(Dataset):
             raise ValueError("dense dataset samples cannot be empty")
         if not isinstance(enable_cyclic_rotation, bool):
             raise TypeError("enable_cyclic_rotation must be bool")
+        if not isinstance(include_private_features, bool):
+            raise TypeError("include_private_features must be bool")
         deterministic_cyclic_shift(
             seed=augmentation_seed,
             epoch=0,
@@ -78,19 +82,25 @@ class DenseTWDToMDataset(Dataset):
         self.target_dtype = target_dtype
         self.enable_cyclic_rotation = enable_cyclic_rotation
         self.augmentation_seed = augmentation_seed
+        self.include_private_features = include_private_features
         self._epoch = 0
-        self.model_input_scope = MODEL_INPUT_SCOPE
+        self.model_input_scope = (
+            PRIVATE_MODEL_INPUT_SCOPE
+            if include_private_features
+            else MODEL_INPUT_SCOPE
+        )
         self.target_semantics = TARGET_SEMANTICS
         self.target_conversion = TARGET_CONVERSION
         self.supervision_version = DENSE_SUPERVISION_VERSION
 
-        # Validate every raw game once at construction without retaining private
-        # fields in materialized items.
+        # Validate every raw game once at construction. Raw private values are
+        # materialized only as boolean masks when the explicit mode is enabled.
         for game in self._raw_games:
             TWDToMDataset(
                 game,
                 feature_builder=self.feature_builder,
                 target_dtype=self.target_dtype,
+                include_private_features=self.include_private_features,
             )
 
     @classmethod
@@ -142,6 +152,7 @@ class DenseTWDToMDataset(Dataset):
             raw_game,
             feature_builder=self.feature_builder,
             target_dtype=self.target_dtype,
+            include_private_features=self.include_private_features,
         )
         snapshots = [
             snapshot_dataset[snapshot_index]
@@ -170,7 +181,7 @@ class DenseTWDToMDataset(Dataset):
             boundary_indices.append(boundary_index)
             previous_boundary = boundary_index
 
-        return {
+        result = {
             **full_features,
             "boundary_indices": torch.tensor(boundary_indices, dtype=torch.long),
             "boundary_valid_mask": torch.ones(len(snapshots), dtype=torch.bool),
@@ -199,6 +210,15 @@ class DenseTWDToMDataset(Dataset):
                 "target_conversion": TARGET_CONVERSION,
             },
         }
+        if self.include_private_features:
+            result.update({
+                field: torch.stack([snapshot[field] for snapshot in snapshots])
+                for field in (
+                    "known_werewolf_mask",
+                    "known_non_werewolf_mask",
+                )
+            })
+        return result
 
 
 def collate_dense_twd_tom_games(
@@ -230,6 +250,26 @@ def collate_dense_twd_tom_games(
     diagonal_target_mask = diagonal.view(1, 1, NUM_PLAYERS, NUM_PLAYERS).expand(
         len(batch), max_boundaries, -1, -1
     ).clone()
+    private_fields = ("known_werewolf_mask", "known_non_werewolf_mask")
+    private_presence = [
+        tuple(field in item for field in private_fields)
+        for item in batch
+    ]
+    if any(any(presence) and not all(presence) for presence in private_presence):
+        raise ValueError("private knowledge masks must be supplied together")
+    if len(set(private_presence)) != 1:
+        raise ValueError("batch cannot mix public and private-conditioned games")
+    private_masks = (
+        {
+            field: torch.zeros(
+                (len(batch), max_boundaries, NUM_PLAYERS, NUM_PLAYERS),
+                dtype=torch.bool,
+            )
+            for field in private_fields
+        }
+        if all(private_presence[0])
+        else {}
+    )
 
     for batch_index, item in enumerate(batch):
         length = item["subject_ids"].shape[0]
@@ -251,9 +291,12 @@ def collate_dense_twd_tom_games(
             diagonal_target_mask[batch_index, :boundary_count],
         ):
             raise ValueError("dense diagonal target masks must exclude only self")
+        for field in private_masks:
+            private_masks[field][batch_index, :boundary_count] = item[field]
 
     return {
         **padded_features,
+        **private_masks,
         "boundary_indices": boundary_indices,
         "boundary_valid_mask": boundary_valid_mask,
         "belief_targets": belief_targets,

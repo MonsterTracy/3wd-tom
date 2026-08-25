@@ -45,6 +45,23 @@ class _MetricMean:
             if uniform_kl > 0.0
             else 0.0
         )
+        private_cross_entropy = result.get(
+            "private_admissible_uniform_baseline_mean_cross_entropy"
+        )
+        if private_cross_entropy is not None:
+            private_kl = float(private_cross_entropy) - float(
+                result["mean_belief_target_entropy"]
+            )
+            result[
+                "private_admissible_uniform_baseline_mean_kl_divergence"
+            ] = private_kl
+            result[
+                "private_admissible_normalized_reducible_gap_improvement"
+            ] = (
+                1.0 - float(result["mean_belief_kl_divergence"]) / private_kl
+                if private_kl > 0.0
+                else 0.0
+            )
         return result
 
 
@@ -152,6 +169,25 @@ def _evaluate_prior_for_game(
         item["belief_targets"],
         item["observer_alive_mask"],
         item["diagonal_target_mask"],
+        known_non_werewolf_mask=item.get("known_non_werewolf_mask"),
+    )
+
+
+def _evaluate_private_uniform_for_game(
+    item: Mapping[str, Any],
+) -> dict[str, int | float]:
+    known_non_wolves = item.get("known_non_werewolf_mask")
+    if not isinstance(known_non_wolves, torch.Tensor):
+        raise ValueError("private uniform baseline requires private features")
+    admissible = item["diagonal_target_mask"] & ~known_non_wolves
+    probabilities = admissible.to(dtype=item["belief_targets"].dtype)
+    probabilities /= admissible.sum(dim=-1, keepdim=True).clamp_min(1)
+    return compute_belief_metrics(
+        _prior_logits(probabilities),
+        item["belief_targets"],
+        item["observer_alive_mask"],
+        item["diagonal_target_mask"],
+        known_non_werewolf_mask=known_non_wolves,
     )
 
 
@@ -199,6 +235,23 @@ def evaluate_dense_empirical_priors(
             ]
             by_game[game_id] = game_report
         reports[name] = {
+            "aggregate": aggregate.finalize(),
+            "by_game": dict(sorted(by_game.items())),
+        }
+    if dataset.include_private_features:
+        aggregate = _MetricMean()
+        by_game = {}
+        for item_index in range(len(dataset)):
+            item = dataset[item_index]
+            game_id = item["metadata"]["game_id"]
+            metrics = _evaluate_private_uniform_for_game(item)
+            aggregate.update(metrics)
+            game_report = dict(metrics)
+            game_report["mean_loss"] = game_report[
+                "mean_belief_cross_entropy"
+            ]
+            by_game[game_id] = game_report
+        reports["private_admissible_uniform"] = {
             "aggregate": aggregate.finalize(),
             "by_game": dict(sorted(by_game.items())),
         }
