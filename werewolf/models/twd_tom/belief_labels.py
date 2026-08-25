@@ -41,15 +41,13 @@ def suspicion_set_to_belief_vector(
         closed_non_wolves,
         observer_id=observer,
     )
+    if not suspected:
+        raise ValueError(
+            "empty suspicion is an unobserved label, not a probability distribution"
+        )
     target = torch.zeros(NUM_PLAYERS, dtype=dtype, device=device)
-    if suspected:
-        for player in suspected:
-            target[PLAYER_TO_ID[player] - 1] = 1.0
-    else:
-        forbidden = set(closed_non_wolves) | {observer}
-        for player in PLAYER_NAMES:
-            if player not in forbidden:
-                target[PLAYER_TO_ID[player] - 1] = 1.0
+    for player in suspected:
+        target[PLAYER_TO_ID[player] - 1] = 1.0
     if target.sum().item() == 0.0:
         raise RuntimeError("hard knowledge leaves no admissible target player")
     target /= target.sum()
@@ -66,6 +64,49 @@ def suspicion_set_to_belief_vector(
     ):
         raise RuntimeError("constructed belief target must sum to one")
     return target
+
+
+def legacy_v1_suspicion_set_to_belief_vector(
+    suspected_werewolves: Any,
+    *,
+    observer_id: Any,
+    known_werewolves: Any,
+    known_non_werewolves: Any,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Reproduce the historical V1 empty-to-uniform target conversion."""
+
+    if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
+        raise TypeError("dtype must be a floating-point torch dtype")
+    observer = normalize_player(observer_id)
+    closed_wolves, closed_non_wolves = close_hard_knowledge(
+        known_werewolves,
+        known_non_werewolves,
+    )
+    suspected = validate_player_suspicion(
+        suspected_werewolves,
+        closed_wolves,
+        closed_non_wolves,
+        observer_id=observer,
+    )
+    if suspected:
+        return suspicion_set_to_belief_vector(
+            suspected,
+            observer_id=observer,
+            known_werewolves=closed_wolves,
+            known_non_werewolves=closed_non_wolves,
+            dtype=dtype,
+            device=device,
+        )
+    target = torch.zeros(NUM_PLAYERS, dtype=dtype, device=device)
+    forbidden = set(closed_non_wolves) | {observer}
+    for player in PLAYER_NAMES:
+        if player not in forbidden:
+            target[PLAYER_TO_ID[player] - 1] = 1.0
+    if target.sum().item() == 0.0:
+        raise RuntimeError("hard knowledge leaves no admissible target player")
+    return target / target.sum()
 
 
 def canonicalize_known_players(values: Any, *, field_name: str) -> list[str]:
@@ -110,6 +151,7 @@ def close_hard_knowledge(
     ]
     return closed_wolves, closed_non_wolves
 __all__ = [
+    "legacy_v1_suspicion_set_to_belief_vector",
     "suspicion_set_to_belief_vector",
     "canonicalize_known_players",
     "close_hard_knowledge",

@@ -13,6 +13,10 @@ from script.twd_tom.materialize_development_folds import (
     DEVELOPMENT_FOLD_MANIFEST_FILENAME,
     validate_development_fold_paths,
 )
+from script.twd_tom.export_belief_worst_cases import (
+    aggregate_worst_case_exports,
+    export_belief_worst_cases,
+)
 from script.twd_tom.train import (
     TrainingConfig,
     bootstrap_game_macro_metric,
@@ -26,14 +30,20 @@ from werewolf.models.twd_tom.belief_backbone import (
     SUPPORTED_BACKBONE_NAMES,
     SUPPORTED_INPUT_FEATURE_PROFILES,
 )
+from werewolf.models.twd_tom.annotation_v2 import (
+    BELIEF_ANNOTATION_SOURCES,
+    SPEECH_ANNOTATION_SOURCES,
+    V1_ANNOTATION_SOURCE,
+    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+)
 from werewolf.models.twd_tom.supervision import (
     ALL_ALIVE_SCOPE,
     SUPERVISION_SCOPES,
 )
 
 
-OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v3"
-DEFAULT_TARGET_IMPROVEMENT = 0.50
+OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v4"
+DEFAULT_REFERENCE_IMPROVEMENT = 0.50
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -83,8 +93,13 @@ def _weighted_metrics(
         "uniform_non_self_baseline_mean_kl_divergence",
         "private_admissible_uniform_baseline_mean_kl_divergence",
     }
+    count_fields = {
+        "scope_observer_count",
+        "observed_label_row_count_in_scope",
+        "unobserved_label_row_count_in_scope",
+    }
     for name in sorted(names):
-        if name.endswith("_row_count"):
+        if name.endswith("_row_count") or name in count_fields:
             result[name] = sum(
                 int(metrics[name]) for metrics in by_game.values()
             )
@@ -218,12 +233,17 @@ def run_development_oof(
     seed: int = 42,
     device: str = "auto",
     bootstrap_samples: int = 2000,
-    target_improvement: float = DEFAULT_TARGET_IMPROVEMENT,
+    reference_improvement: float = DEFAULT_REFERENCE_IMPROVEMENT,
     private_conditioning: bool = False,
     backbone: str = QWEN2_BACKBONE_NAME,
     input_feature_profile: str = FULL_INPUT_FEATURE_PROFILE,
     role_sidecar_path: str | Path | None = None,
     supervision_scope: str = ALL_ALIVE_SCOPE,
+    speech_annotation_source: str = V1_ANNOTATION_SOURCE,
+    belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    speech_v2_annotation_path: str | Path | None = None,
+    belief_v2_annotation_path: str | Path | None = None,
+    worst_case_limit: int = 50,
 ) -> dict[str, Any]:
     """Train every fold, resume completed folds, and aggregate OOF games."""
 
@@ -238,14 +258,40 @@ def run_development_oof(
         )
     if supervision_scope not in SUPERVISION_SCOPES:
         raise ValueError(f"supervision_scope must be one of {SUPERVISION_SCOPES}")
+    if speech_annotation_source not in SPEECH_ANNOTATION_SOURCES:
+        raise ValueError(
+            "speech_annotation_source must be one of "
+            f"{SPEECH_ANNOTATION_SOURCES}"
+        )
+    if belief_annotation_source not in BELIEF_ANNOTATION_SOURCES:
+        raise ValueError(
+            "belief_annotation_source must be one of "
+            f"{BELIEF_ANNOTATION_SOURCES}"
+        )
     if role_sidecar_path is None:
         raise ValueError(
             "diagnostic OOF requires a role sidecar for complete role strata"
         )
+    if (
+        isinstance(worst_case_limit, bool)
+        or not isinstance(worst_case_limit, int)
+        or worst_case_limit <= 0
+    ):
+        raise ValueError("worst_case_limit must be a positive integer")
     resolved_role_sidecar = (
         None
         if role_sidecar_path is None
         else str(Path(os.path.abspath(role_sidecar_path)))
+    )
+    resolved_speech_v2 = (
+        None
+        if speech_v2_annotation_path is None
+        else str(Path(os.path.abspath(speech_v2_annotation_path)))
+    )
+    resolved_belief_v2 = (
+        None
+        if belief_v2_annotation_path is None
+        else str(Path(os.path.abspath(belief_v2_annotation_path)))
     )
 
     # Keep the lexical project path so repository symlinks remain valid
@@ -277,10 +323,15 @@ def run_development_oof(
         "early_stopping_min_delta": early_stopping_min_delta,
         "role_sidecar_path": resolved_role_sidecar,
         "supervision_scope": supervision_scope,
+        "speech_annotation_source": speech_annotation_source,
+        "belief_annotation_source": belief_annotation_source,
+        "speech_v2_annotation_path": resolved_speech_v2,
+        "belief_v2_annotation_path": resolved_belief_v2,
     }
     if private_conditioning:
         requested_config["private_conditioning"] = True
     fold_summaries: dict[str, dict[str, Any]] = {}
+    fold_worst_case_reports: dict[str, dict[str, Any]] = {}
     for fold_name in fold_names:
         fold_dir = resolved_fold_root / fold_name
         train_path = fold_dir / "train.jsonl"
@@ -288,6 +339,32 @@ def run_development_oof(
         validate_development_fold_paths(train_path, validation_path)
         fold_output = resolved_output / fold_name
         summary_path = fold_output / "summary.json"
+        fold_config = TrainingConfig(
+            output_dir=str(fold_output),
+            dataset_path=str(train_path),
+            validation_dataset_path=str(validation_path),
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            lr_scheduler="warmup_cosine",
+            warmup_ratio=warmup_ratio,
+            min_learning_rate=min_learning_rate,
+            seed=seed,
+            device=device,
+            max_seq_len=256,
+            backbone=backbone,
+            input_feature_profile=input_feature_profile,
+            dense_supervision=True,
+            private_conditioning=private_conditioning,
+            role_sidecar_path=resolved_role_sidecar,
+            supervision_scope=supervision_scope,
+            early_stopping_patience=early_stopping_patience,
+            early_stopping_min_delta=early_stopping_min_delta,
+            speech_annotation_source=speech_annotation_source,
+            belief_annotation_source=belief_annotation_source,
+            speech_v2_annotation_path=resolved_speech_v2,
+            belief_v2_annotation_path=resolved_belief_v2,
+        )
         if summary_path.is_file():
             summary = _load_json(summary_path)
             _validate_completed_fold_summary(
@@ -300,29 +377,28 @@ def run_development_oof(
                 raise FileExistsError(
                     f"incomplete fold output must be inspected before retry: {fold_output}"
                 )
-            summary = run_training(TrainingConfig(
-                output_dir=str(fold_output),
-                dataset_path=str(train_path),
-                validation_dataset_path=str(validation_path),
-                epochs=epochs,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
-                lr_scheduler="warmup_cosine",
-                warmup_ratio=warmup_ratio,
-                min_learning_rate=min_learning_rate,
-                seed=seed,
-                device=device,
-                max_seq_len=256,
-                backbone=backbone,
-                input_feature_profile=input_feature_profile,
-                dense_supervision=True,
-                private_conditioning=private_conditioning,
-                role_sidecar_path=resolved_role_sidecar,
-                supervision_scope=supervision_scope,
-                early_stopping_patience=early_stopping_patience,
-                early_stopping_min_delta=early_stopping_min_delta,
-            ))
+            summary = run_training(fold_config)
         fold_summaries[fold_name] = summary
+        worst_jsonl = fold_output / "worst_cases.jsonl"
+        worst_csv = fold_output / "worst_cases.csv"
+        if worst_jsonl.is_file() != worst_csv.is_file():
+            raise FileExistsError(
+                f"incomplete fold worst-case export: {fold_output}"
+            )
+        if worst_jsonl.is_file():
+            fold_worst_case_reports[fold_name] = {
+                "status": "existing",
+                "output_jsonl": str(worst_jsonl),
+                "output_csv": str(worst_csv),
+            }
+        else:
+            fold_worst_case_reports[fold_name] = export_belief_worst_cases(
+                config=fold_config,
+                checkpoint_path=fold_output / "best.pt",
+                output_jsonl=worst_jsonl,
+                output_csv=worst_csv,
+                limit=worst_case_limit,
+            )
 
     oof_by_game: dict[str, dict[str, int | float]] = {}
     oof_stratified_by_game: dict[str, dict[str, Any]] = {}
@@ -400,6 +476,15 @@ def run_development_oof(
         else "normalized_reducible_gap_improvement"
     )
     achieved = float(weighted[primary_metric])
+    aggregate_worst_cases = aggregate_worst_case_exports(
+        input_jsonl_paths=[
+            resolved_output / fold_name / "worst_cases.jsonl"
+            for fold_name in fold_names
+        ],
+        output_jsonl=resolved_output / "worst_cases.jsonl",
+        output_csv=resolved_output / "worst_cases.csv",
+        limit=worst_case_limit,
+    )
     result = {
         "schema_version": OOF_SUMMARY_SCHEMA_VERSION,
         "status": "ok",
@@ -438,11 +523,15 @@ def run_development_oof(
             seed=seed,
         ),
         "oof_baselines": baselines,
-        "acceptance_gate": {
+        "fold_worst_case_exports": fold_worst_case_reports,
+        "oof_worst_case_export": aggregate_worst_cases,
+        "descriptive_reference_target": {
             "metric": f"observer_weighted_{primary_metric}",
-            "threshold": target_improvement,
+            "reference_value": reference_improvement,
             "achieved": achieved,
-            "passed": achieved >= target_improvement,
+            "difference_from_reference": achieved - reference_improvement,
+            "is_acceptance_gate": False,
+            "reason": "repeatability_ceiling_not_yet_established",
         },
         "oof_by_game": dict(sorted(oof_by_game.items())),
         "oof_stratified_by_game": dict(sorted(oof_stratified_by_game.items())),
@@ -467,7 +556,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
-    parser.add_argument("--target-improvement", type=float, default=0.50)
+    parser.add_argument("--reference-improvement", type=float, default=0.50)
     parser.add_argument("--private-conditioning", action="store_true")
     parser.add_argument(
         "--backbone",
@@ -485,6 +574,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_INPUT_FEATURE_PROFILES,
         default=FULL_INPUT_FEATURE_PROFILE,
     )
+    parser.add_argument(
+        "--speech-annotation-source",
+        choices=SPEECH_ANNOTATION_SOURCES,
+        default=V1_ANNOTATION_SOURCE,
+    )
+    parser.add_argument(
+        "--belief-annotation-source",
+        choices=BELIEF_ANNOTATION_SOURCES,
+        default=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    )
+    parser.add_argument("--speech-v2-annotations")
+    parser.add_argument("--belief-v2-annotations")
+    parser.add_argument("--worst-case-limit", type=int, default=50)
     return parser
 
 
@@ -503,12 +605,17 @@ def main() -> int:
         seed=args.seed,
         device=args.device,
         bootstrap_samples=args.bootstrap_samples,
-        target_improvement=args.target_improvement,
+        reference_improvement=args.reference_improvement,
         private_conditioning=args.private_conditioning,
         backbone=args.backbone,
         input_feature_profile=args.input_feature_profile,
         role_sidecar_path=args.role_sidecar,
         supervision_scope=args.supervision_scope,
+        speech_annotation_source=args.speech_annotation_source,
+        belief_annotation_source=args.belief_annotation_source,
+        speech_v2_annotation_path=args.speech_v2_annotations,
+        belief_v2_annotation_path=args.belief_v2_annotations,
+        worst_case_limit=args.worst_case_limit,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

@@ -11,13 +11,14 @@ import torch
 from torch.utils.data import Dataset
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.annotation_v2 import (
+    V1_ANNOTATION_SOURCE,
+    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+)
 from werewolf.models.twd_tom.dataset import (
     MODEL_INPUT_SCOPE,
     PRIVATE_MODEL_INPUT_SCOPE,
-    TARGET_CONVERSION,
-    TARGET_SEMANTICS,
     TWDToMDataset,
-    cyclically_rotate_belief_sample,
     deterministic_cyclic_shift,
 )
 from werewolf.models.twd_tom.schema import NUM_PLAYERS
@@ -25,7 +26,6 @@ from werewolf.models.twd_tom.supervision import (
     ALL_ALIVE_SCOPE,
     SUPERVISION_SCOPES,
     normalize_observer_roles,
-    rotate_observer_roles,
 )
 
 
@@ -71,6 +71,14 @@ class DenseTWDToMDataset(Dataset):
         include_private_features: bool = False,
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
+        speech_annotation_source: str = V1_ANNOTATION_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        speech_v2_annotations: Mapping[
+            tuple[str, int], Mapping[str, Any]
+        ] | None = None,
+        belief_v2_annotations: Mapping[
+            tuple[str, int, str], Mapping[str, Any]
+        ] | None = None,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -102,20 +110,23 @@ class DenseTWDToMDataset(Dataset):
             for game_id, roles in (observer_roles_by_game or {}).items()
         }
         self.supervision_scope = supervision_scope
+        self.speech_annotation_source = speech_annotation_source
+        self.belief_annotation_source = belief_annotation_source
+        self.speech_v2_annotations = speech_v2_annotations
+        self.belief_v2_annotations = belief_v2_annotations
         self._epoch = 0
         self.model_input_scope = (
             PRIVATE_MODEL_INPUT_SCOPE
             if include_private_features
             else MODEL_INPUT_SCOPE
         )
-        self.target_semantics = TARGET_SEMANTICS
-        self.target_conversion = TARGET_CONVERSION
         self.supervision_version = DENSE_SUPERVISION_VERSION
 
         # Validate every raw game once at construction. Raw private values are
         # materialized only as boolean masks when the explicit mode is enabled.
+        contract_dataset = None
         for game in self._raw_games:
-            TWDToMDataset(
+            validated_dataset = TWDToMDataset(
                 game,
                 feature_builder=self.feature_builder,
                 target_dtype=self.target_dtype,
@@ -124,7 +135,20 @@ class DenseTWDToMDataset(Dataset):
                     self.observer_roles_by_game or None
                 ),
                 supervision_scope=self.supervision_scope,
+                speech_annotation_source=self.speech_annotation_source,
+                belief_annotation_source=self.belief_annotation_source,
+                speech_v2_annotations=self.speech_v2_annotations,
+                belief_v2_annotations=self.belief_v2_annotations,
             )
+            if contract_dataset is None:
+                contract_dataset = validated_dataset
+        if contract_dataset is None:
+            raise AssertionError("dense dataset validation produced no game")
+        self.target_semantics = contract_dataset.target_semantics
+        self.target_conversion = contract_dataset.target_conversion
+        self.label_observation_semantics = (
+            contract_dataset.label_observation_semantics
+        )
 
     @classmethod
     def from_jsonl(
@@ -167,15 +191,9 @@ class DenseTWDToMDataset(Dataset):
                 epoch=self._epoch,
                 sample_index=index,
             )
-            raw_game = [
-                cyclically_rotate_belief_sample(sample, shift=shift)
-                for sample in raw_game
-            ]
 
         game_id = raw_game[0]["game_id"]
         roles = self.observer_roles_by_game.get(game_id)
-        if roles is not None and shift:
-            roles = rotate_observer_roles(roles, shift=shift)
         roles_by_game = {game_id: roles} if roles is not None else None
 
         snapshot_dataset = TWDToMDataset(
@@ -185,6 +203,11 @@ class DenseTWDToMDataset(Dataset):
             include_private_features=self.include_private_features,
             observer_roles_by_game=roles_by_game,
             supervision_scope=self.supervision_scope,
+            speech_annotation_source=self.speech_annotation_source,
+            belief_annotation_source=self.belief_annotation_source,
+            speech_v2_annotations=self.speech_v2_annotations,
+            belief_v2_annotations=self.belief_v2_annotations,
+            fixed_cyclic_shift=shift,
         )
         snapshots = [
             snapshot_dataset[snapshot_index]
@@ -220,8 +243,35 @@ class DenseTWDToMDataset(Dataset):
             "belief_targets": torch.stack(
                 [snapshot["belief_targets"] for snapshot in snapshots]
             ),
+            "legacy_v1_belief_targets": torch.stack(
+                [snapshot["legacy_v1_belief_targets"] for snapshot in snapshots]
+            ),
+            "legacy_v1_label_observed_mask": torch.stack(
+                [
+                    snapshot["legacy_v1_label_observed_mask"]
+                    for snapshot in snapshots
+                ]
+            ),
+            "v1_empty_unobserved_belief_targets": torch.stack(
+                [
+                    snapshot["v1_empty_unobserved_belief_targets"]
+                    for snapshot in snapshots
+                ]
+            ),
+            "v1_empty_unobserved_label_observed_mask": torch.stack(
+                [
+                    snapshot["v1_empty_unobserved_label_observed_mask"]
+                    for snapshot in snapshots
+                ]
+            ),
             "observer_alive_mask": torch.stack(
                 [snapshot["observer_alive_mask"] for snapshot in snapshots]
+            ),
+            "observer_scope_mask": torch.stack(
+                [snapshot["observer_scope_mask"] for snapshot in snapshots]
+            ),
+            "label_observed_mask": torch.stack(
+                [snapshot["label_observed_mask"] for snapshot in snapshots]
             ),
             "observer_supervision_mask": torch.stack(
                 [snapshot["observer_supervision_mask"] for snapshot in snapshots]
@@ -254,6 +304,10 @@ class DenseTWDToMDataset(Dataset):
                 "raw_empty": [
                     snapshot["metadata"]["raw_empty"] for snapshot in snapshots
                 ],
+                "label_observed": [
+                    snapshot["metadata"]["label_observed"]
+                    for snapshot in snapshots
+                ],
                 "hard_knowledge_count": [
                     snapshot["metadata"]["hard_knowledge_count"]
                     for snapshot in snapshots
@@ -272,10 +326,22 @@ class DenseTWDToMDataset(Dataset):
                 ],
                 "supervision_scope": self.supervision_scope,
                 "supervision_version": DENSE_SUPERVISION_VERSION,
-                "target_semantics": TARGET_SEMANTICS,
-                "target_conversion": TARGET_CONVERSION,
+                "target_semantics": self.target_semantics,
+                "target_conversion": self.target_conversion,
+                "label_observation_semantics": (
+                    self.label_observation_semantics
+                ),
+                "speech_annotation_source": self.speech_annotation_source,
+                "belief_annotation_source": self.belief_annotation_source,
             },
         }
+        if all("v2_belief_targets" in snapshot for snapshot in snapshots):
+            result["v2_belief_targets"] = torch.stack(
+                [snapshot["v2_belief_targets"] for snapshot in snapshots]
+            )
+            result["v2_label_observed_mask"] = torch.stack(
+                [snapshot["v2_label_observed_mask"] for snapshot in snapshots]
+            )
         if self.include_private_features:
             result.update({
                 field: torch.stack([snapshot[field] for snapshot in snapshots])
@@ -309,8 +375,16 @@ def collate_dense_twd_tom_games(
     belief_targets = batch[0]["belief_targets"].new_zeros(
         (len(batch), max_boundaries, NUM_PLAYERS, NUM_PLAYERS)
     )
+    legacy_v1_belief_targets = torch.zeros_like(belief_targets)
+    v1_empty_unobserved_belief_targets = torch.zeros_like(belief_targets)
     observer_alive_mask = torch.zeros(
         (len(batch), max_boundaries, NUM_PLAYERS), dtype=torch.bool
+    )
+    observer_scope_mask = torch.zeros_like(observer_alive_mask)
+    label_observed_mask = torch.zeros_like(observer_alive_mask)
+    legacy_v1_label_observed_mask = torch.zeros_like(observer_alive_mask)
+    v1_empty_unobserved_label_observed_mask = torch.zeros_like(
+        observer_alive_mask
     )
     observer_supervision_mask = torch.zeros_like(observer_alive_mask)
     diagonal = ~torch.eye(NUM_PLAYERS, dtype=torch.bool)
@@ -329,6 +403,18 @@ def collate_dense_twd_tom_games(
         raise ValueError("private knowledge masks must be supplied together")
     if len(set(private_presence)) != 1:
         raise ValueError("batch cannot mix public and private-conditioned games")
+    v2_fields = ("v2_belief_targets", "v2_label_observed_mask")
+    v2_presence = [tuple(field in item for field in v2_fields) for item in batch]
+    if any(any(presence) and not all(presence) for presence in v2_presence):
+        raise ValueError("V2 belief targets and observation masks must be paired")
+    if len(set(v2_presence)) != 1:
+        raise ValueError("batch cannot mix games with and without V2 targets")
+    v2_belief_targets = (
+        torch.zeros_like(belief_targets) if all(v2_presence[0]) else None
+    )
+    v2_label_observed_mask = (
+        torch.zeros_like(observer_alive_mask) if all(v2_presence[0]) else None
+    )
     private_masks = (
         {
             field: torch.zeros(
@@ -353,9 +439,38 @@ def collate_dense_twd_tom_games(
             "boundary_valid_mask"
         ]
         belief_targets[batch_index, :boundary_count] = item["belief_targets"]
+        legacy_v1_belief_targets[batch_index, :boundary_count] = item[
+            "legacy_v1_belief_targets"
+        ]
+        v1_empty_unobserved_belief_targets[
+            batch_index, :boundary_count
+        ] = item[
+            "v1_empty_unobserved_belief_targets"
+        ]
         observer_alive_mask[batch_index, :boundary_count] = item[
             "observer_alive_mask"
         ]
+        observer_scope_mask[batch_index, :boundary_count] = item[
+            "observer_scope_mask"
+        ]
+        label_observed_mask[batch_index, :boundary_count] = item[
+            "label_observed_mask"
+        ]
+        legacy_v1_label_observed_mask[batch_index, :boundary_count] = item[
+            "legacy_v1_label_observed_mask"
+        ]
+        v1_empty_unobserved_label_observed_mask[
+            batch_index, :boundary_count
+        ] = item[
+            "v1_empty_unobserved_label_observed_mask"
+        ]
+        if v2_belief_targets is not None:
+            v2_belief_targets[batch_index, :boundary_count] = item[
+                "v2_belief_targets"
+            ]
+            v2_label_observed_mask[batch_index, :boundary_count] = item[
+                "v2_label_observed_mask"
+            ]
         observer_supervision_mask[batch_index, :boundary_count] = item[
             "observer_supervision_mask"
         ]
@@ -370,13 +485,23 @@ def collate_dense_twd_tom_games(
         for field in private_masks:
             private_masks[field][batch_index, :boundary_count] = item[field]
 
-    return {
+    result = {
         **padded_features,
         **private_masks,
         "boundary_indices": boundary_indices,
         "boundary_valid_mask": boundary_valid_mask,
         "belief_targets": belief_targets,
+        "legacy_v1_belief_targets": legacy_v1_belief_targets,
+        "legacy_v1_label_observed_mask": legacy_v1_label_observed_mask,
+        "v1_empty_unobserved_belief_targets": (
+            v1_empty_unobserved_belief_targets
+        ),
+        "v1_empty_unobserved_label_observed_mask": (
+            v1_empty_unobserved_label_observed_mask
+        ),
         "observer_alive_mask": observer_alive_mask,
+        "observer_scope_mask": observer_scope_mask,
+        "label_observed_mask": label_observed_mask,
         "observer_supervision_mask": observer_supervision_mask,
         "diagonal_target_mask": diagonal_target_mask,
         "supervision_known_non_werewolf_mask": (
@@ -384,6 +509,10 @@ def collate_dense_twd_tom_games(
         ),
         "metadata": [deepcopy(item["metadata"]) for item in batch],
     }
+    if v2_belief_targets is not None:
+        result["v2_belief_targets"] = v2_belief_targets
+        result["v2_label_observed_mask"] = v2_label_observed_mask
+    return result
 
 
 __all__ = [

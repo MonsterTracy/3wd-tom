@@ -30,6 +30,16 @@ from script.twd_tom.materialize_development_folds import (
     validate_development_fold_paths,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.annotation_v2 import (
+    BELIEF_ANNOTATION_SOURCES,
+    SPEECH_ANNOTATION_SOURCES,
+    V1_ANNOTATION_SOURCE,
+    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V2_ANNOTATION_SOURCE,
+    annotation_set_digest,
+    load_belief_v2_annotations,
+    load_speech_v2_annotations,
+)
 from werewolf.models.twd_tom.belief_backbone import (
     FULL_INPUT_FEATURE_PROFILE,
     QWEN2_BACKBONE_NAME,
@@ -49,6 +59,7 @@ from werewolf.models.twd_tom.checkpoint import (
     result_model_config,
 )
 from werewolf.models.twd_tom.dataset import (
+    LABEL_OBSERVATION_SEMANTICS,
     MODEL_INPUT_SCOPE,
     PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
@@ -114,6 +125,10 @@ class TrainingConfig:
     game_bootstrap_samples: int = 2000
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
+    speech_annotation_source: str = V1_ANNOTATION_SOURCE
+    belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
+    speech_v2_annotation_path: str | None = None
+    belief_v2_annotation_path: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("output_dir", "dataset_path", "validation_dataset_path"):
@@ -182,6 +197,35 @@ class TrainingConfig:
             raise ValueError(
                 "role-based supervision requires role_sidecar_path"
             )
+        if self.speech_annotation_source not in SPEECH_ANNOTATION_SOURCES:
+            raise ValueError(
+                "speech_annotation_source must be one of "
+                f"{SPEECH_ANNOTATION_SOURCES}"
+            )
+        if self.belief_annotation_source not in BELIEF_ANNOTATION_SOURCES:
+            raise ValueError(
+                "belief_annotation_source must be one of "
+                f"{BELIEF_ANNOTATION_SOURCES}"
+            )
+        for field_name in (
+            "speech_v2_annotation_path",
+            "belief_v2_annotation_path",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(f"{field_name} must be non-empty text or None")
+        if (
+            self.speech_annotation_source == V2_ANNOTATION_SOURCE
+            and self.speech_v2_annotation_path is None
+        ):
+            raise ValueError("V2 speech source requires speech_v2_annotation_path")
+        if (
+            self.belief_annotation_source == V2_ANNOTATION_SOURCE
+            and self.belief_v2_annotation_path is None
+        ):
+            raise ValueError("V2 belief source requires belief_v2_annotation_path")
         _positive_integer(
             self.game_bootstrap_samples,
             field_name="game_bootstrap_samples",
@@ -217,6 +261,22 @@ class TrainingConfig:
             None
             if self.role_sidecar_path is None
             else Path(self.role_sidecar_path)
+        )
+
+    @property
+    def resolved_speech_v2_annotation_path(self) -> Path | None:
+        return (
+            None
+            if self.speech_v2_annotation_path is None
+            else Path(self.speech_v2_annotation_path)
+        )
+
+    @property
+    def resolved_belief_v2_annotation_path(self) -> Path | None:
+        return (
+            None
+            if self.belief_v2_annotation_path is None
+            else Path(self.belief_v2_annotation_path)
         )
 
 
@@ -418,6 +478,32 @@ def build_run_provenance(
             "role_sidecar_digest": role_sidecar["sidecar_digest"],
             "role_sidecar_usage": "supervision_metadata_only",
         })
+    speech_v2_path = config.resolved_speech_v2_annotation_path
+    if speech_v2_path is not None:
+        speech_v2 = load_speech_v2_annotations(speech_v2_path)
+        result.update({
+            "speech_v2_annotation_path": _repository_relative_path(
+                speech_v2_path,
+                repo_root=root,
+            ),
+            "speech_v2_annotation_sha256": sha256_file(speech_v2_path),
+            "speech_v2_annotation_set_digest": annotation_set_digest(speech_v2),
+            "speech_v2_annotation_count": len(speech_v2),
+        })
+    belief_v2_path = config.resolved_belief_v2_annotation_path
+    if belief_v2_path is not None:
+        belief_v2 = load_belief_v2_annotations(belief_v2_path)
+        result.update({
+            "belief_v2_annotation_path": _repository_relative_path(
+                belief_v2_path,
+                repo_root=root,
+            ),
+            "belief_v2_annotation_sha256": sha256_file(belief_v2_path),
+            "belief_v2_annotation_set_digest": annotation_set_digest(belief_v2),
+            "belief_v2_annotation_count": len(belief_v2),
+        })
+    result["speech_annotation_source"] = config.speech_annotation_source
+    result["belief_annotation_source"] = config.belief_annotation_source
     result["supervision_scope"] = config.supervision_scope
     return result
 
@@ -502,6 +588,20 @@ def build_data_loader(
         if role_sidecar_path is None
         else load_role_sidecar(role_sidecar_path)
     )
+    speech_v2_annotations = (
+        None
+        if config.resolved_speech_v2_annotation_path is None
+        else load_speech_v2_annotations(
+            config.resolved_speech_v2_annotation_path
+        )
+    )
+    belief_v2_annotations = (
+        None
+        if config.resolved_belief_v2_annotation_path is None
+        else load_belief_v2_annotations(
+            config.resolved_belief_v2_annotation_path
+        )
+    )
     dataset = dataset_class.from_jsonl(
         dataset_path,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
@@ -510,6 +610,10 @@ def build_data_loader(
         include_private_features=config.private_conditioning,
         observer_roles_by_game=observer_roles_by_game,
         supervision_scope=config.supervision_scope,
+        speech_annotation_source=config.speech_annotation_source,
+        belief_annotation_source=config.belief_annotation_source,
+        speech_v2_annotations=speech_v2_annotations,
+        belief_v2_annotations=belief_v2_annotations,
     )
     if len(dataset) == 0:
         raise ValueError(f"dataset cannot be empty: {Path(dataset_path).resolve()}")
@@ -536,8 +640,11 @@ def _training_dataset_contract(
         "model_input_scope",
         "target_semantics",
         "target_conversion",
+        "label_observation_semantics",
         "supervision_version",
         "supervision_scope",
+        "speech_annotation_source",
+        "belief_annotation_source",
     ):
         train_value = getattr(
             train_dataset,
@@ -556,12 +663,17 @@ def _training_dataset_contract(
         "model_input_scope": train_dataset.model_input_scope,
         "target_semantics": train_dataset.target_semantics,
         "target_conversion": train_dataset.target_conversion,
+        "label_observation_semantics": (
+            train_dataset.label_observation_semantics
+        ),
         "training_supervision": getattr(
             train_dataset,
             "supervision_version",
             "independent_pre_boundary_v1",
         ),
         "supervision_scope": train_dataset.supervision_scope,
+        "speech_annotation_source": train_dataset.speech_annotation_source,
+        "belief_annotation_source": train_dataset.belief_annotation_source,
         "role_metadata_usage": "supervision_metadata_only",
     }
 
@@ -606,6 +718,8 @@ _BATCH_TENSOR_FIELDS = (
     "attention_mask",
     "belief_targets",
     "observer_alive_mask",
+    "observer_scope_mask",
+    "label_observed_mask",
     "observer_supervision_mask",
     "diagonal_target_mask",
     "supervision_known_non_werewolf_mask",
@@ -682,6 +796,8 @@ class MetricAccumulator:
         observer_alive_mask: torch.Tensor,
         observer_supervision_mask: torch.Tensor,
         diagonal_target_mask: torch.Tensor,
+        observer_scope_mask: torch.Tensor | None = None,
+        label_observed_mask: torch.Tensor | None = None,
         known_non_werewolf_mask: torch.Tensor | None = None,
     ) -> None:
         metrics = compute_belief_metrics(
@@ -690,6 +806,8 @@ class MetricAccumulator:
             observer_alive_mask,
             diagonal_target_mask,
             observer_supervision_mask=observer_supervision_mask,
+            observer_scope_mask=observer_scope_mask,
+            label_observed_mask=label_observed_mask,
             known_non_werewolf_mask=known_non_werewolf_mask,
         )
         count = int(metrics["valid_observer_count"])
@@ -700,6 +818,9 @@ class MetricAccumulator:
             "zero_uniform_baseline_gap_row_count",
             "positive_private_admissible_baseline_gap_row_count",
             "zero_private_admissible_baseline_gap_row_count",
+            "scope_observer_count",
+            "observed_label_row_count_in_scope",
+            "unobserved_label_row_count_in_scope",
         }
         sum_fields = {
             "model_kl_sum",
@@ -813,6 +934,8 @@ def _item_metric_tensors(
         "logits": logits[batch_index],
         "targets": batch["belief_targets"][batch_index],
         "alive": batch["observer_alive_mask"][batch_index],
+        "scope": batch["observer_scope_mask"][batch_index],
+        "observed": batch["label_observed_mask"][batch_index],
         "supervision": batch["observer_supervision_mask"][batch_index],
         "diagonal": batch["diagonal_target_mask"][batch_index],
         "known_non_wolf": batch[
@@ -1233,6 +1356,8 @@ def _loss_and_update(
     observer_supervision_mask = batch["observer_supervision_mask"]
     diagonal_target_mask = batch["diagonal_target_mask"]
     known_non_werewolf_mask = batch["supervision_known_non_werewolf_mask"]
+    observer_scope_mask = batch["observer_scope_mask"]
+    label_observed_mask = batch["label_observed_mask"]
     if logits.ndim == 4:
         if targets.shape != logits.shape:
             raise ValueError("dense belief targets must match dense logits")
@@ -1242,6 +1367,8 @@ def _loss_and_update(
         observer_supervision_mask = observer_supervision_mask.flatten(0, 1)
         diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
         known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
+        observer_scope_mask = observer_scope_mask.flatten(0, 1)
+        label_observed_mask = label_observed_mask.flatten(0, 1)
     loss = masked_belief_distribution_loss(
         logits,
         targets,
@@ -1256,6 +1383,8 @@ def _loss_and_update(
         observer_alive_mask=observer_alive_mask,
         observer_supervision_mask=observer_supervision_mask,
         diagonal_target_mask=diagonal_target_mask,
+        observer_scope_mask=observer_scope_mask,
+        label_observed_mask=label_observed_mask,
         known_non_werewolf_mask=known_non_werewolf_mask,
     )
     return loss
@@ -1296,6 +1425,8 @@ def _update_per_game_metrics(
             observer_alive_mask=tensors["alive"],
             observer_supervision_mask=tensors["supervision"],
             diagonal_target_mask=tensors["diagonal"],
+            observer_scope_mask=tensors["scope"],
+            label_observed_mask=tensors["observed"],
             known_non_werewolf_mask=tensors["known_non_wolf"],
         )
 
@@ -1399,6 +1530,8 @@ def evaluate_model_with_games_and_strata(
         known_non_werewolf_mask = batch[
             "supervision_known_non_werewolf_mask"
         ]
+        observer_scope_mask = batch["observer_scope_mask"]
+        label_observed_mask = batch["label_observed_mask"]
         if logits.ndim == 4:
             logits = logits.flatten(0, 1)
             targets = targets.flatten(0, 1)
@@ -1406,6 +1539,8 @@ def evaluate_model_with_games_and_strata(
             observer_supervision_mask = observer_supervision_mask.flatten(0, 1)
             diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
             known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
+            observer_scope_mask = observer_scope_mask.flatten(0, 1)
+            label_observed_mask = label_observed_mask.flatten(0, 1)
         loss = masked_belief_distribution_loss(
             logits,
             targets,
@@ -1420,6 +1555,8 @@ def evaluate_model_with_games_and_strata(
             observer_alive_mask=observer_alive_mask,
             observer_supervision_mask=observer_supervision_mask,
             diagonal_target_mask=diagonal_target_mask,
+            observer_scope_mask=observer_scope_mask,
+            label_observed_mask=label_observed_mask,
             known_non_werewolf_mask=known_non_werewolf_mask,
         )
     return (
@@ -1462,8 +1599,15 @@ def checkpoint_payload(
         ),
         "target_semantics": TARGET_SEMANTICS,
         "target_conversion": TARGET_CONVERSION,
+        "label_observation_semantics": LABEL_OBSERVATION_SEMANTICS,
+        "speech_annotation_source": V1_ANNOTATION_SOURCE,
+        "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
     })
-    task_contract = checkpoint_task_contract(model.config.private_conditioning)
+    task_contract = checkpoint_task_contract(
+        model.config.private_conditioning,
+        target_semantics=dataset_contract["target_semantics"],
+        target_conversion=dataset_contract["target_conversion"],
+    )
     if dataset_contract["model_input_scope"] != task_contract["model_input_scope"]:
         raise ValueError("checkpoint model and Dataset input scopes differ")
     serialized_config = asdict(config)
@@ -1477,6 +1621,18 @@ def checkpoint_payload(
         "supervision_scope": dataset_contract.get(
             "supervision_scope",
             ALL_ALIVE_SCOPE,
+        ),
+        "speech_annotation_source": dataset_contract.get(
+            "speech_annotation_source",
+            V1_ANNOTATION_SOURCE,
+        ),
+        "belief_annotation_source": dataset_contract.get(
+            "belief_annotation_source",
+            V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        ),
+        "label_observation_semantics": dataset_contract.get(
+            "label_observation_semantics",
+            LABEL_OBSERVATION_SEMANTICS,
         ),
         "role_metadata_usage": dataset_contract.get(
             "role_metadata_usage",
@@ -1497,6 +1653,12 @@ def checkpoint_payload(
             "dataset_path": run_provenance["train_dataset_path"],
             "validation_dataset_path": run_provenance["validation_dataset_path"],
             "role_sidecar_path": run_provenance.get("role_sidecar_path"),
+            "speech_v2_annotation_path": run_provenance.get(
+                "speech_v2_annotation_path"
+            ),
+            "belief_v2_annotation_path": run_provenance.get(
+                "belief_v2_annotation_path"
+            ),
         },
         "run_provenance": dict(run_provenance),
         "model_config": result_model_config(model),
@@ -1635,7 +1797,11 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         )
         record = {
             "epoch": epoch,
-            **checkpoint_task_contract(config.private_conditioning),
+            **checkpoint_task_contract(
+                config.private_conditioning,
+                target_semantics=dataset_contract["target_semantics"],
+                target_conversion=dataset_contract["target_conversion"],
+            ),
             "train": train_metrics,
             "validation": validation_metrics,
             "validation_by_game": validation_by_game,
@@ -1724,7 +1890,11 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         raise RuntimeError("training completed without a best validation epoch")
     summary = {
         "status": "ok",
-        **checkpoint_task_contract(config.private_conditioning),
+        **checkpoint_task_contract(
+            config.private_conditioning,
+            target_semantics=dataset_contract["target_semantics"],
+            target_conversion=dataset_contract["target_conversion"],
+        ),
         "train_dataset": run_provenance["train_dataset_path"],
         "validation_dataset": run_provenance["validation_dataset_path"],
         "train_sample_count": len(train_dataset),
@@ -1743,6 +1913,15 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         },
         "training_supervision": dataset_contract["training_supervision"],
         "supervision_scope": dataset_contract["supervision_scope"],
+        "speech_annotation_source": dataset_contract[
+            "speech_annotation_source"
+        ],
+        "belief_annotation_source": dataset_contract[
+            "belief_annotation_source"
+        ],
+        "label_observation_semantics": dataset_contract[
+            "label_observation_semantics"
+        ],
         "role_metadata_usage": dataset_contract["role_metadata_usage"],
         "training_config": asdict(config),
         "best_epoch": best_epoch,
@@ -1825,6 +2004,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--early-stopping-patience", type=int, default=0)
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--game-bootstrap-samples", type=int, default=2000)
+    parser.add_argument(
+        "--speech-annotation-source",
+        choices=SPEECH_ANNOTATION_SOURCES,
+        default=V1_ANNOTATION_SOURCE,
+    )
+    parser.add_argument(
+        "--belief-annotation-source",
+        choices=BELIEF_ANNOTATION_SOURCES,
+        default=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    )
+    parser.add_argument("--speech-v2-annotations")
+    parser.add_argument("--belief-v2-annotations")
     return parser
 
 
@@ -1855,6 +2046,10 @@ def main() -> int:
         game_bootstrap_samples=args.game_bootstrap_samples,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
+        speech_annotation_source=args.speech_annotation_source,
+        belief_annotation_source=args.belief_annotation_source,
+        speech_v2_annotation_path=args.speech_v2_annotations,
+        belief_v2_annotation_path=args.belief_v2_annotations,
     ))
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

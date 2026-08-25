@@ -87,3 +87,21 @@ def test_supervision_mask_changes_only_selected_loss_rows():
     assert torch.equal(targets, original_targets)
     assert torch.count_nonzero(logits.grad[0, 0]) == 0
     assert torch.count_nonzero(logits.grad[0, 1]) > 0
+
+
+def test_unobserved_alive_row_may_have_zero_target_when_not_supervised():
+    logits, targets, alive, diagonal = make_contract()
+    targets[0, 0].zero_()
+    supervision = torch.tensor(
+        [[False, True, False, False, False, False, False]]
+    )
+
+    loss = masked_belief_distribution_loss(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        observer_supervision_mask=supervision,
+    )
+
+    assert loss.item() == pytest.approx(math.log(6))

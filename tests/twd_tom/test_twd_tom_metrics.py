@@ -48,6 +48,34 @@ def test_dead_observer_rows_do_not_affect_metrics():
     assert compute_belief_metrics(logits, targets, alive, diagonal) == baseline
 
 
+def test_metrics_report_unobserved_rows_inside_scope_without_scoring_them():
+    logits = torch.zeros((1, 7, 7))
+    targets = torch.zeros((1, 7, 7))
+    targets[0, 0, 1] = 1.0
+    alive = torch.tensor([[True, True, False, False, False, False, False]])
+    diagonal = (~torch.eye(7, dtype=torch.bool)).unsqueeze(0)
+    scope = alive.clone()
+    observed = torch.tensor(
+        [[True, False, False, False, False, False, False]]
+    )
+    supervision = scope & observed
+
+    metrics = compute_belief_metrics(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        observer_supervision_mask=supervision,
+        observer_scope_mask=scope,
+        label_observed_mask=observed,
+    )
+
+    assert metrics["scope_observer_count"] == 2
+    assert metrics["observed_label_row_count_in_scope"] == 1
+    assert metrics["unobserved_label_row_count_in_scope"] == 1
+    assert metrics["valid_observer_count"] == 1
+
+
 def test_metrics_expose_no_pair_or_order_specific_names():
     metrics = compute_belief_metrics(*make_contract())
     assert all("pair" not in name for name in metrics)

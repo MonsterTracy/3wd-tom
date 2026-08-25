@@ -186,12 +186,30 @@ def _validate_belief_loss_inputs(
 
     row_sums = targets.sum(dim=-1)
     if not torch.allclose(
-        row_sums[alive_mask],
-        torch.ones_like(row_sums[alive_mask]),
+        row_sums[supervision_mask],
+        torch.ones_like(row_sums[supervision_mask]),
         rtol=1e-5,
         atol=1e-6,
     ):
-        raise ValueError("every alive observer target row must sum to one")
+        raise ValueError("every supervised observer target row must sum to one")
+    unsupervised_alive_sums = row_sums[alive_mask & ~supervision_mask]
+    if unsupervised_alive_sums.numel() and not torch.all(
+        torch.isclose(
+            unsupervised_alive_sums,
+            torch.zeros_like(unsupervised_alive_sums),
+            rtol=0.0,
+            atol=1e-6,
+        )
+        | torch.isclose(
+            unsupervised_alive_sums,
+            torch.ones_like(unsupervised_alive_sums),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    ):
+        raise ValueError(
+            "unsupervised alive target rows must sum to zero or one"
+        )
     if torch.any(targets[~alive_mask] != 0.0):
         raise ValueError("dead observer target rows must remain all zero")
     return belief_logits, targets, alive_mask, supervision_mask, target_mask

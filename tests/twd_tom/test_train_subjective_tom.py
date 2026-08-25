@@ -24,12 +24,22 @@ from script.twd_tom.train import (
 from werewolf.models.twd_tom.belief_backbone import (
     NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
 )
+from werewolf.models.twd_tom.annotation_v2 import (
+    LEGACY_V1_BELIEF_SOURCE,
+    V1_ANNOTATION_SOURCE,
+)
+from werewolf.models.twd_tom.checkpoint import build_model_from_checkpoint
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
     MODEL_INPUT_SCOPE,
     PRIVATE_MODEL_INPUT_SCOPE,
+    LEGACY_V1_LABEL_OBSERVATION_SEMANTICS,
+    LEGACY_V1_TARGET_CONVERSION,
+    LEGACY_V1_TARGET_SEMANTICS,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
+    V2_TARGET_CONVERSION,
+    V2_TARGET_SEMANTICS,
     TWDToMDataset,
     collate_twd_tom_samples,
 )
@@ -90,6 +100,29 @@ def test_private_checkpoint_contract_is_explicit_and_parallel():
     assert contract["model_input_scope"] == PRIVATE_MODEL_INPUT_SCOPE
     assert contract["private_conditioning"] is True
     assert contract["model_output"] == "belief_logits"
+
+
+def test_v2_checkpoint_contract_records_the_selected_target_pair():
+    contract = checkpoint_task_contract(
+        target_semantics=V2_TARGET_SEMANTICS,
+        target_conversion=V2_TARGET_CONVERSION,
+    )
+    assert contract["target_semantics"] == V2_TARGET_SEMANTICS
+    assert contract["target_conversion"] == V2_TARGET_CONVERSION
+    with pytest.raises(ValueError, match="unsupported target"):
+        checkpoint_task_contract(
+            target_semantics=V2_TARGET_SEMANTICS,
+            target_conversion=TARGET_CONVERSION,
+        )
+
+
+def test_legacy_v1_checkpoint_contract_remains_explicitly_supported():
+    contract = checkpoint_task_contract(
+        target_semantics=LEGACY_V1_TARGET_SEMANTICS,
+        target_conversion=LEGACY_V1_TARGET_CONVERSION,
+    )
+    assert contract["target_conversion"] == LEGACY_V1_TARGET_CONVERSION
+    assert contract["target_conversion"] != TARGET_CONVERSION
 
 
 def test_training_loader_uses_rotation_only_for_training(
@@ -319,6 +352,94 @@ def test_checkpoint_payload_contains_no_removed_objective_fields(tmp_path):
     )
     for removed in ("tom_order", "pair", "second_order", "observer_pair_logits"):
         assert removed not in serialized
+
+
+def test_checkpoint_payload_uses_dataset_v2_target_contract(tmp_path):
+    from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path="train.jsonl",
+        validation_dataset_path="validation.jsonl",
+        epochs=1,
+        batch_size=1,
+        backbone="gpt2_block",
+    )
+    model = build_model(config)
+    optimizer = AdamW(model.parameters())
+    metrics = {"mean_loss": 1.0, "valid_observer_count": 4}
+    payload = checkpoint_payload(
+        model=model,
+        optimizer=optimizer,
+        config=config,
+        epoch=1,
+        train_metrics=metrics,
+        validation_metrics=metrics,
+        best_epoch=1,
+        best_validation_mean_loss=1.0,
+        run_provenance={
+            "train_dataset_path": "train.jsonl",
+            "validation_dataset_path": "validation.jsonl",
+            "output_dir": "run",
+        },
+        dataset_contract={
+            "source_schema_version": SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": MODEL_INPUT_SCOPE,
+            "target_semantics": V2_TARGET_SEMANTICS,
+            "target_conversion": V2_TARGET_CONVERSION,
+        },
+    )
+    assert payload["target_semantics"] == V2_TARGET_SEMANTICS
+    assert payload["target_conversion"] == V2_TARGET_CONVERSION
+    restored = build_model_from_checkpoint(payload, device=torch.device("cpu"))
+    assert restored.output_projection.out_features == 7
+
+
+def test_checkpoint_payload_keeps_legacy_v1_provenance_distinct(tmp_path):
+    from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path="train.jsonl",
+        validation_dataset_path="validation.jsonl",
+        epochs=1,
+        batch_size=1,
+        backbone="gpt2_block",
+        belief_annotation_source=LEGACY_V1_BELIEF_SOURCE,
+    )
+    model = build_model(config)
+    payload = checkpoint_payload(
+        model=model,
+        optimizer=AdamW(model.parameters()),
+        config=config,
+        epoch=1,
+        train_metrics={"mean_loss": 1.0},
+        validation_metrics={"mean_loss": 1.0},
+        best_epoch=1,
+        best_validation_mean_loss=1.0,
+        run_provenance={
+            "train_dataset_path": "train.jsonl",
+            "validation_dataset_path": "validation.jsonl",
+            "output_dir": "run",
+        },
+        dataset_contract={
+            "source_schema_version": SAMPLE_SCHEMA_VERSION,
+            "model_input_scope": MODEL_INPUT_SCOPE,
+            "target_semantics": LEGACY_V1_TARGET_SEMANTICS,
+            "target_conversion": LEGACY_V1_TARGET_CONVERSION,
+            "label_observation_semantics": (
+                LEGACY_V1_LABEL_OBSERVATION_SEMANTICS
+            ),
+            "speech_annotation_source": V1_ANNOTATION_SOURCE,
+            "belief_annotation_source": LEGACY_V1_BELIEF_SOURCE,
+        },
+    )
+
+    assert payload["belief_annotation_source"] == LEGACY_V1_BELIEF_SOURCE
+    assert payload["target_conversion"] == LEGACY_V1_TARGET_CONVERSION
+    assert payload["label_observation_semantics"] == (
+        LEGACY_V1_LABEL_OBSERVATION_SEMANTICS
+    )
 
 
 def test_training_config_has_no_order_argument(tmp_path):

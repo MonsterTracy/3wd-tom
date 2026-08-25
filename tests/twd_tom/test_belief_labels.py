@@ -3,23 +3,32 @@ import torch
 
 from werewolf.models.twd_tom.belief_labels import (
     close_hard_knowledge,
+    legacy_v1_suspicion_set_to_belief_vector,
     suspicion_set_to_belief_vector,
 )
 
 
-def test_empty_suspicion_is_uniform_over_hard_knowledge_admissible_targets():
-    target = suspicion_set_to_belief_vector(
+def test_empty_suspicion_is_unobserved_not_a_uniform_distribution():
+    with pytest.raises(ValueError, match="unobserved label"):
+        suspicion_set_to_belief_vector(
+            [],
+            observer_id="player7",
+            known_werewolves=[],
+            known_non_werewolves=["player2", "player7"],
+        )
+
+
+def test_legacy_v1_preserves_historical_empty_to_uniform_conversion():
+    target = legacy_v1_suspicion_set_to_belief_vector(
         [],
         observer_id="player7",
         known_werewolves=[],
         known_non_werewolves=["player2", "player7"],
+        dtype=torch.float64,
     )
-    assert target.shape == (7,)
-    assert target[6].item() == 0.0
     assert target.tolist() == pytest.approx(
         [0.2, 0.0, 0.2, 0.2, 0.2, 0.2, 0.0]
     )
-    assert target.sum().item() == pytest.approx(1.0)
 
 
 def test_non_empty_suspicion_is_uniform_only_over_suspected_players():

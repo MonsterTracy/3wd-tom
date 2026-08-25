@@ -56,8 +56,9 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `werewolf/models/twd_tom/speech_annotations.py`：版本化发言语义 sidecar、原文 digest 和完整绑定校验。
 - `werewolf/speech/speech_perceiver.py`：独立 14-action 公开发言解析器。
 - `werewolf/models/twd_tom/collector.py`：写入 raw JSONL。
-- `werewolf/models/twd_tom/belief_labels.py`：在 hard knowledge 约束下将相对怀疑集合确定性归一化为玩家 belief row；空集合只在 admissible players 上均分。
-- `werewolf/models/twd_tom/dataset.py`：唯一 tom-v2 Dataset；输出 7×7 target、observer alive mask 与 diagonal target mask。
+- `werewolf/models/twd_tom/belief_labels.py`：在 hard knowledge 约束下将非空相对怀疑集合确定性归一化为玩家 belief row。
+- `werewolf/models/twd_tom/annotation_v2.py`：严格校验并绑定既有 Speech/Belief V2 sidecar，不回写 canonical 数据。
+- `werewolf/models/twd_tom/dataset.py`：唯一 tom-v2 Dataset；显式区分历史 `legacy_v1`（empty→admissible uniform）与 `v1_empty_unobserved`，输出 7×7 target、scope/observed/supervision masks 与 diagonal target mask。
 - `werewolf/models/twd_tom/dense_dataset.py`：将同一局的所有 strict-PRE snapshot 组织为共享公开序列与多监督边界；超过 `max_seq_len` 后无法保持精确前缀的数据直接拒绝。
 - `werewolf/models/twd_tom/baselines.py`：只用 fold 训练标签拟合 observer global prior 与 observer+phase prior，不读取 fold validation 或 test label。
 - `script/twd_tom/materialize_canonical_belief_dataset.py`：验证成功批次摘要链，将 canonical per-game snapshots 确定性分配为 game-level train/validation/test JSONL，并写入 split manifest。
@@ -65,6 +66,9 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `script/twd_tom/audit_dense_belief_dataset.py`：训练前证明每条监督对应 exact strict-PRE encoded prefix，并报告逐局边界与序列长度。
 - `script/twd_tom/materialize_development_folds.py`：只合并原 train+validation，生成开发集 5-fold；test 只保留 manifest 身份，不复制或读取其物理数据。
 - `script/twd_tom/run_development_oof.py`：按 8 局一个 batch 运行 dense 5-fold OOF、早停、逐局指标、game bootstrap CI 与训练集 prior 基线。
+- `script/twd_tom/audit_belief_label_repeatability.py`：审计 3–5 份相同 frozen-state V2 replicate 的 exact/Jaccard/TV/JS。
+- `script/twd_tom/run_annotation_v2_ablation.py`：运行 Speech V1/V2 × Belief `v1_empty_unobserved`/V2 的固定五折归因矩阵；exploratory 运行不依赖 repeatability，冻结正式 benchmark 时才强制要求通过审计。
+- `script/twd_tom/export_belief_worst_cases.py`：从每折最佳 checkpoint 导出 `legacy_v1`、`v1_empty_unobserved`、V2 target 对照与 boundary 邻域误差样本。
 - `script/twd_tom/audit_shadow_speech_parser.py`：只读重解析既有公开发言，比较 DeepSeek 与原 parser 的状态、动作顺序和动作集合；结果写入独立目录，不能替换 canonical annotation。
 - `script/twd_tom/collection_budget.py`：执行正式采集的 gameplay、belief、total call 和单局墙钟预算。
 - `script/twd_tom/replay_canonical_trajectory.py`：不调用模型地重放 canonical submitted actions，并核对逐步状态、公开事件和 observer views。

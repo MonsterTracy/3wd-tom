@@ -16,10 +16,14 @@ from werewolf.models.twd_tom.belief_backbone import (
 )
 from werewolf.models.twd_tom.dataset import (
     CYCLIC_ROTATION_VERSION,
+    LEGACY_V1_TARGET_CONVERSION,
+    LEGACY_V1_TARGET_SEMANTICS,
     MODEL_INPUT_SCOPE,
     PRIVATE_MODEL_INPUT_SCOPE,
     TARGET_CONVERSION,
     TARGET_SEMANTICS,
+    V2_TARGET_CONVERSION,
+    V2_TARGET_SEMANTICS,
 )
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
@@ -32,15 +36,25 @@ from werewolf.models.twd_tom.schema import ACTION_NAMES, ACTION_TO_ID, NUM_PLAYE
 
 OBJECTIVE = "observer_conditioned_belief_distribution_v1"
 MODEL_OUTPUT = "belief_logits"
+SUPPORTED_TARGET_CONTRACTS = frozenset({
+    (LEGACY_V1_TARGET_SEMANTICS, LEGACY_V1_TARGET_CONVERSION),
+    (TARGET_SEMANTICS, TARGET_CONVERSION),
+    (V2_TARGET_SEMANTICS, V2_TARGET_CONVERSION),
+})
 
 
 def checkpoint_task_contract(
     private_conditioning: bool = False,
+    *,
+    target_semantics: str = TARGET_SEMANTICS,
+    target_conversion: str = TARGET_CONVERSION,
 ) -> dict[str, Any]:
     """Return the frozen public or private-conditioned task contract."""
 
     if not isinstance(private_conditioning, bool):
         raise TypeError("private_conditioning must be bool")
+    if (target_semantics, target_conversion) not in SUPPORTED_TARGET_CONTRACTS:
+        raise ValueError("unsupported target semantics/conversion pair")
     contract = {
         "objective": OBJECTIVE,
         "model_input_scope": (
@@ -50,8 +64,8 @@ def checkpoint_task_contract(
         ),
         "model_output": MODEL_OUTPUT,
         "output_shape": [NUM_PLAYERS, NUM_PLAYERS],
-        "target_semantics": TARGET_SEMANTICS,
-        "target_conversion": TARGET_CONVERSION,
+        "target_semantics": target_semantics,
+        "target_conversion": target_conversion,
         "train_player_augmentation": CYCLIC_ROTATION_VERSION,
     }
     if private_conditioning:
@@ -93,9 +107,15 @@ def build_model_from_checkpoint(
         model_config = ToMBeliefBackboneConfig(**dict(raw_model_config))
     except TypeError as exc:
         raise ValueError("checkpoint model_config is incompatible") from exc
+    target_semantics = checkpoint.get("target_semantics")
+    target_conversion = checkpoint.get("target_conversion")
     expected = {
         "schema_version": SAMPLE_SCHEMA_VERSION,
-        **checkpoint_task_contract(model_config.private_conditioning),
+        **checkpoint_task_contract(
+            model_config.private_conditioning,
+            target_semantics=target_semantics,
+            target_conversion=target_conversion,
+        ),
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -122,6 +142,7 @@ def build_model_from_checkpoint(
 __all__ = [
     "MODEL_OUTPUT",
     "OBJECTIVE",
+    "SUPPORTED_TARGET_CONTRACTS",
     "build_model_from_checkpoint",
     "checkpoint_task_contract",
     "load_checkpoint",

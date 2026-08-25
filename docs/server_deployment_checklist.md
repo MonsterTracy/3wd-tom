@@ -76,12 +76,12 @@ test ! -e "${SHADOW_ROOT}"
 1. 原 48/6/6 split 中的 test 六局保持封存。模型选择阶段只合并 train 与 validation 为 54 局开发集并生成 5-fold；fold 目录没有 `test.jsonl`，训练入口会拒绝任何含 sealed test game ID 的 fold。
 2. 先分别审计原 train 与 validation 的 dense strict-PRE 契约。审计要求每个 earlier boundary 都是最终 encoded game sequence 的精确前缀；`max_seq_len=256` 截断破坏该关系时直接失败，不丢弃边界或改写数据。
 3. dense 训练的 `batch_size=8` 表示 8 局；每局只运行一次 causal backbone，并在该局所有 PRE boundaries 输出监督。初始候选固定 4 层、hidden 256 的当前 Qwen2 backbone，最多 80 epochs，warmup-cosine，patience 12。
-4. 先运行 Dense-A（learning rate `1e-4`、minimum `1e-5`、seed 42）。OOF 报告覆盖全部 54 局且每局只出现一次，主门槛为 observer-weighted normalized reducible-gap improvement `>=0.50`。同时比较 fold-train-only global prior 与 phase prior，并报告 game-level bootstrap 95% CI。
-5. 只有 Dense-A 未达门槛时才运行 Dense-B（learning rate `3e-4`、minimum `3e-5`，其余设置完全相同）。不能根据封存 test 选择 learning rate、epoch 或 seed。
+4. 先运行 Dense-A（learning rate `1e-4`、minimum `1e-5`、seed 42）。OOF 报告覆盖全部 54 局且每局只出现一次；`0.50` 仅保留为描述性参考值，在 fixed-state repeatability ceiling 建立前不作为 acceptance gate。同时比较 fold-train-only global prior 与 phase prior，并报告 game-level bootstrap 95% CI。
+5. 当前批次不根据该描述性参考值自动切换 learning rate、增加 epoch 或扩大模型；不能根据封存 test 选择超参数。
 6. `run_development_oof` 会复用配置完全一致且已有成功 `summary.json` 的 fold；若某个 fold 只有不完整输出，则停止并要求检查该 fold，不删除其他已完成 fold，也不从 fold 0 重新训练。
 7. 在 OOF 方案冻结并完成开发集最终拟合前，不运行 `script.twd_tom.eval`。封存 test 只允许对最终选定的单一 checkpoint 评估一次。
 
-当前 `public + hard-knowledge masks` ToM 是与 public-only Dense-A 并行的实验，不复用或覆盖其输出。它使用完全相同的 54 局开发 folds、Qwen2 4×256、dense boundaries、batch size 8、epoch/scheduler/early-stopping 设置和原始 self-report targets；唯一模型变量是内部兼容参数 `--private-conditioning`，输入只增加每个 observer 当时已有的 `known_werewolves / known_non_werewolves`。主门槛改为相对 `private_admissible_uniform` 的 observer-weighted normalized reducible-gap improvement `>=0.50`；public uniform、fold-train-only global/phase prior 仍同时保留作诊断。
+当前 `public + hard-knowledge masks` ToM 是与 public-only Dense-A 并行的诊断实验，不复用或覆盖其输出。它使用完全相同的 54 局开发 folds、Qwen2 4×256、dense boundaries、batch size 8、epoch/scheduler/early-stopping 设置和原始 self-report targets；唯一模型变量是内部兼容参数 `--private-conditioning`，输入只增加每个 observer 当时已有的 `known_werewolves / known_non_werewolves`。相对 `private_admissible_uniform` 的指标只作诊断；public uniform、fold-train-only global/phase prior 同时保留。
 
 Dense-A 的服务器命令模板如下。路径使用项目内的 `datasets`、`outputs` 软链接，以便训练 provenance 保存 repository-relative path；物理文件仍写入 `/data/yuxiao/3wd-tom`。训练只使用项目 Python 环境，不需要启动 vLLM。
 
@@ -149,7 +149,7 @@ nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
   --seed 42 \
   --device cuda \
   --bootstrap-samples 2000 \
-  --target-improvement 0.50 \
+  --reference-improvement 0.50 \
   > "${OOF_LOG}" 2>&1 < /dev/null &
 
 OOF_PID=$!
@@ -221,6 +221,84 @@ ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_2026
 
 后续 All / Non-wolf / Villager 三组 5-fold OOF 复用同一 sidecar、folds、Qwen2、seed、优化参数、`no_phase_day` 输入 profile 和 targets；唯一实验变量分别为 `--supervision-scope all_alive`、`non_wolf_alive`、`villager_alive`。每个 scope 在自身监督行内单独累计 model KL sum、uniform KL sum 与 GapClosed，不共用 all-role denominator。`speaker_alive` 仅为 diagnostic scope，不升级为主任务。
 
+### Annotation V2 接入与归因批次
+
+该批次保持 canonical60 和 split/fold 文件逐字节不变。历史行为独立命名为 `legacy_v1`，其中空怀疑集合仍按原实现插补为 hard-admissible non-self uniform；新行为独立命名为 `v1_empty_unobserved`，只在 Dataset 派生阶段把空集合变成 `label_observed=False`，对应 target row 为全零且不进入 CE/KL。二者不得都简称为 V1。V2 speech 通过 `compat_actions` 派生成现有 feature builder 可读的公开 action 序列；V2 belief 直接使用 `compat_relative_suspicion_distribution` 与 `distribution_loss_mask`，abstain 不插补。任一 sidecar 的 schema、record digest、join key、speaker/phase/public digest、hard knowledge 或 role 绑定不一致都会停止，不回退到其他 source。
+
+现有两份 V2 sidecar 应保存到大容量 `review` 目录，并通过项目软链接使用：
+
+```bash
+SPEECH_V2="/home/dell/yuxiao/3wd-tom/review/annotation_v2/speech_annotations_v2_public_only.jsonl"
+BELIEF_V2="/home/dell/yuxiao/3wd-tom/review/annotation_v2/belief_annotations_v2_all_observers.jsonl"
+```
+
+fixed-state repeatability 不能用现有 V1/V2 各一份标签冒充。应以完全相同的 frozen-state key 集合和同一种 V2 annotation procedure 独立生成 3–5 份 replicate；项目只负责严格验证 frozen-state identity 并审计，不提供标签修复。该审计可以与 exploratory 2×2 OOF 并行，但在冻结 V2 正式 benchmark 前必须完成。以下命令以三份 replicate 为例：
+
+```bash
+set -euo pipefail
+cd /home/dell/yuxiao/3wd-tom
+
+REPEAT_ROOT="/home/dell/yuxiao/3wd-tom/review/annotation_v2/repeatability"
+test ! -e "${REPEAT_ROOT}/repeatability_summary.json"
+
+/home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.audit_belief_label_repeatability \
+  --replicate "${REPEAT_ROOT}/replicate_1.jsonl" \
+  --replicate "${REPEAT_ROOT}/replicate_2.jsonl" \
+  --replicate "${REPEAT_ROOT}/replicate_3.jsonl" \
+  --output "${REPEAT_ROOT}/repeatability_summary.json" \
+  --per-state-jsonl "${REPEAT_ROOT}/repeatability_per_state.jsonl" \
+  --per-state-csv "${REPEAT_ROOT}/repeatability_per_state.csv"
+```
+
+报告按 `observer_role`、`day`、reference support size 给出 exact support、Jaccard、TV、JS；TV/JS 只统计两次都满足 `distribution_loss_mask=True` 的 pair。报告只测 ceiling，不产生人为 acceptance threshold。
+
+exploratory 2×2 归因矩阵不以 repeatability 为运行门槛。它固定 Qwen2、`no_phase_day`、seed 42、同一五折与优化参数，对比 Speech V1/V2 × Belief `v1_empty_unobserved`/V2；入口依次运行 `non_wolf_alive` 主任务和 `villager_alive` diagnostic，共八个可恢复 OOF job：
+
+```bash
+cd /home/dell/yuxiao/3wd-tom
+
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_dev54_folds5_seed42"
+ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_20260825_023121_split42_48-6-6/role_sidecar.json"
+SPEECH_V2="/home/dell/yuxiao/3wd-tom/review/annotation_v2/speech_annotations_v2_public_only.jsonl"
+BELIEF_V2="/home/dell/yuxiao/3wd-tom/review/annotation_v2/belief_annotations_v2_all_observers.jsonl"
+ABLATION_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/tom60_annotation_v2_ablation_seed42"
+ABLATION_LOG="/data/yuxiao/3wd-tom/logs/tom60_annotation_v2_ablation_seed42.console.log"
+
+test ! -e "${ABLATION_OUTPUT}"
+test ! -e "${ABLATION_LOG}"
+
+nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
+  -m script.twd_tom.run_annotation_v2_ablation \
+  --fold-root "${FOLD_ROOT}" \
+  --role-sidecar "${ROLE_SIDECAR}" \
+  --speech-v2-annotations "${SPEECH_V2}" \
+  --belief-v2-annotations "${BELIEF_V2}" \
+  --output-dir "${ABLATION_OUTPUT}" \
+  --epochs 80 \
+  --batch-size 8 \
+  --learning-rate 1e-4 \
+  --min-learning-rate 1e-5 \
+  --warmup-ratio 0.05 \
+  --early-stopping-patience 12 \
+  --early-stopping-min-delta 1e-4 \
+  --seed 42 \
+  --device cuda \
+  --bootstrap-samples 2000 \
+  --worst-case-limit 50 \
+  > "${ABLATION_LOG}" 2>&1 < /dev/null &
+
+ABLATION_PID=$!
+echo "ABLATION_PID=${ABLATION_PID}"
+echo "ABLATION_LOG=${ABLATION_LOG}"
+```
+
+该运行的 summary 必须标记 `benchmark_status=exploratory`。只有准备冻结正式 V2 benchmark 时，才使用新的正式输出目录并在同一命令加入：
+
+先将 `REPEAT_AUDIT` 设为 `/home/dell/yuxiao/3wd-tom/review/annotation_v2/repeatability/repeatability_summary.json` 并用 `test -f "${REPEAT_AUDIT}"` 验证存在；然后复制上面的完整命令，改用一个未存在的正式输出目录，并在参数中同时加入 `--repeatability-audit "${REPEAT_AUDIT}"` 和 `--freeze-v2-benchmark`。
+
+此时缺少、损坏或未通过的 repeatability 报告会在创建输出目录和训练前失败；成功 summary 标记 `benchmark_status=frozen_formal`。最终归因表为 `${ABLATION_OUTPUT}/annotation_v2_ablation_table.md` 和 `annotation_v2_ablation_summary.json`。每个 OOF 目录还会导出 `worst_cases.jsonl/csv`，包含 public history、observer/role、`legacy_v1` target、`v1_empty_unobserved` target、V2 target、prediction、support size 及同 observer 的前后 boundary target。恢复运行时省略首次防覆盖的 `test ! -e "${ABLATION_OUTPUT}"`；配置不一致或只有部分 worst-case 文件时仍会停止检查。
+
 `public + hard-knowledge masks` Dense-A 使用新的输出和日志名，并在同一个入口增加内部兼容参数：
 
 ```bash
@@ -249,7 +327,7 @@ nohup /home/dell/yuxiao/envs/3wd-tom/bin/python \
   --seed 42 \
   --device cuda \
   --bootstrap-samples 2000 \
-  --target-improvement 0.50 \
+  --reference-improvement 0.50 \
   --private-conditioning \
   > "${OOF_LOG}" 2>&1 < /dev/null &
 

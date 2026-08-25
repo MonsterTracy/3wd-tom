@@ -25,6 +25,15 @@ from script.twd_tom.train import (
     stratified_game_macro_metrics,
 )
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.annotation_v2 import (
+    BELIEF_ANNOTATION_SOURCES,
+    LEGACY_V1_BELIEF_SOURCE,
+    SPEECH_ANNOTATION_SOURCES,
+    V1_ANNOTATION_SOURCE,
+    V2_ANNOTATION_SOURCE,
+    load_belief_v2_annotations,
+    load_speech_v2_annotations,
+)
 from werewolf.models.twd_tom.checkpoint import (
     build_model_from_checkpoint,
     checkpoint_task_contract,
@@ -51,6 +60,8 @@ class EvaluationConfig:
     output_path: str | None = None
     training_dataset_path: str | None = None
     role_sidecar_path: str | None = None
+    speech_v2_annotation_path: str | None = None
+    belief_v2_annotation_path: str | None = None
     batch_size: int = 32
     device: str = "auto"
     num_workers: int = 0
@@ -64,6 +75,8 @@ class EvaluationConfig:
             "output_path",
             "training_dataset_path",
             "role_sidecar_path",
+            "speech_v2_annotation_path",
+            "belief_v2_annotation_path",
         ):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -170,6 +183,52 @@ def resolve_role_sidecar_path(
     return path
 
 
+def resolve_annotation_sidecar_path(
+    checkpoint: Mapping[str, Any],
+    *,
+    annotation_name: str,
+    override_path: str | None,
+) -> Path | None:
+    if annotation_name not in {"speech_v2", "belief_v2"}:
+        raise ValueError("unsupported annotation sidecar name")
+    provenance = checkpoint.get("run_provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("checkpoint must record run_provenance")
+    path_field = f"{annotation_name}_annotation_path"
+    sha_field = f"{annotation_name}_annotation_sha256"
+    recorded_path = provenance.get(path_field)
+    expected_sha256 = provenance.get(sha_field)
+    if recorded_path is None:
+        if override_path is not None:
+            raise ValueError(
+                f"checkpoint did not use {annotation_name} annotations"
+            )
+        return None
+    if (
+        not isinstance(recorded_path, str)
+        or Path(recorded_path).is_absolute()
+        or ".." in Path(recorded_path).parts
+    ):
+        raise ValueError(f"{annotation_name} path must be repository-relative")
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_sha256
+        )
+    ):
+        raise ValueError(f"checkpoint {annotation_name} SHA-256 is invalid")
+    path = (
+        Path(override_path).resolve()
+        if override_path is not None
+        else (REPO_ROOT / recorded_path).resolve()
+    )
+    if sha256_file(path) != expected_sha256:
+        raise ValueError(f"{annotation_name} SHA-256 mismatch")
+    return path
+
+
 def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     device = resolve_device(config.device)
     checkpoint_path = Path(config.checkpoint_path).resolve()
@@ -232,12 +291,48 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         ]:
             raise ValueError("role sidecar and evaluation split digests differ")
         observer_roles = load_role_sidecar(role_sidecar_path)
+    speech_annotation_source = checkpoint.get(
+        "speech_annotation_source",
+        V1_ANNOTATION_SOURCE,
+    )
+    belief_annotation_source = checkpoint.get(
+        "belief_annotation_source",
+        LEGACY_V1_BELIEF_SOURCE,
+    )
+    if speech_annotation_source not in SPEECH_ANNOTATION_SOURCES:
+        raise ValueError("checkpoint speech annotation source is unsupported")
+    if belief_annotation_source not in BELIEF_ANNOTATION_SOURCES:
+        raise ValueError("checkpoint belief annotation source is unsupported")
+    speech_v2_path = resolve_annotation_sidecar_path(
+        checkpoint,
+        annotation_name="speech_v2",
+        override_path=config.speech_v2_annotation_path,
+    )
+    belief_v2_path = resolve_annotation_sidecar_path(
+        checkpoint,
+        annotation_name="belief_v2",
+        override_path=config.belief_v2_annotation_path,
+    )
+    if speech_annotation_source == V2_ANNOTATION_SOURCE and speech_v2_path is None:
+        raise ValueError("V2 speech checkpoint requires its bound sidecar")
+    if belief_annotation_source == V2_ANNOTATION_SOURCE and belief_v2_path is None:
+        raise ValueError("V2 belief checkpoint requires its bound sidecar")
+    speech_v2_annotations = (
+        None if speech_v2_path is None else load_speech_v2_annotations(speech_v2_path)
+    )
+    belief_v2_annotations = (
+        None if belief_v2_path is None else load_belief_v2_annotations(belief_v2_path)
+    )
     dataset = TWDToMDataset(
         samples,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=model.config.max_seq_len),
         include_private_features=model.config.private_conditioning,
         observer_roles_by_game=observer_roles,
         supervision_scope=supervision_scope,
+        speech_annotation_source=speech_annotation_source,
+        belief_annotation_source=belief_annotation_source,
+        speech_v2_annotations=speech_v2_annotations,
+        belief_v2_annotations=belief_v2_annotations,
     )
     if dataset.model_input_scope != checkpoint.get("model_input_scope"):
         raise ValueError("evaluation Dataset model_input_scope mismatch")
@@ -245,6 +340,14 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         raise ValueError("evaluation Dataset target_semantics mismatch")
     if dataset.target_conversion != checkpoint.get("target_conversion"):
         raise ValueError("evaluation Dataset target_conversion mismatch")
+    if dataset.label_observation_semantics != checkpoint.get(
+        "label_observation_semantics"
+    ):
+        raise ValueError("evaluation Dataset label observation semantics mismatch")
+    if dataset.speech_annotation_source != speech_annotation_source:
+        raise ValueError("evaluation Dataset speech annotation source mismatch")
+    if dataset.belief_annotation_source != belief_annotation_source:
+        raise ValueError("evaluation Dataset belief annotation source mismatch")
     loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
@@ -285,7 +388,11 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "status": "ok",
         "schema_version": SAMPLE_SCHEMA_VERSION,
-        **checkpoint_task_contract(model.config.private_conditioning),
+        **checkpoint_task_contract(
+            model.config.private_conditioning,
+            target_semantics=dataset.target_semantics,
+            target_conversion=dataset.target_conversion,
+        ),
         "backbone": model.backbone_name,
         "device": str(device),
         "checkpoint_path": str(checkpoint_path),
@@ -296,6 +403,8 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "evaluation_supervised_observer_count": supervised,
         "supervision_scope": supervision_scope,
         "role_metadata_usage": "supervision_metadata_only",
+        "speech_annotation_source": speech_annotation_source,
+        "belief_annotation_source": belief_annotation_source,
         "training_dataset_path": str(training_path),
         "training_game_ids": list(training_game_ids),
         "validation_game_ids": list(validation_game_ids),
@@ -326,6 +435,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", default=None)
     parser.add_argument("--training-dataset", default=None)
     parser.add_argument("--role-sidecar", default=None)
+    parser.add_argument("--speech-v2-annotations", default=None)
+    parser.add_argument("--belief-v2-annotations", default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -340,6 +451,8 @@ def main() -> int:
         output_path=args.output,
         training_dataset_path=args.training_dataset,
         role_sidecar_path=args.role_sidecar,
+        speech_v2_annotation_path=args.speech_v2_annotations,
+        belief_v2_annotation_path=args.belief_v2_annotations,
         batch_size=args.batch_size,
         device=args.device,
         num_workers=args.num_workers,

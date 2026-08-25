@@ -8,7 +8,9 @@ import pytest
 import torch
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.annotation_v2 import LEGACY_V1_BELIEF_SOURCE
 from werewolf.models.twd_tom.belief_labels import (
+    legacy_v1_suspicion_set_to_belief_vector,
     suspicion_set_to_belief_vector,
 )
 from werewolf.models.twd_tom.dataset import (
@@ -96,6 +98,8 @@ def test_dataset_consumes_raw_self_report_and_emits_fixed_belief_contract(
 
     assert item["belief_targets"].shape == (7, 7)
     assert item["observer_alive_mask"].shape == (7,)
+    assert item["observer_scope_mask"].shape == (7,)
+    assert item["label_observed_mask"].shape == (7,)
     assert item["diagonal_target_mask"].shape == (7, 7)
     assert item["belief_targets"].dtype == torch.float32
     assert item["observer_alive_mask"].dtype == torch.bool
@@ -108,7 +112,7 @@ def test_dataset_consumes_raw_self_report_and_emits_fixed_belief_contract(
     assert "reasoning_player_id" not in item
 
 
-def test_each_alive_observer_row_matches_the_deterministic_conversion(
+def test_each_observed_alive_row_matches_the_deterministic_conversion(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
@@ -117,6 +121,10 @@ def test_each_alive_observer_row_matches_the_deterministic_conversion(
     item = TWDToMDataset([sample], target_dtype=torch.float64)[0]
     for observer_id in sample["observer_ids"]:
         subject = f"player{observer_id}"
+        if not sample["suspected_werewolves"][subject]:
+            assert not item["label_observed_mask"][observer_id - 1]
+            assert torch.count_nonzero(item["belief_targets"][observer_id - 1]) == 0
+            continue
         expected = suspicion_set_to_belief_vector(
             sample["suspected_werewolves"][subject],
             observer_id=subject,
@@ -125,6 +133,38 @@ def test_each_alive_observer_row_matches_the_deterministic_conversion(
             dtype=torch.float64,
         )
         torch.testing.assert_close(item["belief_targets"][observer_id - 1], expected)
+
+
+def test_legacy_v1_is_distinct_from_empty_unobserved_v1(
+    suspicion_sample_factory,
+):
+    sample = suspicion_sample_factory(
+        suspicions_by_observer={1: ["player3"], 2: []}
+    )
+    current = TWDToMDataset([sample], target_dtype=torch.float64)[0]
+    legacy = TWDToMDataset(
+        [sample],
+        target_dtype=torch.float64,
+        belief_annotation_source=LEGACY_V1_BELIEF_SOURCE,
+    )[0]
+    expected = legacy_v1_suspicion_set_to_belief_vector(
+        [],
+        observer_id="player2",
+        known_werewolves=sample["known_werewolves"]["player2"],
+        known_non_werewolves=sample["known_non_werewolves"]["player2"],
+        dtype=torch.float64,
+    )
+
+    assert not current["label_observed_mask"][1]
+    assert torch.count_nonzero(current["belief_targets"][1]) == 0
+    assert legacy["label_observed_mask"][1]
+    torch.testing.assert_close(legacy["belief_targets"][1], expected)
+    assert current["metadata"]["belief_annotation_source"] != (
+        legacy["metadata"]["belief_annotation_source"]
+    )
+    assert current["metadata"]["target_conversion"] != (
+        legacy["metadata"]["target_conversion"]
+    )
 
 
 def test_observer_alive_mask_uses_observer_ids_only(suspicion_sample_factory):
@@ -165,11 +205,11 @@ def test_dead_player_columns_remain_valid_targets(suspicion_sample_factory):
     assert player1_row[6] > player1_row[1]
 
 
-def test_all_alive_rows_are_normalized_and_have_zero_diagonal(
+def test_all_observed_rows_are_normalized_and_have_zero_diagonal(
     suspicion_sample_factory,
 ):
     item = TWDToMDataset([suspicion_sample_factory()])[0]
-    alive_targets = item["belief_targets"][item["observer_alive_mask"]]
+    alive_targets = item["belief_targets"][item["label_observed_mask"]]
     torch.testing.assert_close(
         alive_targets.sum(dim=-1),
         torch.ones(alive_targets.shape[0]),
@@ -267,7 +307,7 @@ def test_rotation_keeps_supervision_roles_aligned_with_rotated_targets(
 
     item = dataset[0]
 
-    assert item["observer_supervision_mask"].tolist() == [
+    assert item["observer_scope_mask"].tolist() == [
         True,
         False,
         False,
@@ -276,6 +316,10 @@ def test_rotation_keeps_supervision_roles_aligned_with_rotated_targets(
         True,
         False,
     ]
+    assert torch.equal(
+        item["observer_supervision_mask"],
+        item["observer_scope_mask"] & item["label_observed_mask"],
+    )
     assert item["metadata"]["observer_roles"] == [
         "Villager",
         "Seer",
@@ -356,7 +400,7 @@ def test_dataset_rejects_suspicion_that_contradicts_hard_knowledge(
         TWDToMDataset([sample])
 
 
-def test_dataset_empty_report_excludes_known_non_wolves_from_fallback(
+def test_dataset_empty_report_is_unobserved_and_has_no_distribution_target(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
@@ -366,9 +410,9 @@ def test_dataset_empty_report_excludes_known_non_wolves_from_fallback(
 
     item = TWDToMDataset([sample])[0]
 
-    assert item["belief_targets"][0].tolist() == pytest.approx(
-        [0.0, 0.2, 0.2, 0.0, 0.2, 0.2, 0.2]
-    )
+    assert not item["label_observed_mask"][0]
+    assert not item["observer_supervision_mask"][0]
+    assert item["belief_targets"][0].tolist() == pytest.approx([0.0] * 7)
 
 
 def test_raw_sample_is_not_mutated(suspicion_sample_factory):

@@ -12,8 +12,19 @@ import torch
 from torch.utils.data import Dataset
 
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
+from werewolf.models.twd_tom.annotation_v2 import (
+    BELIEF_ANNOTATION_SOURCES,
+    LEGACY_V1_BELIEF_SOURCE,
+    SPEECH_ANNOTATION_SOURCES,
+    V1_ANNOTATION_SOURCE,
+    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V2_ANNOTATION_SOURCE,
+    apply_speech_v2_to_sample,
+    belief_v2_targets_for_sample,
+)
 from werewolf.models.twd_tom.belief_labels import (
     close_hard_knowledge,
+    legacy_v1_suspicion_set_to_belief_vector,
     suspicion_set_to_belief_vector,
 )
 from werewolf.models.twd_tom.public_events import (
@@ -67,8 +78,19 @@ PRIVATE_FEATURE_FIELDS = (
 )
 TARGET_SEMANTICS = "relative_suspicion_matrix_v1"
 TARGET_CONVERSION = (
+    "nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3"
+)
+LEGACY_V1_TARGET_SEMANTICS = TARGET_SEMANTICS
+LEGACY_V1_TARGET_CONVERSION = (
     "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
 )
+V2_TARGET_SEMANTICS = "relative_suspicion_distribution_v2_compat_v1"
+V2_TARGET_CONVERSION = "annotation_v2_distribution_loss_mask_v1"
+LABEL_OBSERVATION_SEMANTICS = "empty_suspicion_is_unobserved_v1"
+LEGACY_V1_LABEL_OBSERVATION_SEMANTICS = (
+    "empty_suspicion_imputed_uniform_legacy_v1"
+)
+V2_LABEL_OBSERVATION_SEMANTICS = "annotation_v2_distribution_loss_mask_v1"
 CYCLIC_ROTATION_VERSION = "cyclic_rotation_v1"
 
 _SUBJECT_MAPPING_FIELDS = (
@@ -296,7 +318,9 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         )
         for field_name in _SUBJECT_MAPPING_FIELDS
     }
-    targets: dict[str, torch.Tensor] = {}
+    v1_empty_unobserved_targets: dict[str, torch.Tensor] = {}
+    legacy_v1_targets: dict[str, torch.Tensor] = {}
+    label_observed: dict[str, bool] = {}
     for subject in sorted(expected_subjects, key=PLAYER_TO_ID.__getitem__):
         status = mappings["belief_status"][subject]
         error = mappings["belief_errors"][subject]
@@ -332,12 +356,28 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
             mappings["agent_backend_ids"][subject],
             field_name=f"{subject} agent_backend_id",
         )
-        targets[subject] = suspicion_set_to_belief_vector(
-            normalized_suspicion,
-            observer_id=subject,
-            known_werewolves=closed_wolves,
-            known_non_werewolves=closed_non_wolves,
-            dtype=torch.float64,
+        label_observed[subject] = bool(normalized_suspicion)
+        v1_empty_unobserved_targets[subject] = (
+            suspicion_set_to_belief_vector(
+                normalized_suspicion,
+                observer_id=subject,
+                known_werewolves=closed_wolves,
+                known_non_werewolves=closed_non_wolves,
+                dtype=torch.float64,
+            )
+            if normalized_suspicion
+            else torch.zeros(NUM_PLAYERS, dtype=torch.float64)
+        )
+        legacy_v1_targets[subject] = (
+            v1_empty_unobserved_targets[subject].clone()
+            if normalized_suspicion
+            else legacy_v1_suspicion_set_to_belief_vector(
+                normalized_suspicion,
+                observer_id=subject,
+                known_werewolves=closed_wolves,
+                known_non_werewolves=closed_non_wolves,
+                dtype=torch.float64,
+            )
         )
 
     public_events = normalize_public_events(sample.get("public_events"))
@@ -403,7 +443,11 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
     normalized["speech_annotations"] = speech_annotations
     for field_name, value in mappings.items():
         normalized[field_name] = value
-    normalized["_belief_targets"] = targets
+    normalized["_v1_empty_unobserved_belief_targets"] = (
+        v1_empty_unobserved_targets
+    )
+    normalized["_legacy_v1_belief_targets"] = legacy_v1_targets
+    normalized["_label_observed"] = label_observed
     return normalized
 
 
@@ -442,6 +486,15 @@ class TWDToMDataset(Dataset):
         include_private_features: bool = False,
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
+        speech_annotation_source: str = V1_ANNOTATION_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        speech_v2_annotations: Mapping[
+            tuple[str, int], Mapping[str, Any]
+        ] | None = None,
+        belief_v2_annotations: Mapping[
+            tuple[str, int, str], Mapping[str, Any]
+        ] | None = None,
+        fixed_cyclic_shift: int | None = None,
     ) -> None:
         if isinstance(samples, (str, bytes)) or not isinstance(samples, Sequence):
             raise TypeError("samples must be a sequence")
@@ -449,10 +502,40 @@ class TWDToMDataset(Dataset):
             raise TypeError("target_dtype must be a floating-point dtype")
         if not isinstance(enable_cyclic_rotation, bool):
             raise TypeError("enable_cyclic_rotation must be bool")
+        if fixed_cyclic_shift is not None and (
+            isinstance(fixed_cyclic_shift, bool)
+            or not isinstance(fixed_cyclic_shift, int)
+            or not 0 <= fixed_cyclic_shift < NUM_PLAYERS
+        ):
+            raise ValueError("fixed_cyclic_shift must be None or an integer in [0, 6]")
+        if enable_cyclic_rotation and fixed_cyclic_shift is not None:
+            raise ValueError(
+                "random epoch rotation and fixed_cyclic_shift are mutually exclusive"
+            )
         if not isinstance(include_private_features, bool):
             raise TypeError("include_private_features must be bool")
         if supervision_scope not in SUPERVISION_SCOPES:
             raise ValueError(f"supervision_scope must be one of {SUPERVISION_SCOPES}")
+        if speech_annotation_source not in SPEECH_ANNOTATION_SOURCES:
+            raise ValueError(
+                "speech_annotation_source must be one of "
+                f"{SPEECH_ANNOTATION_SOURCES}"
+            )
+        if belief_annotation_source not in BELIEF_ANNOTATION_SOURCES:
+            raise ValueError(
+                "belief_annotation_source must be one of "
+                f"{BELIEF_ANNOTATION_SOURCES}"
+            )
+        if (
+            speech_annotation_source == V2_ANNOTATION_SOURCE
+            and speech_v2_annotations is None
+        ):
+            raise ValueError("V2 speech source requires speech_v2_annotations")
+        if (
+            belief_annotation_source == V2_ANNOTATION_SOURCE
+            and belief_v2_annotations is None
+        ):
+            raise ValueError("V2 belief source requires belief_v2_annotations")
         if observer_roles_by_game is not None and not isinstance(
             observer_roles_by_game, Mapping
         ):
@@ -463,7 +546,19 @@ class TWDToMDataset(Dataset):
             epoch=0,
             sample_index=0,
         )
-        self._raw_samples = [deepcopy(dict(sample)) for sample in samples]
+        self.observer_roles_by_game = {
+            game_id: normalize_observer_roles(roles)
+            for game_id, roles in (observer_roles_by_game or {}).items()
+        }
+        self._v1_raw_samples = [deepcopy(dict(sample)) for sample in samples]
+        self._raw_samples = [
+            (
+                apply_speech_v2_to_sample(sample, speech_v2_annotations)
+                if speech_annotation_source == V2_ANNOTATION_SOURCE
+                else deepcopy(sample)
+            )
+            for sample in self._v1_raw_samples
+        ]
         self.samples = [_normalize_sample(sample) for sample in self._raw_samples]
         last_prefix_by_game: dict[str, list[dict[str, Any]]] = {}
         for sample in self.samples:
@@ -480,12 +575,9 @@ class TWDToMDataset(Dataset):
         self.feature_builder = feature_builder or PublicEventFeatureBuilder()
         self.target_dtype = target_dtype
         self.enable_cyclic_rotation = enable_cyclic_rotation
+        self.fixed_cyclic_shift = fixed_cyclic_shift
         self.augmentation_seed = augmentation_seed
         self.include_private_features = include_private_features
-        self.observer_roles_by_game = {
-            game_id: normalize_observer_roles(roles)
-            for game_id, roles in (observer_roles_by_game or {}).items()
-        }
         sample_game_ids = {sample["game_id"] for sample in self.samples}
         missing_roles = sorted(sample_game_ids - set(self.observer_roles_by_game))
         if (
@@ -497,14 +589,46 @@ class TWDToMDataset(Dataset):
                 f"missing={missing_roles[:10]}"
             )
         self.supervision_scope = supervision_scope
+        self.speech_annotation_source = speech_annotation_source
+        self.belief_annotation_source = belief_annotation_source
+        self._belief_v2_targets: list[torch.Tensor] | None = None
+        self._belief_v2_observed_masks: list[torch.Tensor] | None = None
+        if belief_v2_annotations is not None:
+            v2_rows = [
+                belief_v2_targets_for_sample(
+                    sample,
+                    belief_v2_annotations,
+                    observer_roles=self.observer_roles_by_game.get(
+                        sample["game_id"]
+                    ),
+                    dtype=target_dtype,
+                )
+                for sample in self._v1_raw_samples
+            ]
+            self._belief_v2_targets = [row[0] for row in v2_rows]
+            self._belief_v2_observed_masks = [row[1] for row in v2_rows]
         self._epoch = 0
         self.model_input_scope = (
             PRIVATE_MODEL_INPUT_SCOPE
             if include_private_features
             else MODEL_INPUT_SCOPE
         )
-        self.target_semantics = TARGET_SEMANTICS
-        self.target_conversion = TARGET_CONVERSION
+        if belief_annotation_source == V2_ANNOTATION_SOURCE:
+            self.target_semantics = V2_TARGET_SEMANTICS
+            self.target_conversion = V2_TARGET_CONVERSION
+            self.label_observation_semantics = (
+                V2_LABEL_OBSERVATION_SEMANTICS
+            )
+        elif belief_annotation_source == LEGACY_V1_BELIEF_SOURCE:
+            self.target_semantics = LEGACY_V1_TARGET_SEMANTICS
+            self.target_conversion = LEGACY_V1_TARGET_CONVERSION
+            self.label_observation_semantics = (
+                LEGACY_V1_LABEL_OBSERVATION_SEMANTICS
+            )
+        else:
+            self.target_semantics = TARGET_SEMANTICS
+            self.target_conversion = TARGET_CONVERSION
+            self.label_observation_semantics = LABEL_OBSERVATION_SEMANTICS
 
     @classmethod
     def from_jsonl(
@@ -518,6 +642,15 @@ class TWDToMDataset(Dataset):
         include_private_features: bool = False,
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
+        speech_annotation_source: str = V1_ANNOTATION_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        speech_v2_annotations: Mapping[
+            tuple[str, int], Mapping[str, Any]
+        ] | None = None,
+        belief_v2_annotations: Mapping[
+            tuple[str, int, str], Mapping[str, Any]
+        ] | None = None,
+        fixed_cyclic_shift: int | None = None,
     ) -> "TWDToMDataset":
         return cls(
             load_twd_tom_jsonl(path),
@@ -528,6 +661,11 @@ class TWDToMDataset(Dataset):
             include_private_features=include_private_features,
             observer_roles_by_game=observer_roles_by_game,
             supervision_scope=supervision_scope,
+            speech_annotation_source=speech_annotation_source,
+            belief_annotation_source=belief_annotation_source,
+            speech_v2_annotations=speech_v2_annotations,
+            belief_v2_annotations=belief_v2_annotations,
+            fixed_cyclic_shift=fixed_cyclic_shift,
         )
 
     def __len__(self) -> int:
@@ -541,13 +679,14 @@ class TWDToMDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.samples[index]
-        shift = 0
+        shift = self.fixed_cyclic_shift or 0
         if self.enable_cyclic_rotation:
             shift = deterministic_cyclic_shift(
                 seed=self.augmentation_seed,
                 epoch=self._epoch,
                 sample_index=index,
             )
+        if shift:
             sample = _normalize_sample(
                 cyclically_rotate_belief_sample(
                     self._raw_samples[index],
@@ -565,11 +704,15 @@ class TWDToMDataset(Dataset):
             model_public_events,
             sample["speech_annotations"],
         )
-        belief_targets = torch.zeros(
+        v1_empty_unobserved_belief_targets = torch.zeros(
             (NUM_PLAYERS, NUM_PLAYERS),
             dtype=self.target_dtype,
         )
+        legacy_v1_belief_targets = torch.zeros_like(
+            v1_empty_unobserved_belief_targets
+        )
         observer_alive_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
+        v1_label_observed_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
         known_werewolf_mask = torch.zeros(
             (NUM_PLAYERS, NUM_PLAYERS), dtype=torch.bool
         )
@@ -577,10 +720,14 @@ class TWDToMDataset(Dataset):
         for observer_id in sample["observer_ids"]:
             subject = normalize_player(observer_id)
             row_index = observer_id - 1
-            belief_targets[row_index] = sample["_belief_targets"][subject].to(
-                dtype=self.target_dtype
-            )
+            v1_empty_unobserved_belief_targets[row_index] = sample[
+                "_v1_empty_unobserved_belief_targets"
+            ][subject].to(dtype=self.target_dtype)
+            legacy_v1_belief_targets[row_index] = sample[
+                "_legacy_v1_belief_targets"
+            ][subject].to(dtype=self.target_dtype)
             observer_alive_mask[row_index] = True
+            v1_label_observed_mask[row_index] = sample["_label_observed"][subject]
             for player in sample["known_werewolves"][subject]:
                 known_werewolf_mask[row_index, PLAYER_TO_ID[player] - 1] = True
             for player in sample["known_non_werewolves"][subject]:
@@ -588,12 +735,41 @@ class TWDToMDataset(Dataset):
                     row_index, PLAYER_TO_ID[player] - 1
                 ] = True
 
-        observer_supervision_mask = build_observer_supervision_mask(
+        v2_belief_targets = None
+        v2_label_observed_mask = None
+        if self._belief_v2_targets is not None:
+            v2_belief_targets = self._belief_v2_targets[index].clone()
+            v2_label_observed_mask = self._belief_v2_observed_masks[index].clone()
+            if shift:
+                v2_belief_targets = torch.roll(
+                    v2_belief_targets,
+                    shifts=(shift, shift),
+                    dims=(0, 1),
+                )
+                v2_label_observed_mask = torch.roll(
+                    v2_label_observed_mask,
+                    shifts=shift,
+                    dims=0,
+                )
+        if self.belief_annotation_source == V2_ANNOTATION_SOURCE:
+            if v2_belief_targets is None or v2_label_observed_mask is None:
+                raise RuntimeError("V2 belief targets were not materialized")
+            belief_targets = v2_belief_targets
+            label_observed_mask = v2_label_observed_mask
+        elif self.belief_annotation_source == LEGACY_V1_BELIEF_SOURCE:
+            belief_targets = legacy_v1_belief_targets
+            label_observed_mask = observer_alive_mask.clone()
+        else:
+            belief_targets = v1_empty_unobserved_belief_targets
+            label_observed_mask = v1_label_observed_mask
+
+        observer_scope_mask = build_observer_supervision_mask(
             alive_mask=observer_alive_mask,
             observer_roles=observer_roles,
             speaker_id=sample["speaker_id"],
             scope=self.supervision_scope,
         )
+        observer_supervision_mask = observer_scope_mask & label_observed_mask
 
         diagonal_target_mask = ~torch.eye(NUM_PLAYERS, dtype=torch.bool)
         metadata = {
@@ -610,19 +786,27 @@ class TWDToMDataset(Dataset):
             ),
             "raw_support_size": [
                 (
-                    len(sample["suspected_werewolves"][player])
-                    if player in sample["suspected_werewolves"]
+                    int((belief_targets[player_id - 1] > 0).sum().item())
+                    if observer_alive_mask[player_id - 1]
                     else None
                 )
-                for player in PLAYER_NAMES
+                for player_id in range(1, NUM_PLAYERS + 1)
             ],
             "raw_empty": [
                 (
-                    len(sample["suspected_werewolves"][player]) == 0
-                    if player in sample["suspected_werewolves"]
+                    not bool(label_observed_mask[player_id - 1])
+                    if observer_alive_mask[player_id - 1]
                     else None
                 )
-                for player in PLAYER_NAMES
+                for player_id in range(1, NUM_PLAYERS + 1)
+            ],
+            "label_observed": [
+                (
+                    bool(label_observed_mask[player_id - 1])
+                    if observer_alive_mask[player_id - 1]
+                    else None
+                )
+                for player_id in range(1, NUM_PLAYERS + 1)
             ],
             "hard_knowledge_count": [
                 (
@@ -645,18 +829,34 @@ class TWDToMDataset(Dataset):
             "supervision_scope": self.supervision_scope,
             "report_trigger": sample["report_trigger"],
             "label_provenance": sample["label_provenance"],
-            "target_semantics": TARGET_SEMANTICS,
-            "target_conversion": TARGET_CONVERSION,
+            "target_semantics": self.target_semantics,
+            "target_conversion": self.target_conversion,
+            "label_observation_semantics": self.label_observation_semantics,
+            "speech_annotation_source": self.speech_annotation_source,
+            "belief_annotation_source": self.belief_annotation_source,
         }
         result = {
             **features,
             "belief_targets": belief_targets,
+            "legacy_v1_belief_targets": legacy_v1_belief_targets,
+            "legacy_v1_label_observed_mask": observer_alive_mask.clone(),
+            "v1_empty_unobserved_belief_targets": (
+                v1_empty_unobserved_belief_targets
+            ),
+            "v1_empty_unobserved_label_observed_mask": (
+                v1_label_observed_mask
+            ),
             "observer_alive_mask": observer_alive_mask,
+            "observer_scope_mask": observer_scope_mask,
+            "label_observed_mask": label_observed_mask,
             "observer_supervision_mask": observer_supervision_mask,
             "diagonal_target_mask": diagonal_target_mask,
             "supervision_known_non_werewolf_mask": known_non_werewolf_mask,
             "metadata": metadata,
         }
+        if v2_belief_targets is not None:
+            result["v2_belief_targets"] = v2_belief_targets
+            result["v2_label_observed_mask"] = v2_label_observed_mask
         if self.include_private_features:
             metadata["private_feature_fields"] = list(PRIVATE_FEATURE_FIELDS)
             result.update({
@@ -675,7 +875,13 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         raise ValueError("batch cannot be empty")
     required_fields = {
         "belief_targets",
+        "legacy_v1_belief_targets",
+        "legacy_v1_label_observed_mask",
+        "v1_empty_unobserved_belief_targets",
+        "v1_empty_unobserved_label_observed_mask",
         "observer_alive_mask",
+        "observer_scope_mask",
+        "label_observed_mask",
         "observer_supervision_mask",
         "diagonal_target_mask",
         "supervision_known_non_werewolf_mask",
@@ -717,8 +923,29 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
     result = {
         **padded,
         "belief_targets": torch.stack([item["belief_targets"] for item in batch]),
+        "legacy_v1_belief_targets": torch.stack(
+            [item["legacy_v1_belief_targets"] for item in batch]
+        ),
+        "legacy_v1_label_observed_mask": torch.stack(
+            [item["legacy_v1_label_observed_mask"] for item in batch]
+        ),
+        "v1_empty_unobserved_belief_targets": torch.stack(
+            [item["v1_empty_unobserved_belief_targets"] for item in batch]
+        ),
+        "v1_empty_unobserved_label_observed_mask": torch.stack(
+            [
+                item["v1_empty_unobserved_label_observed_mask"]
+                for item in batch
+            ]
+        ),
         "observer_alive_mask": torch.stack(
             [item["observer_alive_mask"] for item in batch]
+        ),
+        "observer_scope_mask": torch.stack(
+            [item["observer_scope_mask"] for item in batch]
+        ),
+        "label_observed_mask": torch.stack(
+            [item["label_observed_mask"] for item in batch]
         ),
         "observer_supervision_mask": torch.stack(
             [item["observer_supervision_mask"] for item in batch]
@@ -739,16 +966,34 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
             field: torch.stack([item[field] for item in batch])
             for field in private_fields
         })
+    v2_fields = ("v2_belief_targets", "v2_label_observed_mask")
+    v2_presence = [tuple(field in item for field in v2_fields) for item in batch]
+    if any(any(presence) and not all(presence) for presence in v2_presence):
+        raise ValueError("V2 belief targets and observation masks must be paired")
+    if len(set(v2_presence)) != 1:
+        raise ValueError("batch cannot mix samples with and without V2 targets")
+    if all(v2_presence[0]):
+        result.update({
+            field: torch.stack([item[field] for item in batch])
+            for field in v2_fields
+        })
     return result
 
 
 __all__ = [
     "CYCLIC_ROTATION_VERSION",
     "MODEL_INPUT_SCOPE",
+    "LABEL_OBSERVATION_SEMANTICS",
+    "LEGACY_V1_LABEL_OBSERVATION_SEMANTICS",
+    "LEGACY_V1_TARGET_CONVERSION",
+    "LEGACY_V1_TARGET_SEMANTICS",
     "PRIVATE_FEATURE_FIELDS",
     "PRIVATE_MODEL_INPUT_SCOPE",
     "TARGET_SEMANTICS",
     "TARGET_CONVERSION",
+    "V2_TARGET_CONVERSION",
+    "V2_LABEL_OBSERVATION_SEMANTICS",
+    "V2_TARGET_SEMANTICS",
     "TWDToMDataset",
     "collate_twd_tom_samples",
     "cyclically_rotate_belief_sample",

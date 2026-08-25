@@ -208,6 +208,22 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
         }
 
     monkeypatch.setattr(oof_module, "run_training", fake_run_training)
+    monkeypatch.setattr(
+        oof_module,
+        "export_belief_worst_cases",
+        lambda **kwargs: {
+            "output_jsonl": str(kwargs["output_jsonl"]),
+            "output_csv": str(kwargs["output_csv"]),
+        },
+    )
+    monkeypatch.setattr(
+        oof_module,
+        "aggregate_worst_case_exports",
+        lambda **kwargs: {
+            "output_jsonl": str(kwargs["output_jsonl"]),
+            "output_csv": str(kwargs["output_csv"]),
+        },
+    )
 
     result = run_development_oof(
         fold_root=fold_root,
@@ -229,3 +245,4 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
         result["training_config"]["input_feature_profile"]
         == NO_DAY_INPUT_FEATURE_PROFILE
     )
+    assert result["descriptive_reference_target"]["is_acceptance_gate"] is False

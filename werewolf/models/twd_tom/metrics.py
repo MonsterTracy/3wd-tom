@@ -27,6 +27,8 @@ def compute_belief_metrics(
     diagonal_target_mask: torch.Tensor,
     *,
     observer_supervision_mask: torch.Tensor | None = None,
+    observer_scope_mask: torch.Tensor | None = None,
+    label_observed_mask: torch.Tensor | None = None,
     known_non_werewolf_mask: torch.Tensor | None = None,
 ) -> dict[str, int | float]:
     """Measure predictions for the selected subset of valid living observers."""
@@ -36,6 +38,7 @@ def compute_belief_metrics(
         belief_targets,
         observer_alive_mask,
         diagonal_target_mask,
+        observer_supervision_mask=observer_supervision_mask,
         reduction="none",
     )
     alive_observers = observer_alive_mask.to(
@@ -56,6 +59,34 @@ def compute_belief_metrics(
             raise ValueError("observer supervision must be a subset of alive rows")
     if not torch.any(valid_observers):
         raise ValueError("metrics require at least one supervised observer")
+    if (observer_scope_mask is None) != (label_observed_mask is None):
+        raise ValueError(
+            "observer_scope_mask and label_observed_mask must be supplied together"
+        )
+    if observer_scope_mask is None:
+        scope_observers = valid_observers
+        observed_labels = valid_observers
+    else:
+        for field_name, mask in {
+            "observer_scope_mask": observer_scope_mask,
+            "label_observed_mask": label_observed_mask,
+        }.items():
+            if not isinstance(mask, torch.Tensor):
+                raise TypeError(f"{field_name} must be a tensor")
+            if mask.shape != alive_observers.shape:
+                raise ValueError(f"{field_name} must match alive rows")
+            if mask.dtype is not torch.bool:
+                raise TypeError(f"{field_name} must use torch.bool")
+        scope_observers = observer_scope_mask.to(device=belief_logits.device)
+        observed_labels = label_observed_mask.to(device=belief_logits.device)
+        if torch.any(scope_observers & ~alive_observers):
+            raise ValueError("observer scope must be a subset of alive rows")
+        if torch.any(observed_labels & ~alive_observers):
+            raise ValueError("observed labels must be a subset of alive rows")
+        if not torch.equal(valid_observers, scope_observers & observed_labels):
+            raise ValueError(
+                "observer supervision must equal scope & label_observed"
+            )
     target_mask = diagonal_target_mask.to(
         device=belief_logits.device,
         dtype=torch.bool,
@@ -120,6 +151,13 @@ def compute_belief_metrics(
     result = {
         "total_row_count": int(valid_observers.sum().item()),
         "valid_observer_count": int(valid_observers.sum().item()),
+        "scope_observer_count": int(scope_observers.sum().item()),
+        "observed_label_row_count_in_scope": int(
+            (scope_observers & observed_labels).sum().item()
+        ),
+        "unobserved_label_row_count_in_scope": int(
+            (scope_observers & ~observed_labels).sum().item()
+        ),
         "positive_uniform_baseline_gap_row_count": int(
             (valid_observers & ~zero_gap).sum().item()
         ),

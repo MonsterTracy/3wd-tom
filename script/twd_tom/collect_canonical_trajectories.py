@@ -34,7 +34,6 @@ from werewolf.agents.gpt_agent import GAMEPLAY_GENERATION_MAX_ATTEMPTS
 from werewolf.agents.prompt_template_v0 import (
     PUBLIC_SPEECH_REALIZATION_PROMPT_VERSION,
 )
-from werewolf.models.twd_tom.dataset import TARGET_CONVERSION
 from werewolf.models.twd_tom.belief_snapshot import (
     BeliefSnapshotCollectionError,
 )
@@ -87,6 +86,11 @@ GAME_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_game_summary_v7"
 BATCH_SUMMARY_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_summary_v8"
 BATCH_FAILURE_SCHEMA_VERSION = "classic7_canonical_gameplay_batch_failure_v4"
 PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
+# This version belongs to the immutable canonical collection artifact.  The
+# training Dataset may derive newer supervision masks without rewriting it.
+TARGET_CONVERSION = (
+    "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
+)
 
 BACKEND_SDK_MAX_RETRIES = 0
 CANONICAL_COLLECTION_MODE = "canonical"

@@ -14,12 +14,16 @@
 | `script/twd_tom/audit_shadow_speech_parser.py` | 对既有公开发言执行只读 DeepSeek 影子解析并输出跨模型一致性审计，不回写 canonical 标注 |
 | `script/twd_tom/materialize_canonical_belief_dataset.py` | 按 game-level split 发布不变的 raw snapshots |
 | `werewolf/models/twd_tom/belief_labels.py` | 校验 hard knowledge 并将相对怀疑集合确定性转换为归一化 belief row |
-| `werewolf/models/twd_tom/dataset.py` | 输出 7×7 observer-conditioned target 与两个 mask |
+| `werewolf/models/twd_tom/annotation_v2.py` | 严格加载、校验并绑定既有 Speech/Belief V2 sidecar |
+| `werewolf/models/twd_tom/dataset.py` | 输出 7×7 observer-conditioned target 与 scope/observed/supervision masks；独立保留 `legacy_v1`，新语义命名为 `v1_empty_unobserved` |
 | `werewolf/models/twd_tom/dense_dataset.py` | 以 game 为 batch unit，验证并组织全部 strict-PRE boundary |
 | `werewolf/models/twd_tom/baselines.py` | fold-train-only global/phase empirical prior |
 | `script/twd_tom/audit_dense_belief_dataset.py` | 证明多边界监督的 exact-prefix 因果契约 |
 | `script/twd_tom/materialize_development_folds.py` | 从 train+validation 构造 development-only 5-fold，封存 test |
 | `script/twd_tom/run_development_oof.py` | dense 5-fold 训练、逐局 OOF 聚合与 bootstrap CI |
+| `script/twd_tom/audit_belief_label_repeatability.py` | 相同 frozen state 的 3–5 次 V2 label 一致性审计 |
+| `script/twd_tom/run_annotation_v2_ablation.py` | Speech V1/V2 × Belief `v1_empty_unobserved`/V2、Non-wolf/Villager 双 scope OOF；正式冻结另有 repeatability gate |
+| `script/twd_tom/export_belief_worst_cases.py` | 导出 `legacy_v1`/`v1_empty_unobserved`/V2 target、prediction 与前后 boundary 的最大误差样本 |
 | `tests/twd_tom/` | 时间边界、只读性、符号标签和写入契约测试 |
 
 ## 计算层
@@ -28,4 +32,4 @@
 
 ## 已退出 tom-v2 主线
 
-仓库不再提供 public-only reporter、PBM、可进入训练链的 external offline annotation/materialization、D splitter、online ToM2 shadow 或 tom-v1 archive 的可导入实现。DeepSeek speech-parser shadow 只生成独立审计工件，不是标签替换或训练数据来源。tom-v1 历史由 Git 保存。
+仓库不再提供 public-only reporter、PBM、通用 external offline materialization、D splitter、online ToM2 shadow 或 tom-v1 archive 的可导入实现。唯一例外是已审核、digest-bound 的 Annotation V2 sidecar，可由显式 `speech_annotation_source / belief_annotation_source` 进入隔离的 2×2 实验；它不回写 canonical 数据，也不存在解析失败时回退或修复。DeepSeek speech-parser shadow 仍只生成独立审计工件，不是标签替换或训练数据来源。tom-v1 历史由 Git 保存。

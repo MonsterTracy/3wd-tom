@@ -59,7 +59,7 @@ raw sample 保存 public history 的两个 digest、观察者集合、每个观�
 
 tom-v2 只有一个 Dataset。输入是同一时间边界的结构化公开历史和存活观察者集合；raw label 直接读取 playing-agent self-report 中的 `suspected_werewolves`，不经过 external annotation、public-only reporter、ToM1/ToM2 materialization 或旧 lineage adapter。
 
-Dataset 将每个观察者的合法怀疑集合确定性转换为长度 7 的稀疏 belief row：非空集合只在被列入的玩家上均分概率，其他玩家为 0；空集合只在 admissible players `P - F` 上均匀分布。观察者自身对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
+Dataset 将每个观察者的合法非空怀疑集合确定性转换为长度 7 的稀疏 belief row：只在被列入的玩家上均分概率，其他玩家为 0。历史实验契约明确命名为 `legacy_v1`，其中空集合仍按旧实现插补为 hard-admissible non-self uniform；新契约明确命名为 `v1_empty_unobserved`，空集合保留在 canonical raw record 中，但派生监督标为 `label_observed=False`、target row 全零且不进入 CE/KL。二者具有不同的 target conversion、label-observation contract 和 checkpoint provenance，不得都简称为 V1。观察者自身对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
 
 该矩阵的冻结语义是“相对怀疑质量”，不是每个玩家为狼的独立边缘概率，也不是两狼组合上的联合概率。softmax 只在每一行的非自身候选间分配单位质量；因此不能把 `B[i,j]=0.5` 解释为经过校准的 50% 狼人概率。checkpoint 以独立的 `target_semantics` 字段锁定这一解释，旧 checkpoint 不得隐式兼容。
 
@@ -69,7 +69,7 @@ Dataset 输出：
 - `observer_alive_mask`：`[7]` 布尔张量，只表示该时间点公开存活的 observer；
 - `diagonal_target_mask`：`[7, 7]` 布尔张量，只排除 observer 自身列。
 
-死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。public-only 模式下，raw sample 中的 hard knowledge 只用于 label 合法性与空集合转换，不进入模型特征或 Dataset 输出。private-conditioned 模式使用同一份 raw sample，额外输出 `known_werewolf_mask[7,7]` 与 `known_non_werewolf_mask[7,7]`；每行只编码该 observer 在当前 PRE 边界已经拥有并完成规则闭包的 `K+ / K-`。它不加入 `self_role`、全局角色真值、其他 observer 的 observation、未来信息或重构标签。两个 mask 必须成对出现、互斥，并与公开事件及 target 一起执行同一个座位循环旋转。训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜、不生成额外有效性 mask。
+死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。public-only 模式下，raw sample 中的 hard knowledge 只用于 label 合法性，不进入模型特征。private-conditioned 模式使用同一份 raw sample，额外输出 `known_werewolf_mask[7,7]` 与 `known_non_werewolf_mask[7,7]`；每行只编码该 observer 在当前 PRE 边界已经拥有并完成规则闭包的 `K+ / K-`。它不加入 `self_role`、全局角色真值、其他 observer 的 observation、未来信息或重构标签。两个 knowledge mask 必须成对出现、互斥，并与公开事件及 target 一起执行同一个座位循环旋转。`observer_supervision_mask = observer_scope_mask & label_observed_mask`；训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜。
 
 ## Speaker cognition 同源契约
 
