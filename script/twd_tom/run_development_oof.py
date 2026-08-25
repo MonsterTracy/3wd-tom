@@ -42,7 +42,7 @@ from werewolf.models.twd_tom.supervision import (
 )
 
 
-OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v4"
+OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v5"
 DEFAULT_REFERENCE_IMPROVEMENT = 0.50
 
 
@@ -68,9 +68,17 @@ def _atomic_json_write(value: Mapping[str, Any], path: Path) -> None:
 
 
 def _weighted_metrics(
-    by_game: Mapping[str, Mapping[str, int | float]],
+    by_game: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, int | float]:
-    total_count = sum(int(metrics["valid_observer_count"]) for metrics in by_game.values())
+    scored = {
+        game_id: metrics
+        for game_id, metrics in by_game.items()
+        if int(metrics.get("valid_observer_count", 0)) > 0
+    }
+    total_count = sum(
+        int(metrics["valid_observer_count"])
+        for metrics in scored.values()
+    )
     if total_count <= 0:
         raise ValueError("OOF metrics contain no supervised observers")
     names = set.intersection(
@@ -80,7 +88,7 @@ def _weighted_metrics(
                 for name in metrics
                 if name not in {"valid_observer_count", "total_row_count"}
             }
-            for metrics in by_game.values()
+            for metrics in scored.values()
         )
     )
     result: dict[str, int | float] = {
@@ -99,29 +107,33 @@ def _weighted_metrics(
         "unobserved_label_row_count_in_scope",
     }
     for name in sorted(names):
-        if name.endswith("_row_count") or name in count_fields:
+        if name in count_fields:
             result[name] = sum(
-                int(metrics[name]) for metrics in by_game.values()
+                int(metrics.get(name, 0)) for metrics in by_game.values()
+            )
+        elif name.endswith("_row_count"):
+            result[name] = sum(
+                int(metrics[name]) for metrics in scored.values()
             )
         elif name.endswith("_sum"):
             result[name] = sum(
-                float(metrics[name]) for metrics in by_game.values()
+                float(metrics[name]) for metrics in scored.values()
             )
         elif name.startswith("max_"):
             result[name] = max(
-                float(metrics[name]) for metrics in by_game.values()
+                float(metrics[name]) for metrics in scored.values()
             )
         elif name not in derived:
             result[name] = sum(
                 float(metrics[name]) * int(metrics["valid_observer_count"])
-                for metrics in by_game.values()
+                for metrics in scored.values()
             ) / total_count
     model_kl_sum = float(result.get(
         "model_kl_sum",
         sum(
             float(metrics["mean_belief_kl_divergence"])
             * int(metrics["valid_observer_count"])
-            for metrics in by_game.values()
+            for metrics in scored.values()
         ),
     ))
     uniform_kl_sum = float(result.get(
@@ -129,7 +141,7 @@ def _weighted_metrics(
         sum(
             float(metrics["uniform_non_self_baseline_mean_kl_divergence"])
             * int(metrics["valid_observer_count"])
-            for metrics in by_game.values()
+            for metrics in scored.values()
         ),
     ))
     result["model_kl_sum"] = model_kl_sum
@@ -154,7 +166,7 @@ def _weighted_metrics(
                         "private_admissible_uniform_baseline_mean_cross_entropy"
                     ]) - float(metrics["mean_belief_target_entropy"]),
                 )) * int(metrics["valid_observer_count"])
-                for metrics in by_game.values()
+                for metrics in scored.values()
             ),
         ))
         result[
@@ -400,9 +412,9 @@ def run_development_oof(
                 limit=worst_case_limit,
             )
 
-    oof_by_game: dict[str, dict[str, int | float]] = {}
+    oof_by_game: dict[str, dict[str, Any]] = {}
     oof_stratified_by_game: dict[str, dict[str, Any]] = {}
-    baseline_by_name: dict[str, dict[str, dict[str, int | float]]] = {}
+    baseline_by_name: dict[str, dict[str, dict[str, Any]]] = {}
     for fold_name, summary in fold_summaries.items():
         for game_id, metrics in summary["best_validation_by_game"].items():
             if game_id in oof_by_game:
@@ -463,13 +475,21 @@ def run_development_oof(
                 if stratum in game.get(dimension, {})
             }
             oof_stratified[dimension][stratum] = _weighted_metrics(reports)
-    baselines = {
-        name: {
+    baselines = {}
+    for name, by_game in baseline_by_name.items():
+        unscored_baseline_ids = sorted(
+            game_id
+            for game_id, metrics in by_game.items()
+            if int(metrics.get("valid_observer_count", 0)) == 0
+        )
+        baselines[name] = {
             "observer_weighted": _weighted_metrics(by_game),
             "game_macro": _macro_metrics(by_game),
+            "game_count": len(by_game),
+            "scored_game_count": len(by_game) - len(unscored_baseline_ids),
+            "unscored_game_count": len(unscored_baseline_ids),
+            "unscored_game_ids": unscored_baseline_ids,
         }
-        for name, by_game in baseline_by_name.items()
-    }
     primary_metric = (
         "private_admissible_normalized_reducible_gap_improvement"
         if private_conditioning
@@ -484,6 +504,11 @@ def run_development_oof(
         output_jsonl=resolved_output / "worst_cases.jsonl",
         output_csv=resolved_output / "worst_cases.csv",
         limit=worst_case_limit,
+    )
+    unscored_game_ids = sorted(
+        game_id
+        for game_id, metrics in oof_by_game.items()
+        if int(metrics.get("valid_observer_count", 0)) == 0
     )
     result = {
         "schema_version": OOF_SUMMARY_SCHEMA_VERSION,
@@ -510,6 +535,9 @@ def run_development_oof(
             for fold_name, summary in fold_summaries.items()
         },
         "oof_game_count": len(oof_by_game),
+        "oof_scored_game_count": len(oof_by_game) - len(unscored_game_ids),
+        "oof_unscored_game_count": len(unscored_game_ids),
+        "oof_unscored_game_ids": unscored_game_ids,
         "oof_observer_weighted_metrics": weighted,
         "oof_game_macro_metrics": _macro_metrics(oof_by_game),
         "oof_stratified_observer_weighted_metrics": oof_stratified,

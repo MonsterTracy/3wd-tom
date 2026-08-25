@@ -10,6 +10,9 @@ from werewolf.models.twd_tom.losses import (
 )
 
 
+UNSCORED_NO_SUPERVISION_STATUS = "unscored_no_supervised_observers"
+
+
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
     selected = values[mask]
     return float(selected.mean().item()) if selected.numel() else 0.0
@@ -30,7 +33,7 @@ def compute_belief_metrics(
     observer_scope_mask: torch.Tensor | None = None,
     label_observed_mask: torch.Tensor | None = None,
     known_non_werewolf_mask: torch.Tensor | None = None,
-) -> dict[str, int | float]:
+) -> dict[str, int | float | str]:
     """Measure predictions for the selected subset of valid living observers."""
 
     per_observer_loss = masked_belief_distribution_loss(
@@ -57,8 +60,6 @@ def compute_belief_metrics(
         valid_observers = observer_supervision_mask.to(device=belief_logits.device)
         if torch.any(valid_observers & ~alive_observers):
             raise ValueError("observer supervision must be a subset of alive rows")
-    if not torch.any(valid_observers):
-        raise ValueError("metrics require at least one supervised observer")
     if (observer_scope_mask is None) != (label_observed_mask is None):
         raise ValueError(
             "observer_scope_mask and label_observed_mask must be supplied together"
@@ -87,6 +88,28 @@ def compute_belief_metrics(
             raise ValueError(
                 "observer supervision must equal scope & label_observed"
             )
+    if not torch.any(valid_observers):
+        if known_non_werewolf_mask is not None:
+            if not isinstance(known_non_werewolf_mask, torch.Tensor):
+                raise TypeError("known_non_werewolf_mask must be a tensor")
+            if known_non_werewolf_mask.shape != diagonal_target_mask.shape:
+                raise ValueError(
+                    "known_non_werewolf_mask must match diagonal_target_mask"
+                )
+            if known_non_werewolf_mask.dtype is not torch.bool:
+                raise TypeError("known_non_werewolf_mask must use torch.bool")
+        return {
+            "status": UNSCORED_NO_SUPERVISION_STATUS,
+            "total_row_count": 0,
+            "valid_observer_count": 0,
+            "scope_observer_count": int(scope_observers.sum().item()),
+            "observed_label_row_count_in_scope": int(
+                (scope_observers & observed_labels).sum().item()
+            ),
+            "unobserved_label_row_count_in_scope": int(
+                (scope_observers & ~observed_labels).sum().item()
+            ),
+        }
     target_mask = diagonal_target_mask.to(
         device=belief_logits.device,
         dtype=torch.bool,
@@ -293,4 +316,7 @@ def compute_belief_metrics(
     return result
 
 
-__all__ = ["compute_belief_metrics"]
+__all__ = [
+    "UNSCORED_NO_SUPERVISION_STATUS",
+    "compute_belief_metrics",
+]

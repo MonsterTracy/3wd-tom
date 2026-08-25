@@ -37,7 +37,7 @@ def masked_belief_distribution_loss(
         reduction=reduction,
     )
     valid_observer_count = observer_supervision_mask.sum()
-    if valid_observer_count.item() == 0:
+    if valid_observer_count.item() == 0 and reduction != "none":
         raise ValueError(
             "observer supervision must select at least one observer among alive rows"
         )

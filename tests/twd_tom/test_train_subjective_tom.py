@@ -19,6 +19,7 @@ from script.twd_tom.train import (
     evaluate_model,
     evaluate_model_with_games,
     evaluate_model_with_games_and_strata,
+    game_macro_metrics,
     train_one_epoch,
 )
 from werewolf.models.twd_tom.belief_backbone import (
@@ -46,6 +47,7 @@ from werewolf.models.twd_tom.dataset import (
 from werewolf.models.twd_tom.dense_dataset import (
     DENSE_SUPERVISION_VERSION,
     DenseTWDToMDataset,
+    collate_dense_twd_tom_games,
 )
 
 
@@ -315,6 +317,54 @@ def test_dense_game_batch_trains_every_pre_boundary(
     assert strata_by_game["synthetic_game_001"]["raw_empty"]["false"][
         "total_row_count"
     ] == 4
+
+
+def test_dense_evaluation_excludes_unscored_game_without_losing_lineage(
+    tmp_path,
+    training_sample_factory,
+):
+    scored = training_sample_factory(game_id="scored_game")
+    unscored = training_sample_factory(game_id="unscored_game")
+    unscored["suspected_werewolves"] = {
+        observer: [] for observer in unscored["suspected_werewolves"]
+    }
+    dataset = DenseTWDToMDataset([scored, unscored])
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        collate_fn=collate_dense_twd_tom_games,
+    )
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path=str(tmp_path / "unused.jsonl"),
+        validation_dataset_path=str(tmp_path / "unused.jsonl"),
+        epochs=1,
+        batch_size=2,
+        max_seq_len=32,
+        backbone="gpt2_block",
+        device="cpu",
+        dense_supervision=True,
+    )
+    model = build_model(config)
+
+    aggregate, by_game, _, strata_by_game = (
+        evaluate_model_with_games_and_strata(
+            model,
+            loader,
+            device=torch.device("cpu"),
+        )
+    )
+
+    assert aggregate["valid_observer_count"] == 4
+    assert set(by_game) == {"scored_game", "unscored_game"}
+    assert by_game["unscored_game"]["status"] == (
+        "unscored_no_supervised_observers"
+    )
+    assert strata_by_game["unscored_game"] == {}
+    assert game_macro_metrics(by_game) == game_macro_metrics({
+        "scored_game": by_game["scored_game"],
+    })
 
 
 def test_checkpoint_payload_contains_no_removed_objective_fields(tmp_path):

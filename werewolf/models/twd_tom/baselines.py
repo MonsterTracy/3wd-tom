@@ -24,9 +24,20 @@ class _MetricMean:
         self.count_sums: dict[str, int] = {}
         self.max_values: dict[str, float] = {}
 
-    def update(self, metrics: Mapping[str, int | float]) -> None:
+    def update(self, metrics: Mapping[str, int | float | str]) -> None:
         count = int(metrics["valid_observer_count"])
         self.count += count
+        if count == 0:
+            for name in (
+                "scope_observer_count",
+                "observed_label_row_count_in_scope",
+                "unobserved_label_row_count_in_scope",
+            ):
+                if name in metrics:
+                    self.count_sums[name] = self.count_sums.get(
+                        name, 0
+                    ) + int(metrics[name])
+            return
         for name, value in metrics.items():
             if name in {"valid_observer_count", "total_row_count"}:
                 continue
@@ -183,7 +194,7 @@ def _evaluate_prior_for_game(
     *,
     global_prior: torch.Tensor,
     phase_priors: Mapping[str, torch.Tensor] | None,
-) -> dict[str, int | float]:
+) -> dict[str, int | float | str]:
     phases = item["metadata"]["phase"]
     probabilities = torch.stack(
         [
@@ -199,6 +210,8 @@ def _evaluate_prior_for_game(
         item["observer_alive_mask"],
         item["diagonal_target_mask"],
         observer_supervision_mask=item["observer_supervision_mask"],
+        observer_scope_mask=item["observer_scope_mask"],
+        label_observed_mask=item["label_observed_mask"],
         known_non_werewolf_mask=item[
             "supervision_known_non_werewolf_mask"
         ],
@@ -207,7 +220,7 @@ def _evaluate_prior_for_game(
 
 def _evaluate_private_uniform_for_game(
     item: Mapping[str, Any],
-) -> dict[str, int | float]:
+) -> dict[str, int | float | str]:
     known_non_wolves = item.get("known_non_werewolf_mask")
     if not isinstance(known_non_wolves, torch.Tensor):
         raise ValueError("private uniform baseline requires private features")
@@ -220,6 +233,8 @@ def _evaluate_private_uniform_for_game(
         item["observer_alive_mask"],
         item["diagonal_target_mask"],
         observer_supervision_mask=item["observer_supervision_mask"],
+        observer_scope_mask=item["observer_scope_mask"],
+        label_observed_mask=item["label_observed_mask"],
         known_non_werewolf_mask=known_non_wolves,
     )
 
@@ -252,7 +267,7 @@ def evaluate_dense_empirical_priors(
         "train_phase_prior": phase_priors,
     }.items():
         aggregate = _MetricMean()
-        by_game: dict[str, dict[str, int | float]] = {}
+        by_game: dict[str, dict[str, int | float | str]] = {}
         for item_index in range(len(dataset)):
             item = dataset[item_index]
             game_id = item["metadata"]["game_id"]
@@ -263,13 +278,23 @@ def evaluate_dense_empirical_priors(
             )
             aggregate.update(metrics)
             game_report = dict(metrics)
-            game_report["mean_loss"] = game_report[
-                "mean_belief_cross_entropy"
-            ]
+            if int(game_report["valid_observer_count"]) > 0:
+                game_report["mean_loss"] = game_report[
+                    "mean_belief_cross_entropy"
+                ]
             by_game[game_id] = game_report
+        unscored_game_ids = sorted(
+            game_id
+            for game_id, game_report in by_game.items()
+            if int(game_report["valid_observer_count"]) == 0
+        )
         reports[name] = {
             "aggregate": aggregate.finalize(),
             "by_game": dict(sorted(by_game.items())),
+            "game_count": len(by_game),
+            "scored_game_count": len(by_game) - len(unscored_game_ids),
+            "unscored_game_count": len(unscored_game_ids),
+            "unscored_game_ids": unscored_game_ids,
         }
     if dataset.include_private_features:
         aggregate = _MetricMean()
@@ -280,13 +305,23 @@ def evaluate_dense_empirical_priors(
             metrics = _evaluate_private_uniform_for_game(item)
             aggregate.update(metrics)
             game_report = dict(metrics)
-            game_report["mean_loss"] = game_report[
-                "mean_belief_cross_entropy"
-            ]
+            if int(game_report["valid_observer_count"]) > 0:
+                game_report["mean_loss"] = game_report[
+                    "mean_belief_cross_entropy"
+                ]
             by_game[game_id] = game_report
+        unscored_game_ids = sorted(
+            game_id
+            for game_id, game_report in by_game.items()
+            if int(game_report["valid_observer_count"]) == 0
+        )
         reports["private_admissible_uniform"] = {
             "aggregate": aggregate.finalize(),
             "by_game": dict(sorted(by_game.items())),
+            "game_count": len(by_game),
+            "scored_game_count": len(by_game) - len(unscored_game_ids),
+            "unscored_game_count": len(unscored_game_ids),
+            "unscored_game_ids": unscored_game_ids,
         }
     return reports
 

@@ -73,3 +73,29 @@ def test_private_dataset_reports_private_admissible_uniform_baseline(
     assert "private_admissible_uniform" in report
     aggregate = report["private_admissible_uniform"]["aggregate"]
     assert "private_admissible_normalized_reducible_gap_improvement" in aggregate
+
+
+def test_dense_baselines_keep_zero_supervision_game_as_explicit_unscored(
+    training_sample_factory,
+):
+    scored = training_sample_factory(game_id="scored_game")
+    unscored = training_sample_factory(game_id="unscored_game")
+    unscored["suspected_werewolves"] = {
+        observer: [] for observer in unscored["suspected_werewolves"]
+    }
+    dataset = DenseTWDToMDataset([scored, unscored])
+
+    report = evaluate_dense_empirical_priors(
+        dataset,
+        fit_dense_empirical_priors(dataset),
+    )["train_global_prior"]
+
+    assert report["game_count"] == 2
+    assert report["scored_game_count"] == 1
+    assert report["unscored_game_count"] == 1
+    assert report["unscored_game_ids"] == ["unscored_game"]
+    assert report["by_game"]["unscored_game"]["status"] == (
+        "unscored_no_supervised_observers"
+    )
+    assert report["by_game"]["unscored_game"]["valid_observer_count"] == 0
+    assert report["aggregate"]["valid_observer_count"] == 4

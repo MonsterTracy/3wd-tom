@@ -3,7 +3,10 @@ import math
 import pytest
 import torch
 
-from werewolf.models.twd_tom.metrics import compute_belief_metrics
+from werewolf.models.twd_tom.metrics import (
+    UNSCORED_NO_SUPERVISION_STATUS,
+    compute_belief_metrics,
+)
 
 
 def make_contract():
@@ -74,6 +77,32 @@ def test_metrics_report_unobserved_rows_inside_scope_without_scoring_them():
     assert metrics["observed_label_row_count_in_scope"] == 1
     assert metrics["unobserved_label_row_count_in_scope"] == 1
     assert metrics["valid_observer_count"] == 1
+
+
+def test_metrics_mark_an_entirely_unobserved_slice_as_unscored():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    scope = alive.clone()
+    observed = torch.zeros_like(alive)
+
+    metrics = compute_belief_metrics(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        observer_supervision_mask=scope & observed,
+        observer_scope_mask=scope,
+        label_observed_mask=observed,
+    )
+
+    assert metrics == {
+        "status": UNSCORED_NO_SUPERVISION_STATUS,
+        "total_row_count": 0,
+        "valid_observer_count": 0,
+        "scope_observer_count": 1,
+        "observed_label_row_count_in_scope": 0,
+        "unobserved_label_row_count_in_scope": 1,
+    }
 
 
 def test_metrics_expose_no_pair_or_order_specific_names():

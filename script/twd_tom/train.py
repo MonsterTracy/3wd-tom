@@ -72,7 +72,10 @@ from werewolf.models.twd_tom.dense_dataset import (
     collate_dense_twd_tom_games,
 )
 from werewolf.models.twd_tom.losses import masked_belief_distribution_loss
-from werewolf.models.twd_tom.metrics import compute_belief_metrics
+from werewolf.models.twd_tom.metrics import (
+    UNSCORED_NO_SUPERVISION_STATUS,
+    compute_belief_metrics,
+)
 from werewolf.models.twd_tom.public_events import (
     PHASE_TO_ID,
     PUBLIC_EVENT_SCHEMA_VERSION,
@@ -812,7 +815,6 @@ class MetricAccumulator:
         )
         count = int(metrics["valid_observer_count"])
         self.valid_observer_count += count
-        self.loss_sum += float(loss.detach().item()) * count
         count_fields = {
             "positive_uniform_baseline_gap_row_count",
             "zero_uniform_baseline_gap_row_count",
@@ -822,6 +824,14 @@ class MetricAccumulator:
             "observed_label_row_count_in_scope",
             "unobserved_label_row_count_in_scope",
         }
+        if count == 0:
+            for name in count_fields:
+                if name in metrics:
+                    self.count_sums[name] = self.count_sums.get(
+                        name, 0
+                    ) + int(metrics[name])
+            return
+        self.loss_sum += float(loss.detach().item()) * count
         sum_fields = {
             "model_kl_sum",
             "uniform_non_self_baseline_kl_sum",
@@ -890,6 +900,18 @@ class MetricAccumulator:
                 else 0.0
             )
         return result
+
+    def finalize_per_game(self) -> dict[str, int | float | str]:
+        """Keep an unlabelled game in lineage without inventing metrics."""
+
+        if self.valid_observer_count > 0:
+            return self.finalize()
+        return {
+            "status": UNSCORED_NO_SUPERVISION_STATUS,
+            "total_row_count": 0,
+            "valid_observer_count": 0,
+            **self.count_sums,
+        }
 
 
 def _normalized_batch_metadata(
@@ -1166,12 +1188,17 @@ class StratifiedMetricAccumulator:
 
 
 def game_macro_metrics(
-    by_game: Mapping[str, Mapping[str, int | float]],
+    by_game: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, float]:
     """Average per-game mean metrics with every game weighted equally."""
 
-    if not by_game:
-        raise ValueError("game macro aggregation requires at least one game")
+    scored = {
+        game_id: metrics
+        for game_id, metrics in by_game.items()
+        if int(metrics.get("valid_observer_count", 0)) > 0
+    }
+    if not scored:
+        raise ValueError("game macro aggregation requires at least one scored game")
     names = set.intersection(*(
         {
             name
@@ -1182,11 +1209,11 @@ def game_macro_metrics(
             and not name.endswith("_sum")
             and not name.startswith("max_")
         }
-        for metrics in by_game.values()
+        for metrics in scored.values()
     ))
     return {
-        name: sum(float(metrics[name]) for metrics in by_game.values())
-        / len(by_game)
+        name: sum(float(metrics[name]) for metrics in scored.values())
+        / len(scored)
         for name in sorted(names)
     }
 
@@ -1235,7 +1262,7 @@ def _percentile(values: Sequence[float], probability: float) -> float:
 
 
 def bootstrap_game_macro_metric(
-    by_game: Mapping[str, Mapping[str, int | float]],
+    by_game: Mapping[str, Mapping[str, Any]],
     *,
     metric_name: str,
     samples: int,
@@ -1247,9 +1274,10 @@ def bootstrap_game_macro_metric(
     values = [
         float(by_game[game_id][metric_name])
         for game_id in sorted(by_game)
+        if int(by_game[game_id].get("valid_observer_count", 0)) > 0
     ]
     if not values:
-        raise ValueError("game bootstrap requires at least one game")
+        raise ValueError("game bootstrap requires at least one scored game")
     rng = random.Random(seed)
     means = [
         sum(rng.choice(values) for _ in values) / len(values)
@@ -1268,7 +1296,7 @@ def bootstrap_game_macro_metric(
 
 
 def game_bootstrap_metrics(
-    by_game: Mapping[str, Mapping[str, int | float]],
+    by_game: Mapping[str, Mapping[str, Any]],
     *,
     samples: int,
     seed: int,
@@ -1277,10 +1305,17 @@ def game_bootstrap_metrics(
         "normalized_reducible_gap_improvement",
         "private_admissible_normalized_reducible_gap_improvement",
     )
-    common_names = set.intersection(*(set(value) for value in by_game.values()))
+    scored = {
+        game_id: metrics
+        for game_id, metrics in by_game.items()
+        if int(metrics.get("valid_observer_count", 0)) > 0
+    }
+    if not scored:
+        raise ValueError("game bootstrap requires at least one scored game")
+    common_names = set.intersection(*(set(value) for value in scored.values()))
     return {
         name: bootstrap_game_macro_metric(
-            by_game,
+            scored,
             metric_name=name,
             samples=samples,
             seed=seed,
@@ -1411,12 +1446,16 @@ def _update_per_game_metrics(
             logits=logits,
             batch=batch,
         )
-        loss = masked_belief_distribution_loss(
-            tensors["logits"],
-            tensors["targets"],
-            tensors["alive"],
-            tensors["diagonal"],
-            observer_supervision_mask=tensors["supervision"],
+        loss = (
+            masked_belief_distribution_loss(
+                tensors["logits"],
+                tensors["targets"],
+                tensors["alive"],
+                tensors["diagonal"],
+                observer_supervision_mask=tensors["supervision"],
+            )
+            if torch.any(tensors["supervision"])
+            else tensors["logits"].new_zeros(())
         )
         accumulator.update(
             loss=loss,
@@ -1480,7 +1519,7 @@ def evaluate_model_with_games(
     data_loader: DataLoader,
     *,
     device: torch.device,
-) -> tuple[dict[str, int | float], dict[str, dict[str, int | float]]]:
+) -> tuple[dict[str, int | float], dict[str, dict[str, Any]]]:
     """Evaluate globally and retain observer-weighted metrics per game."""
 
     metrics, by_game, _, _ = evaluate_model_with_games_and_strata(
@@ -1499,7 +1538,7 @@ def evaluate_model_with_games_and_strata(
     device: torch.device,
 ) -> tuple[
     dict[str, int | float],
-    dict[str, dict[str, int | float]],
+    dict[str, dict[str, Any]],
     dict[str, dict[str, dict[str, int | float]]],
     dict[str, dict[str, dict[str, dict[str, int | float]]]],
 ]:
@@ -1541,12 +1580,16 @@ def evaluate_model_with_games_and_strata(
             known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
             observer_scope_mask = observer_scope_mask.flatten(0, 1)
             label_observed_mask = label_observed_mask.flatten(0, 1)
-        loss = masked_belief_distribution_loss(
-            logits,
-            targets,
-            observer_alive_mask,
-            diagonal_target_mask,
-            observer_supervision_mask=observer_supervision_mask,
+        loss = (
+            masked_belief_distribution_loss(
+                logits,
+                targets,
+                observer_alive_mask,
+                diagonal_target_mask,
+                observer_supervision_mask=observer_supervision_mask,
+            )
+            if torch.any(observer_supervision_mask)
+            else logits.new_zeros(())
         )
         accumulator.update(
             loss=loss,
@@ -1559,14 +1602,18 @@ def evaluate_model_with_games_and_strata(
             label_observed_mask=label_observed_mask,
             known_non_werewolf_mask=known_non_werewolf_mask,
         )
+    by_game = {
+        game_id: game_accumulators[game_id].finalize_per_game()
+        for game_id in sorted(game_accumulators)
+    }
+    stratified_by_game = stratified_accumulator.finalize_by_game()
+    for game_id in by_game:
+        stratified_by_game.setdefault(game_id, {})
     return (
         accumulator.finalize(),
-        {
-            game_id: game_accumulators[game_id].finalize()
-            for game_id in sorted(game_accumulators)
-        },
+        by_game,
         stratified_accumulator.finalize(),
-        stratified_accumulator.finalize_by_game(),
+        dict(sorted(stratified_by_game.items())),
     )
 
 
@@ -1726,7 +1773,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
     best_epoch = 0
     best_loss = float("inf")
     best_validation_metrics: dict[str, int | float] | None = None
-    best_validation_by_game: dict[str, dict[str, int | float]] | None = None
+    best_validation_by_game: dict[str, dict[str, Any]] | None = None
     best_validation_stratified: dict[str, Any] | None = None
     best_validation_stratified_by_game: dict[str, Any] | None = None
     best_validation_stratified_game_macro: dict[str, Any] | None = None

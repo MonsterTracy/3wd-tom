@@ -16,9 +16,9 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
 )
 from script.twd_tom.train import (
     REPO_ROOT,
-    bootstrap_game_macro_metric,
     count_supervised_observers,
     evaluate_model_with_games_and_strata,
+    game_bootstrap_metrics,
     game_macro_metrics,
     resolve_device,
     sha256_file,
@@ -369,19 +369,16 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         device=device,
     )
     game_macro = game_macro_metrics(by_game)
-    game_bootstrap = {
-        name: bootstrap_game_macro_metric(
-            by_game,
-            metric_name=name,
-            samples=2000,
-            seed=42,
-        )
-        for name in (
-            "normalized_reducible_gap_improvement",
-            "private_admissible_normalized_reducible_gap_improvement",
-        )
-        if all(name in game_metrics for game_metrics in by_game.values())
-    }
+    game_bootstrap = game_bootstrap_metrics(
+        by_game,
+        samples=2000,
+        seed=42,
+    )
+    unscored_game_ids = sorted(
+        game_id
+        for game_id, game_metrics in by_game.items()
+        if int(game_metrics.get("valid_observer_count", 0)) == 0
+    )
     epoch = checkpoint.get("epoch")
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
         raise ValueError("checkpoint has an invalid epoch")
@@ -400,6 +397,9 @@ def evaluate_checkpoint(config: EvaluationConfig) -> dict[str, Any]:
         "evaluation_dataset_path": str(dataset_path),
         "evaluation_sample_count": len(dataset),
         "evaluation_game_ids": list(evaluation_game_ids),
+        "evaluation_scored_game_count": len(by_game) - len(unscored_game_ids),
+        "evaluation_unscored_game_count": len(unscored_game_ids),
+        "evaluation_unscored_game_ids": unscored_game_ids,
         "evaluation_supervised_observer_count": supervised,
         "supervision_scope": supervision_scope,
         "role_metadata_usage": "supervision_metadata_only",

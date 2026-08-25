@@ -22,7 +22,7 @@ from werewolf.models.twd_tom.annotation_v2 import (
 )
 
 
-ABLATION_SCHEMA_VERSION = "classic7_annotation_v2_oof_ablation_v2"
+ABLATION_SCHEMA_VERSION = "classic7_annotation_v2_oof_ablation_v3"
 _EXPERIMENTS = (
     (
         "speech_v1_belief_v1_empty_unobserved",
@@ -163,6 +163,11 @@ def run_annotation_v2_ablation(
             reports[experiment_name][scope] = {
                 "output_dir": str(run_output),
                 "oof_game_count": report["oof_game_count"],
+                "oof_scored_game_count": report["oof_scored_game_count"],
+                "oof_unscored_game_count": report[
+                    "oof_unscored_game_count"
+                ],
+                "oof_unscored_game_ids": report["oof_unscored_game_ids"],
                 "observer_weighted_normalized_reducible_gap_improvement": (
                     report["oof_observer_weighted_metrics"][
                         "normalized_reducible_gap_improvement"

@@ -65,6 +65,31 @@ def test_no_alive_observer_is_rejected():
         masked_belief_distribution_loss(logits, targets, alive, diagonal)
 
 
+def test_empty_supervision_is_defined_only_for_unreduced_diagnostics():
+    logits, targets, alive, diagonal = make_contract()
+    targets.zero_()
+    supervision = torch.zeros_like(alive)
+
+    per_observer = masked_belief_distribution_loss(
+        logits,
+        targets,
+        alive,
+        diagonal,
+        observer_supervision_mask=supervision,
+        reduction="none",
+    )
+
+    assert torch.equal(per_observer, torch.zeros_like(per_observer))
+    with pytest.raises(ValueError, match="at least one observer"):
+        masked_belief_distribution_loss(
+            logits,
+            targets,
+            alive,
+            diagonal,
+            observer_supervision_mask=supervision,
+        )
+
+
 def test_supervision_mask_changes_only_selected_loss_rows():
     logits, targets, alive, diagonal = make_contract()
     original_targets = targets.clone()

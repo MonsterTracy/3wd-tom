@@ -48,6 +48,23 @@ def test_oof_weighting_recomputes_reducible_gap_from_all_observers():
     )
 
 
+def test_oof_weighting_excludes_explicit_unscored_game():
+    scored = _game_metrics(count=3, model_kl=0.4)
+    result = _weighted_metrics({
+        "scored_game": scored,
+        "unscored_game": {
+            "status": "unscored_no_supervised_observers",
+            "total_row_count": 0,
+            "valid_observer_count": 0,
+            "scope_observer_count": 4,
+            "observed_label_row_count_in_scope": 0,
+            "unobserved_label_row_count_in_scope": 4,
+        },
+    })
+
+    assert result == _weighted_metrics({"scored_game": scored})
+
+
 def test_oof_gap_closed_uses_additive_kl_sums_and_preserves_row_counts():
     by_game = {
         "game_a": {
@@ -246,3 +263,6 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
         == NO_DAY_INPUT_FEATURE_PROFILE
     )
     assert result["descriptive_reference_target"]["is_acceptance_gate"] is False
+    assert result["oof_scored_game_count"] == 1
+    assert result["oof_unscored_game_count"] == 0
+    assert result["oof_unscored_game_ids"] == []

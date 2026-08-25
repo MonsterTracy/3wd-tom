@@ -50,6 +50,9 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
         )
         return {
             "oof_game_count": 54,
+            "oof_scored_game_count": 53,
+            "oof_unscored_game_count": 1,
+            "oof_unscored_game_ids": ["game_unscored"],
             "oof_observer_weighted_metrics": {
                 "normalized_reducible_gap_improvement": improvement,
             },
@@ -84,6 +87,9 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
     )
     assert result["benchmark_status"] == "exploratory"
     assert result["repeatability_audit"]["status"] == "not_provided"
+    assert result["experiments"][
+        "speech_v1_belief_v1_empty_unobserved"
+    ]["non_wolf_alive"]["oof_unscored_game_count"] == 1
     assert (tmp_path / "output" / "annotation_v2_ablation_table.md").is_file()
 
 
@@ -97,6 +103,9 @@ def test_passing_repeatability_allows_explicit_formal_freeze(
     def fake_oof(**kwargs):
         return {
             "oof_game_count": 54,
+            "oof_scored_game_count": 54,
+            "oof_unscored_game_count": 0,
+            "oof_unscored_game_ids": [],
             "oof_observer_weighted_metrics": {
                 "normalized_reducible_gap_improvement": 0.1,
             },

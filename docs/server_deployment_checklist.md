@@ -225,6 +225,8 @@ ROLE_SIDECAR="/home/dell/yuxiao/3wd-tom/datasets/canonical60_qwen35_cc81f96_2026
 
 该批次保持 canonical60 和 split/fold 文件逐字节不变。历史行为独立命名为 `legacy_v1`，其中空怀疑集合仍按原实现插补为 hard-admissible non-self uniform；新行为独立命名为 `v1_empty_unobserved`，只在 Dataset 派生阶段把空集合变成 `label_observed=False`，对应 target row 为全零且不进入 CE/KL。二者不得都简称为 V1。V2 speech 通过 `compat_actions` 派生成现有 feature builder 可读的公开 action 序列；V2 belief 直接使用 `compat_relative_suspicion_distribution` 与 `distribution_loss_mask`，abstain 不插补。任一 sidecar 的 schema、record digest、join key、speaker/phase/public digest、hard knowledge 或 role 绑定不一致都会停止，不回退到其他 source。
 
+`empty→unobserved` 可能使个别完整游戏在某个 supervision scope 下没有任何可评分 observer。该游戏仍必须保留在 OOF 的全部 54 局 lineage 中，并以 `status=unscored_no_supervised_observers` 记录；它不产生 loss，也不进入 observer-weighted、game-macro 或 bootstrap 的分母。报告必须同时给出 `oof_game_count`、`oof_scored_game_count`、`oof_unscored_game_count` 和完整 ID 列表。若整个训练/评估集合没有任何监督行，或训练 batch 完全无监督，仍然 fail-closed；不得把未观测标签记为零损失、正确预测或 uniform target。
+
 现有两份 V2 sidecar 应保存到大容量 `review` 目录，并通过项目软链接使用：
 
 ```bash
