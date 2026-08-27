@@ -1337,9 +1337,18 @@ def build_learning_rate_scheduler(
     *,
     config: TrainingConfig,
     steps_per_epoch: int,
+    scheduler_horizon_epochs: int | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     _positive_integer(steps_per_epoch, field_name="steps_per_epoch")
-    total_steps = config.epochs * steps_per_epoch
+    horizon_epochs = (
+        config.epochs
+        if scheduler_horizon_epochs is None
+        else _positive_integer(
+            scheduler_horizon_epochs,
+            field_name="scheduler_horizon_epochs",
+        )
+    )
+    total_steps = horizon_epochs * steps_per_epoch
     if config.lr_scheduler == "constant":
         return None, {
             "name": "constant",
