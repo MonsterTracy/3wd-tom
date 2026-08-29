@@ -23,6 +23,14 @@ from werewolf.speech.private_belief_perceiver import (
     PRIVATE_BELIEF_MAX_TOKENS,
     private_belief_response_format,
 )
+from werewolf.speech.onuw_role_guess_perceiver import (
+    ROLE_GUESS_MAX_TOKENS,
+    role_guess_response_format,
+)
+from werewolf.models.twd_tom.onuw_parity_protocol import (
+    MODALITY_PROFILES,
+    ONUW_AGENT_DECLARED_MULTIMODAL,
+)
 
 
 _PRIVATE_ROLE_EVENTS = {
@@ -1000,7 +1008,8 @@ class LLMAgent(Agent):
                  temperature=1.0,
                  log_file=None,
                  gameplay_prompt_profile=LEGACY_GAMEPLAY_PROMPT_PROFILE,
-                 gameplay_max_tokens=None):
+                 gameplay_max_tokens=None,
+                 speech_modality_profile=None):
         self.backend = backend
         self.model_name = model_name
         self.tokenizer = tokenizer
@@ -1018,6 +1027,19 @@ class LLMAgent(Agent):
                 "gameplay_max_tokens must be a positive integer"
             )
         self.gameplay_max_tokens = gameplay_max_tokens
+        if (
+            speech_modality_profile is not None
+            and speech_modality_profile not in MODALITY_PROFILES
+        ):
+            raise ValueError("unsupported speech_modality_profile")
+        if (
+            speech_modality_profile == ONUW_AGENT_DECLARED_MULTIMODAL
+            and gameplay_prompt_profile != STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+        ):
+            raise ValueError(
+                "declared multimodal speech requires strict_classic7 gameplay"
+            )
+        self.speech_modality_profile = speech_modality_profile
         if gameplay_prompt_profile not in {
             LEGACY_GAMEPLAY_PROMPT_PROFILE,
             STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE,
@@ -1253,6 +1275,30 @@ class LLMAgent(Agent):
                     ),
                     legal_candidates=legal_candidates,
                     required_candidates=required_candidates,
+                )
+            ),
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+
+    def report_role_guesses_readonly(self, *, observation, report_prompt):
+        """Generate a detached full role guess from this legal private view."""
+
+        if not isinstance(report_prompt, str) or not report_prompt.strip():
+            raise ValueError("report_prompt must be non-empty text")
+        detached_agent = copy(self)
+        messages = detached_agent._build_readonly_belief_context(
+            deepcopy(observation)
+        )
+        messages.append({"role": "user", "content": report_prompt})
+        return detached_agent._chat(
+            messages,
+            temperature=0.0,
+            max_tokens=ROLE_GUESS_MAX_TOKENS,
+            response_format=role_guess_response_format(
+                supports_json_schema=getattr(
+                    detached_agent.backend,
+                    "supports_json_schema",
+                    False,
                 )
             ),
             extra_body={"thinking": {"type": "disabled"}},

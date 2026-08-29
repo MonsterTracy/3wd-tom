@@ -31,11 +31,16 @@ from werewolf.models.twd_tom.collector import (
 )
 from werewolf.models.twd_tom.samples import (
     PUBLIC_SPEECH_EVENTS,
+    freeze_public_snapshot,
     speaker_pre_speech_belief_from_sample,
 )
 from werewolf.runtime_config import normalize_runtime_config
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
+)
+from werewolf.speech.onuw_role_guess_perceiver import (
+    OnuwRoleGuessSnapshotCollector,
+    OnuwStyleRoleGuessReporter,
 )
 
 
@@ -124,6 +129,8 @@ def eval(
     call_audit=None,
     trajectory_recorder=None,
     allow_gameplay_fallback=False,
+    onuw_parity_recorder=None,
+    onuw_role_guess_collector=None,
 ):
     """Run one game and optionally collect subjective ToM samples.
 
@@ -140,6 +147,10 @@ def eval(
         raise TypeError("allow_gameplay_fallback must be boolean")
     if allow_gameplay_fallback and call_audit is None:
         raise ValueError("gameplay fallback requires a call audit")
+    if (onuw_parity_recorder is None) != (onuw_role_guess_collector is None):
+        raise ValueError(
+            "ONUW parity recording requires both recorder and role collector"
+        )
 
     for agent in agent_list:
         agent.reset()
@@ -180,6 +191,31 @@ def eval(
         if (
             trigger in PUBLIC_SPEECH_EVENTS
         ):
+            alive_observer_ids = _alive_observer_ids(env)
+            if onuw_parity_recorder is not None:
+                role_guess_snapshot = freeze_public_snapshot(
+                    game_id=onuw_parity_recorder.game_id,
+                    step_idx=step_idx,
+                    phase=action_phase,
+                    speaker_id=current_act_idx,
+                    report_trigger={
+                        "speech": "pre_public_speech",
+                        "speech_pk": "pre_public_speech_pk",
+                    }[trigger],
+                    observer_ids=alive_observer_ids,
+                    public_events=env.public_events,
+                    speech_annotations=env.speech_annotations,
+                )
+                role_guess_reports = onuw_role_guess_collector.collect(
+                    role_guess_snapshot,
+                    env=env,
+                )
+                onuw_parity_recorder.record_pre(
+                    step_idx=step_idx,
+                    speaker_id=current_act_idx,
+                    observer_ids=alive_observer_ids,
+                    role_guess_reports=role_guess_reports,
+                )
             if sample_collector is not None:
                 try:
                     collected_sample = sample_collector.record(
@@ -188,9 +224,7 @@ def eval(
                         trigger=trigger,
                         phase=action_phase,
                         speaker_id=current_act_idx,
-                        observer_ids=(
-                            _alive_observer_ids(env)
-                        ),
+                        observer_ids=alive_observer_ids,
                     )
                 except BeliefSnapshotCollectionError as exc:
                     if not allow_gameplay_fallback:
@@ -302,6 +336,14 @@ def eval(
             with env_audit_context:
                 obs, _, done, info = env.step(
                     action
+                )
+            if onuw_parity_recorder is not None and (
+                trigger in PUBLIC_SPEECH_EVENTS
+            ):
+                onuw_parity_recorder.sync_post_public_history(
+                    public_events=env.public_events,
+                    speech_annotations=env.speech_annotations,
+                    speech_emotions=env.speech_emotions,
                 )
         except Exception as exc:
             if trajectory_recorder is not None:
@@ -842,6 +884,15 @@ def build_twd_tom_sample_collector(
         output_path=output_path,
         snapshot_collector=snapshot_collector,
         game_id=game_id,
+    )
+
+
+def build_onuw_role_guess_collector(*, agent_list, report_audit=None):
+    """Build the private-informed ONUW-style parity label stack."""
+
+    return OnuwRoleGuessSnapshotCollector(
+        OnuwStyleRoleGuessReporter(audit_hook=report_audit),
+        agent_list,
     )
 
 

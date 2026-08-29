@@ -13,6 +13,7 @@ from werewolf.speech.speech_perceiver import (
 from werewolf.models.twd_tom.belief_labels import close_hard_knowledge
 from werewolf.models.twd_tom.public_events import normalize_public_event
 from werewolf.models.twd_tom.schema import normalize_player
+from werewolf.models.twd_tom.onuw_parity_protocol import EMOTION_NAMES
 from werewolf.models.twd_tom.speech_annotations import (
     STATUS_ERROR,
     STATUS_NO_ACTION,
@@ -46,6 +47,7 @@ class WerewolfTextEnvV0(gym.Env):
         self.game_log = []
         self.public_events = []
         self.speech_annotations = []
+        self.speech_emotions = []
 
         random_seed = kwargs.get('random_seed')
         if random_seed is not None and (
@@ -122,6 +124,7 @@ class WerewolfTextEnvV0(gym.Env):
             self._rng.shuffle(self.roles)
         self._validate_roles()
         self.speech_annotations = []
+        self.speech_emotions = []
 
         self.WOLF_IDX = [idx for idx, role in enumerate(self.roles) if role == 'Werewolf']
         self.SEER_IDX = self.roles.index('Seer')
@@ -355,9 +358,31 @@ class WerewolfTextEnvV0(gym.Env):
             assert action_type == 'speech' or action_type == 'speech_pk'
             event_idx = len(self.public_events)
             speaker = normalize_player(self.current_act_idx + 1)
-            if not isinstance(action_content, str):
-                raise TypeError("speech content must be text")
-            raw_text = action_content
+            declared_emotion = None
+            if isinstance(action_content, dict):
+                if set(action_content) != {"speech", "face", "tone"}:
+                    raise TypeError(
+                        "speech content must be text or declared multimodal"
+                    )
+                raw_text = action_content["speech"]
+                if not isinstance(raw_text, str):
+                    raise TypeError("speech content must be text")
+                if any(
+                    action_content[field] not in EMOTION_NAMES
+                    for field in ("face", "tone")
+                ):
+                    raise ValueError("face and tone must use the 8-class vocabulary")
+                declared_emotion = {
+                    "event_idx": event_idx,
+                    "speaker": speaker,
+                    "face": action_content["face"],
+                    "tone": action_content["tone"],
+                    "source": "agent_declared",
+                }
+            elif isinstance(action_content, str):
+                raw_text = action_content
+            else:
+                raise TypeError("speech content must be text or declared multimodal")
             audit = self.speech_perceiver.parse_with_audit(
                 speaker=self.current_act_idx + 1,
                 speech=raw_text,
@@ -398,6 +423,8 @@ class WerewolfTextEnvV0(gym.Env):
                 raw_text=raw_text,
             )
             self.speech_annotations.append(annotation)
+            if declared_emotion is not None:
+                self.speech_emotions.append(declared_emotion)
 
             self.game_log.append(
                 Log(

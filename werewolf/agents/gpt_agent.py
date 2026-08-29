@@ -31,7 +31,14 @@ from werewolf.agents.prompt_template_v0 import (
 )
 from werewolf.backends import BackendError
 from werewolf.models.twd_tom.schema import normalize_player
+from werewolf.models.twd_tom.onuw_parity_protocol import (
+    ONUW_AGENT_DECLARED_MULTIMODAL,
+)
 from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
+from werewolf.speech.onuw_declared_emotion import (
+    declared_speech_response_format,
+    parse_declared_multimodal_speech,
+)
 from . import agent_registry as AgentRegistry
 
 
@@ -59,6 +66,7 @@ class GPTAgent(LLMAgent):
         log_file=None,
         gameplay_prompt_profile="legacy",
         gameplay_max_tokens=None,
+        speech_modality_profile=None,
     ):
         super().__init__(
             backend=backend,
@@ -68,6 +76,7 @@ class GPTAgent(LLMAgent):
             log_file=log_file,
             gameplay_prompt_profile=gameplay_prompt_profile,
             gameplay_max_tokens=gameplay_max_tokens,
+            speech_modality_profile=speech_modality_profile,
         )
         self.rate_limit = 6
         self.temperature = temperature
@@ -424,6 +433,27 @@ class GPTAgent(LLMAgent):
                 "必须基于同一组冻结意图完整重新生成一段发言。"
                 "不得修改、引用或解释上一次响应。"
             )
+        declared_multimodal = (
+            self.speech_modality_profile == ONUW_AGENT_DECLARED_MULTIMODAL
+        )
+        if declared_multimodal:
+            prompt += (
+                "\n\n在同一次响应中声明这段发言的 face 与 tone。"
+                "二者都必须从 sad, anger, neutral, happy, surprise, fear, "
+                "disgust, other 中选择；other 是真实语义类。"
+                "只输出包含 speech、face、tone 的 JSON。"
+            )
+        response_format_kwargs = (
+            {
+                "response_format": declared_speech_response_format(
+                    supports_json_schema=getattr(
+                        self.backend, "supports_json_schema", False
+                    )
+                )
+            }
+            if declared_multimodal
+            else {}
+        )
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={
@@ -433,10 +463,17 @@ class GPTAgent(LLMAgent):
             },
             temperature=temperature,
             max_tokens=max_tokens,
+            **response_format_kwargs,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
+        declared = (
+            parse_declared_multimodal_speech(content)
+            if declared_multimodal
+            else None
+        )
+        speech_text = declared.speech if declared is not None else content
         validate_gameplay_public_speech(
-            content,
+            speech_text,
             finish_reason=metadata["finish_reason"],
             player_id=player_id,
             phase=phase,
@@ -446,7 +483,11 @@ class GPTAgent(LLMAgent):
                 if act.target is not None
             ),
         )
-        return content.strip()
+        return (
+            declared.as_action_content()
+            if declared is not None
+            else speech_text.strip()
+        )
 
     def _generate_vote(
         self,
