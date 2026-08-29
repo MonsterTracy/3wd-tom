@@ -1,0 +1,57 @@
+backends:
+  server_qwen35_9b:
+    type: openai_compatible
+    base_url: "http://127.0.0.1:8000/v1"
+    default_model: "qwen3.5-9b"
+    supports_json_schema: true
+
+parser:
+  backend: server_qwen35_9b
+  model: "qwen3.5-9b"
+  model_params:
+    temperature: 0.0
+
+env_config:
+  n_player: 7
+  n_role: 4
+  n_werewolf: 2
+  n_seer: 1
+  n_guard: 0
+  n_witch: 1
+  n_hunter: 0
+  n_villager: 3
+
+agent_config:
+  allow_cross_team_profiles: true
+  must_include: []
+  all_candidates:
+    - profile_name: server_qwen35_9b
+      agent_type: gpt
+      backend: server_qwen35_9b
+      model: "qwen3.5-9b"
+      model_params:
+        temperature: 1.0
+        gameplay_prompt_profile: strict_classic7
+        gameplay_max_tokens: 1024
+        speech_modality_profile: onuw_agent_declared_multimodal
+      sample_ratio: 1.0
+
+pipeline:
+  onuw_parity_pilot:
+    data_namespace: onuw_parity_pilot_v1
+    protocol_id: classic7_onuw_reference_v1
+    content_profile: onuw_action_only
+    modality_profile: onuw_agent_declared_multimodal
+    label_collector: onuw_style_role_guess
+    timing: strict_pre
+    model_input: public_only
+    allow_gameplay_fallback: false
+    formal_training_eligible: false
+
+    collection:
+      game_count: 3
+      seeds: [5101, 5102, 5103]
+      max_gameplay_calls_per_game: 192
+      max_belief_calls_per_game: 448
+      max_total_calls_per_game: 640
+      max_wall_seconds_per_game: 3600.0

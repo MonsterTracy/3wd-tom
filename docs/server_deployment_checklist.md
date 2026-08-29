@@ -36,6 +36,18 @@
 12. 采集完成后运行 `python -m script.twd_tom.audit_canonical_belief_data --canonical-root ...`；该命令会验证成功 batch 的 plan/summary/per-game/failure digest、种子分区、完整 PRE 覆盖与 snapshot SHA256 链，并拒绝 pilot、未达 target、成功局中的 label failure 或任何 gameplay fallback。只有 audit `status=PASS` 才能物化数据集。
 13. 进程或 SSH 会话中断后，可对同一输出目录使用完全相同的 commit、配置、`run_id`、mode、seed start 和 game count 加 `--resume`。已成功或已失败的种子一律跳过；中断时留下的半局会被记为 `interrupted_previous_process` 失败且不会重跑。协议、commit 或 seed plan 变化时必须新建 `run_id`，不能混入旧批次。
 
+## ONUW-parity 三局新 pilot
+
+该批次与旧 semantic-clean 数据完全隔离，只用于检查新 parity 协议，不能用于训练、模型选择或建立 sealed test。固定配置为
+`configs/onuw_parity_pilot_qwen35_9b.yaml`，固定 seeds 为 5101--5103。
+
+1. 部署 `onuw-parity` 的已提交精确 commit，确认工作树干净，并重新执行 editable install。
+2. 推理服务必须以 `qwen3.5-9b` 作为 served model name，且支持 JSON Schema。先运行 `probe_onuw_parity_backend`；只有输出 `status=PASS` 才能采集。
+3. `run_id` 必须以 `onuw_parity_pilot_` 开头，输出必须是 `/data/yuxiao/3wd-tom/parity_pilot` 下全新且不存在的目录。
+4. 采集固定使用 strict PRE、`onuw_style_role_guess`、`onuw_action_only` 和 agent-declared face/tone。任何 gameplay、label、emotion、parser、trajectory replay 或预算失败都会令该局失败；不允许 fallback 或 replacement seed。
+5. 批次输出 `parity_games.jsonl`、`parity_collection_audits.jsonl`、`summary.json`，并为每局保存 trajectory、observer views、speech annotations、call audit 和哈希。只有三局全部完成时 summary 才是 `PASS`，但仍保持 `formal_training_eligible=false`。
+6. 审阅 summary 中的 sequence/query/support/empty/emotion/conflict/information-loss 后，再对 `parity_games.jsonl` 执行 `profile_onuw_parity_memory`。该命令测量真实 CUDA AdamW step 的峰值显存，但不自动冻结 batch、epoch 或 max positions。
+
 ## DeepSeek 发言解析器影子审计
 
 该步骤只用于比较不同模型对同一批公开发言的三元组解析，不是 canonical 采集、标签修补或数据物化。输入批次保持只读，输出必须位于独立的 `review` 目录。

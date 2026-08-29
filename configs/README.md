@@ -9,6 +9,9 @@ download that model.
 - `twd_tom_server_qwen35_9b_canonical_60.yaml`: a predeclared 120-seed pool
   (4201--4320) that stops after 60 successful canonical games and uses a
   frozen 48/6/6 game-level split declaration.
+- `onuw_parity_pilot_qwen35_9b.yaml`: three entirely new parity pilot games
+  (seeds 5101--5103). It is fail-closed, uses strict PRE full role guesses and
+  agent-declared face/tone, and is explicitly ineligible for formal training.
 
 Use these profiles through the explicit-stage pipeline. The collector
 consumes and enforces every `pipeline.collection` field: the CLI seed range and

@@ -244,7 +244,23 @@ legal_roles: {", ".join(ROLE_GUESS_NAMES)}
                 guesses = parse_role_guess_response(raw)
             except (TypeError, ValueError) as exc:
                 last_error = str(exc)
+                self._record_attempt(
+                    report_id=report_id,
+                    observer_id=observer,
+                    generation_attempt=attempt,
+                    status="invalid",
+                    error=last_error,
+                    raw_response=raw,
+                )
                 continue
+            self._record_attempt(
+                report_id=report_id,
+                observer_id=observer,
+                generation_attempt=attempt,
+                status="ok",
+                error=None,
+                raw_response=raw,
+            )
             audit = role_guess_audit(guesses)
             if self.audit_hook is not None:
                 self.audit_hook.complete_report(report_id, raw)
@@ -269,6 +285,17 @@ legal_roles: {", ".join(ROLE_GUESS_NAMES)}
             "agent_backend_id": agent_backend_id,
             "generation_attempt_count": ROLE_GUESS_MAX_ATTEMPTS,
         }
+
+    def _record_attempt(self, **event) -> None:
+        if self.audit_hook is None:
+            return
+        recorder = getattr(
+            self.audit_hook,
+            "record_label_generation_attempt",
+            None,
+        )
+        if callable(recorder):
+            recorder(**event)
 
 
 class OnuwRoleGuessSnapshotCollector:

@@ -118,3 +118,58 @@ def test_role_guess_prompt_prohibits_oracle_repair():
     assert "自己的私人信息" in prompt
     assert "其他玩家不可见私人状态" in prompt
     assert "真实双狼数量来修复" in prompt
+
+
+def test_role_guess_report_records_each_validation_attempt_for_audit():
+    valid = json.dumps({"role_guesses": guesses("player7")})
+
+    class Agent:
+        backend_id = "fake"
+        model_name = "fake-model"
+
+        def __init__(self):
+            self.responses = iter(["not-json", valid])
+
+        def report_role_guesses_readonly(self, **_kwargs):
+            return next(self.responses)
+
+    class Hook:
+        def __init__(self):
+            self.attempts = []
+
+        def prepare_report(self, **kwargs):
+            return "report-1", kwargs["report_prompt"]
+
+        def belief_context(self, _report_id):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        def complete_report(self, _report_id, _raw):
+            return None
+
+        def record_label_generation_attempt(self, **event):
+            self.attempts.append(event)
+
+    class Snapshot:
+        step_idx = 1
+        speaker_id = 1
+        phase = "1_day_speech"
+        public_history_digest = "digest"
+        public_events = ()
+
+    hook = Hook()
+    result = OnuwStyleRoleGuessReporter(audit_hook=hook).report(
+        agent=Agent(),
+        observation={
+            "observer_id": 1,
+            "current_act_idx": 1,
+            "phase": "1_day_speech",
+        },
+        observer_id=1,
+        public_snapshot=Snapshot(),
+        agent_backend_id="fake",
+    )
+    assert result["status"] == "ok"
+    assert [attempt["status"] for attempt in hook.attempts] == ["invalid", "ok"]
+    assert hook.attempts[0]["raw_response"] == "not-json"
