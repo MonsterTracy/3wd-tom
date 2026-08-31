@@ -429,6 +429,84 @@ class PlayerObservationTest(unittest.TestCase):
             [1, 2],
         )
 
+    def test_delivered_logs_strip_acl_without_changing_private_visibility(self):
+        self.env.step(("kill", 7))
+        self.env.step(("kill", 7))
+        self.env.step(("check", 1))
+        self.env.step(("witch_pass", 0))
+
+        internal_kill = next(
+            log
+            for log in self.env.game_log
+            if log.event == "kill_decision"
+        )
+        self.assertEqual(internal_kill.viewer, [0, 1, 3])
+
+        observations = {
+            player_id: self.env.get_observation_for(player_id)
+            for player_id in range(1, 8)
+        }
+        for observation in observations.values():
+            self.assertTrue(
+                all(
+                    not hasattr(log, "viewer")
+                    for log in observation["game_log"]
+                )
+            )
+
+        wolf_events = {
+            log.event
+            for log in observations[1]["game_log"]
+        }
+        second_wolf_events = {
+            log.event
+            for log in observations[2]["game_log"]
+        }
+        for events in (wolf_events, second_wolf_events):
+            self.assertTrue(
+                {"werewolf_team_info", "skill_wolf", "kill_decision"}
+                <= events
+            )
+
+        seer_events = {
+            log.event
+            for log in observations[3]["game_log"]
+        }
+        self.assertIn("skill_seer", seer_events)
+        self.assertTrue(
+            {
+                "werewolf_team_info",
+                "skill_wolf",
+                "kill_decision",
+                "skill_witch",
+            }.isdisjoint(seer_events)
+        )
+
+        witch_events = {
+            log.event
+            for log in observations[4]["game_log"]
+        }
+        self.assertTrue({"kill_decision", "skill_witch"} <= witch_events)
+        self.assertTrue(
+            {"werewolf_team_info", "skill_wolf", "skill_seer"}.isdisjoint(
+                witch_events
+            )
+        )
+
+        villager_events = {
+            log.event
+            for log in observations[5]["game_log"]
+        }
+        self.assertTrue(
+            {
+                "werewolf_team_info",
+                "skill_wolf",
+                "kill_decision",
+                "skill_seer",
+                "skill_witch",
+            }.isdisjoint(villager_events)
+        )
+
     def test_observation_generation_does_not_mutate_env(self):
         before_current_actor = (
             self.env.current_act_idx

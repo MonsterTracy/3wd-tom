@@ -50,7 +50,7 @@ day cognition 响应只包含 `public_content_selection`、`public_vote_stance_i
 ```bash
 cd /home/dell/yuxiao/3wd-tom
 
-VALIDATION_RUN_ID="<new_v6_canonical_validation_run_id>"
+VALIDATION_RUN_ID="<new_v7_canonical_validation_run_id>"
 VALIDATION_ROOT="/data/yuxiao/3wd-tom/canonical_data/${VALIDATION_RUN_ID}"
 
 test ! -e "${VALIDATION_ROOT}"
@@ -69,7 +69,7 @@ test ! -e "${VALIDATION_ROOT}"
   --canonical-root "${VALIDATION_ROOT}"
 ```
 
-当前 raw schema 为 `classic7_pre_speech_player_suspicion_v6`。旧 canonical trajectory 由第二份 day-cognition belief 影响公开行为，不满足新的单一 PRE belief 因果契约，不能继续作为正式数据；必须使用新 `run_id` 重新采集。不得原地改写旧批次。
+当前 raw schema 为 `classic7_pre_speech_player_suspicion_v7`。旧 canonical trajectory 由第二份 day-cognition belief 影响公开行为，或在 v6 delivered observation 中暴露内部 `viewer` ACL，不满足新的单一 PRE belief 因果与信息边界，不能继续作为正式数据；必须使用新 `run_id` 重新采集。不得原地改写旧批次。
 
 canonical 批次只有在目标成功局数达到 60、完整 PRE snapshot 与 speech annotation 审计均通过后才能物化。失败局不得进入 `games/`、split 或训练数据。采集完成后运行：
 
@@ -78,7 +78,7 @@ cd /home/dell/yuxiao/3wd-tom
 
 /home/dell/yuxiao/envs/3wd-tom/bin/python \
   -m script.twd_tom.audit_canonical_belief_data \
-  --canonical-root /home/dell/yuxiao/3wd-tom/canonical_data/<new_v6_run_id>
+  --canonical-root /home/dell/yuxiao/3wd-tom/canonical_data/<new_v7_run_id>
 ```
 
 ## 数据物化与开发集 folds
@@ -89,9 +89,9 @@ cd /home/dell/yuxiao/3wd-tom
 set -euo pipefail
 cd /home/dell/yuxiao/3wd-tom
 
-CANONICAL_ROOT="/home/dell/yuxiao/3wd-tom/canonical_data/<new_v6_run_id>"
-SOURCE_SPLIT="/home/dell/yuxiao/3wd-tom/datasets/<new_v6_split>"
-FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/<new_v6_dev54_folds5>"
+CANONICAL_ROOT="/home/dell/yuxiao/3wd-tom/canonical_data/<new_v7_run_id>"
+SOURCE_SPLIT="/home/dell/yuxiao/3wd-tom/datasets/<new_v7_split>"
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/<new_v7_dev54_folds5>"
 
 test ! -e "${SOURCE_SPLIT}"
 test ! -e "${FOLD_ROOT}"
@@ -123,9 +123,9 @@ test ! -e "${FOLD_ROOT}"
 ```bash
 cd /home/dell/yuxiao/3wd-tom
 
-FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/<new_v6_dev54_folds5>"
-OOF_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/<new_v6_all_alive_oof>"
-OOF_LOG="/data/yuxiao/3wd-tom/logs/<new_v6_all_alive_oof>.console.log"
+FOLD_ROOT="/home/dell/yuxiao/3wd-tom/datasets/<new_v7_dev54_folds5>"
+OOF_OUTPUT="/home/dell/yuxiao/3wd-tom/outputs/<new_v7_all_alive_oof>"
+OOF_LOG="/data/yuxiao/3wd-tom/logs/<new_v7_all_alive_oof>.console.log"
 
 test ! -e "${OOF_OUTPUT}"
 test ! -e "${OOF_LOG}"

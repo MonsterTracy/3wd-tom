@@ -8,7 +8,8 @@
 
 当前冻结版本：
 
-- raw sample：`classic7_pre_speech_player_suspicion_v6`；
+- delivered observation：`classic7_agent_observation_v3`；
+- raw sample：`classic7_pre_speech_player_suspicion_v7`；
 - label prompt：`classic7_pre_speech_player_suspicion_prompt_v6`；
 - label provenance：`alive_observer_readonly_pre_speech_report_v3`；
 - target conversion：`nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3`；
@@ -33,6 +34,7 @@
 4. query 前后 agent-owned state 必须完全相同。
 
 不得向 collector 注入全局真实角色、其他玩家私有信息或未来事件。
+Environment 内部事件可保留 `viewer` ACL 用于可见性过滤，但过滤完成后必须从交付给 playing agent、readonly reporter 和 observer-view artifact 的 observation 中删除该字段；recipient identity 不属于游戏信息。
 
 ## 原始标签
 
@@ -79,7 +81,7 @@ speaker report 非 `ok`、边界不匹配、agent 不支持专用入口或非 st
 
 day cognition 先基于冻结的 PRE belief 选择公开表达 intent，再通过独立的自然语言 realization 调用生成 1–4 句中文为主的公开原文；自然出现的常见英文词允许保留。该原文进入 immutable `public_speech`；随后 speech parser 只接收公开原文、speaker、day 和 phase，解析到独立的 `speech_annotations.jsonl`。生成器 intent 不能直接成为 canonical annotation 或模型输入。所有身份都禁止 cognition 候选生成 `point_as_werewolf(observer)`；公开原文若明确自称狼人，parser 仍应忠实记录，因为 parser 不做真值过滤。
 
-`v6` 之前的 canonical trajectory 可能由 PRE belief A 产生标签、再由 day cognition belief B 产生公开行为。它们不满足单一 PRE belief 的因果契约，不能继续物化为新的正式数据，必须重新采集。
+`v7` 之前的 canonical data 不满足当前正式信息与因果边界：更早版本可能由 PRE belief A 产生标签、再由 day cognition belief B 产生公开行为，v6 delivered observation 还暴露了内部 `viewer` ACL。它们不能继续物化为新的正式数据，必须重新采集。
 
 strict realization 会拒绝空白/截断、非法 `playerN`、结构或控制文本泄漏、遗漏冻结具体目标，以及显式把当前 phase 说成其他天数的原文；普通英文不单独构成失败。realization 最多完整生成三次，后一次只追加上一次本地验证错误并保持同一冻结 intent，不修补或部分接收旧原文。speech parser 对同一原文最多生成三份完整响应，逐次保存原始响应与错误；不删行、不部分接受、不猜测目标。canonical 三次失败则拒绝当前局；pilot 保留 `status=error` 后继续，但永不可物化。
 

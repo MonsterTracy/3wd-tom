@@ -19,7 +19,7 @@ from werewolf.models.twd_tom.public_events import (
 
 
 TRAJECTORY_SCHEMA_VERSION = "classic7_game_interaction_trajectory_v2"
-OBSERVATION_SCHEMA_VERSION = "classic7_agent_observation_v2"
+OBSERVATION_SCHEMA_VERSION = "classic7_agent_observation_v3"
 OBSERVER_VIEW_PROVENANCE_SCHEMA_VERSION = (
     "classic7_observer_view_provenance_v2"
 )
@@ -50,9 +50,14 @@ def serialize_json_value(value: Any) -> Any:
     """Convert one supported runtime value into strict JSON data."""
 
     if isinstance(value, Log):
+        fields = (
+            _LOG_FIELDS
+            if hasattr(value, "viewer")
+            else _LOG_FIELDS[1:]
+        )
         return {
             field: serialize_json_value(getattr(value, field))
-            for field in _LOG_FIELDS
+            for field in fields
         }
     if value is None or isinstance(value, (bool, int, str)):
         return value

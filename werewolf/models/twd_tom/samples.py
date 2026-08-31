@@ -38,7 +38,7 @@ from werewolf.speech.private_belief_perceiver import (
 )
 
 
-SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v6"
+SAMPLE_SCHEMA_VERSION = "classic7_pre_speech_player_suspicion_v7"
 PUBLIC_SPEECH_EVENTS = {"speech", "speech_pk"}
 REPORT_TRIGGERS = {"pre_public_speech", "pre_public_speech_pk"}
 SAMPLE_FIELDS = frozenset(

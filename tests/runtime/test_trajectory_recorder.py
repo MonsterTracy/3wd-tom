@@ -11,6 +11,7 @@ from werewolf.agents.llm_agent import (
     GameplayGenerationExhausted,
 )
 from werewolf.helper.log_utils import Log
+from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.public_events import (
     normalize_public_events,
     public_event_digest,
@@ -339,6 +340,45 @@ def test_strict_serializer_preserves_tuples_and_logs_and_fails_closed():
         serialize_json_value(object())
 
 
+def test_observer_view_artifact_records_sanitized_delivered_observations(
+    tmp_path,
+):
+    env = WerewolfTextEnvV0(log_save_path=None)
+    env.reset(roles=ROLES)
+    env.step(("kill", 7))
+    env.step(("kill", 7))
+    env.step(("check", 1))
+    observation, _, _, _ = env.step(("witch_pass", 0))
+
+    recorder = _recorder(tmp_path, name="sanitized_observation")
+    recorder.start(env, roles=ROLES)
+    recorder.before_agent_act(
+        env,
+        step_idx=0,
+        acting_player_id=observation["current_act_idx"],
+        delivered_observation=observation,
+        speech_kind="speech",
+    )
+    recorder.abort()
+
+    trajectory, provenance = _read_outputs(
+        tmp_path,
+        "sanitized_observation",
+    )
+    assert trajectory["observation_schema_version"] == (
+        "classic7_agent_observation_v3"
+    )
+    assert provenance["observation_schema_version"] == (
+        "classic7_agent_observation_v3"
+    )
+    for boundary in provenance["boundaries"]:
+        for view in boundary["observer_views"]:
+            assert all(
+                "viewer" not in event
+                for event in view["observation"]["game_log"]
+            )
+
+
 def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
     env = TrajectoryEnvironment()
     agents = _agents()
@@ -461,7 +501,7 @@ def test_complete_trajectory_and_speech_boundaries_are_canonical(tmp_path):
 
     assert all(not item.startswith("view:2:") for item in env.order)
     assert any(item.startswith("view:1:") for item in env.order)
-    assert OBSERVATION_SCHEMA_VERSION == "classic7_agent_observation_v2"
+    assert OBSERVATION_SCHEMA_VERSION == "classic7_agent_observation_v3"
 
 
 def test_agent_failure_writes_longest_committed_prefix(tmp_path):

@@ -841,6 +841,9 @@ class WerewolfTextEnvV0(gym.Env):
             for log in self.game_log
             if observer_idx in log.viewer
         ]
+        game_log = self.trans_obs_env_to_agt(game_log)
+        for log in game_log:
+            del log.viewer
 
         if observer_idx == self.current_act_idx:
             valid_action = (
@@ -853,9 +856,7 @@ class WerewolfTextEnvV0(gym.Env):
             'observer_id': observer_idx + 1,
             'current_act_idx': self.current_act_idx + 1,
             'identity': self.roles[observer_idx],
-            'game_log': self.trans_obs_env_to_agt(
-                game_log
-            ),
+            'game_log': game_log,
             'phase': self.get_phase(
                 self.day,
                 self.day_or_night,

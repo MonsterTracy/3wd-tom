@@ -3,6 +3,7 @@ from copy import deepcopy
 import pytest
 
 from werewolf.agents.llm_agent import LLMAgent
+from werewolf.envs.werewolf_text_env_v0 import WerewolfTextEnvV0
 from werewolf.models.twd_tom.belief_snapshot import (
     PlayingAgentBeliefSnapshotCollector,
 )
@@ -11,6 +12,7 @@ from tests.twd_tom.public_event_fixtures import make_speech_annotations
 from werewolf.speech.private_belief_perceiver import (
     PlayingAgentBeliefReporter,
 )
+from werewolf.trajectory import serialize_json_value
 
 
 class FakeAgent:
@@ -115,6 +117,52 @@ def test_all_observers_use_one_snapshot_and_only_their_private_view():
         assert call["observation"]["game_log"] == [f"private-{player_id}"]
         assert call["backend_id"] == f"backend_{player_id}"
     assert [vars(agent) for agent in agents] == before
+
+
+def test_pre_collector_receives_same_sanitized_observation_as_gameplay():
+    env = WerewolfTextEnvV0(log_save_path=None)
+    env.reset(
+        roles=[
+            "Werewolf",
+            "Werewolf",
+            "Seer",
+            "Witch",
+            "Villager",
+            "Villager",
+            "Villager",
+        ]
+    )
+    env.step(("kill", 7))
+    env.step(("kill", 7))
+    env.step(("check", 1))
+    gameplay_observation, _, _, _ = env.step(("witch_pass", 0))
+    speaker_id = gameplay_observation["current_act_idx"]
+    snapshot = freeze_public_snapshot(
+        game_id="game_sanitized",
+        step_idx=0,
+        phase=gameplay_observation["phase"],
+        speaker_id=speaker_id,
+        report_trigger="pre_public_speech",
+        observer_ids=(speaker_id,),
+        public_events=env.public_events,
+        speech_annotations=(),
+    )
+    reporter = FakeReporter()
+    agents = [FakeAgent(f"backend_{i}") for i in range(1, 8)]
+
+    PlayingAgentBeliefSnapshotCollector(reporter, agents).collect(
+        snapshot,
+        env=env,
+    )
+
+    reporter_observation = reporter.calls[0]["observation"]
+    assert serialize_json_value(reporter_observation) == serialize_json_value(
+        gameplay_observation
+    )
+    assert all(
+        not hasattr(log, "viewer")
+        for log in reporter_observation["game_log"]
+    )
 
 
 def test_readonly_state_mutation_is_detected_and_not_written_as_success():
