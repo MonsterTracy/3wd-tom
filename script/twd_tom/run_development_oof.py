@@ -26,6 +26,7 @@ from script.twd_tom.train import (
 )
 from werewolf.models.twd_tom.belief_backbone import (
     FULL_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
     QWEN2_BACKBONE_NAME,
     SUPPORTED_BACKBONE_NAMES,
     SUPPORTED_INPUT_FEATURE_PROFILES,
@@ -36,13 +37,14 @@ from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
     V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
 )
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.supervision import (
     ALL_ALIVE_SCOPE,
     SUPERVISION_SCOPES,
 )
 
 
-OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v5"
+OOF_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_dense_oof_summary_v6"
 DEFAULT_REFERENCE_IMPROVEMENT = 0.50
 
 
@@ -215,6 +217,10 @@ def _validate_completed_fold_summary(
 ) -> None:
     if summary.get("status") != "ok":
         raise ValueError(f"existing {fold_name} summary is not complete")
+    if summary.get("source_schema_version") != SAMPLE_SCHEMA_VERSION:
+        raise ValueError(
+            f"existing {fold_name} summary has wrong source schema"
+        )
     provenance = summary.get("run_provenance")
     if not isinstance(provenance, Mapping) or provenance.get(
         "development_fold_name"
@@ -231,7 +237,7 @@ def _validate_completed_fold_summary(
             )
 
 
-def run_development_oof(
+def _run_development_oof(
     *,
     fold_root: str | Path,
     output_dir: str | Path,
@@ -279,10 +285,6 @@ def run_development_oof(
         raise ValueError(
             "belief_annotation_source must be one of "
             f"{BELIEF_ANNOTATION_SOURCES}"
-        )
-    if role_sidecar_path is None:
-        raise ValueError(
-            "diagnostic OOF requires a role sidecar for complete role strata"
         )
     if (
         isinstance(worst_case_limit, bool)
@@ -333,13 +335,16 @@ def run_development_oof(
         "dense_supervision": True,
         "early_stopping_patience": early_stopping_patience,
         "early_stopping_min_delta": early_stopping_min_delta,
-        "role_sidecar_path": resolved_role_sidecar,
         "supervision_scope": supervision_scope,
         "speech_annotation_source": speech_annotation_source,
         "belief_annotation_source": belief_annotation_source,
-        "speech_v2_annotation_path": resolved_speech_v2,
-        "belief_v2_annotation_path": resolved_belief_v2,
     }
+    if resolved_role_sidecar is not None:
+        requested_config["role_sidecar_path"] = resolved_role_sidecar
+    if resolved_speech_v2 is not None:
+        requested_config["speech_v2_annotation_path"] = resolved_speech_v2
+    if resolved_belief_v2 is not None:
+        requested_config["belief_v2_annotation_path"] = resolved_belief_v2
     if private_conditioning:
         requested_config["private_conditioning"] = True
     fold_summaries: dict[str, dict[str, Any]] = {}
@@ -568,6 +573,67 @@ def run_development_oof(
     return result
 
 
+def run_development_oof(
+    *,
+    fold_root: str | Path,
+    output_dir: str | Path,
+    epochs: int = 80,
+    batch_size: int = 8,
+    learning_rate: float = 1e-4,
+    min_learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.05,
+    early_stopping_patience: int = 12,
+    early_stopping_min_delta: float = 1e-4,
+    seed: int = 42,
+    device: str = "auto",
+    bootstrap_samples: int = 2000,
+    reference_improvement: float = DEFAULT_REFERENCE_IMPROVEMENT,
+    worst_case_limit: int = 50,
+) -> dict[str, Any]:
+    """Run the public-only, all-alive formal development OOF protocol."""
+
+    return _run_development_oof(
+        fold_root=fold_root,
+        output_dir=output_dir,
+        epochs=epochs,
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        min_learning_rate=min_learning_rate,
+        warmup_ratio=warmup_ratio,
+        early_stopping_patience=early_stopping_patience,
+        early_stopping_min_delta=early_stopping_min_delta,
+        seed=seed,
+        device=device,
+        bootstrap_samples=bootstrap_samples,
+        reference_improvement=reference_improvement,
+        private_conditioning=False,
+        backbone=QWEN2_BACKBONE_NAME,
+        input_feature_profile=NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+        role_sidecar_path=None,
+        supervision_scope=ALL_ALIVE_SCOPE,
+        speech_annotation_source=V1_ANNOTATION_SOURCE,
+        belief_annotation_source=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        speech_v2_annotation_path=None,
+        belief_v2_annotation_path=None,
+        worst_case_limit=worst_case_limit,
+    )
+
+
+def run_diagnostic_oof(
+    *,
+    role_sidecar_path: str | Path,
+    supervision_scope: str,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Run an explicitly non-formal role-scoped OOF diagnostic."""
+
+    return _run_development_oof(
+        role_sidecar_path=role_sidecar_path,
+        supervision_scope=supervision_scope,
+        **kwargs,
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run dense ToM development-only 5-fold OOF training."
@@ -585,35 +651,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--reference-improvement", type=float, default=0.50)
-    parser.add_argument("--private-conditioning", action="store_true")
-    parser.add_argument(
-        "--backbone",
-        choices=SUPPORTED_BACKBONE_NAMES,
-        default=QWEN2_BACKBONE_NAME,
-    )
-    parser.add_argument("--role-sidecar", required=True)
-    parser.add_argument(
-        "--supervision-scope",
-        choices=SUPERVISION_SCOPES,
-        default=ALL_ALIVE_SCOPE,
-    )
-    parser.add_argument(
-        "--input-feature-profile",
-        choices=SUPPORTED_INPUT_FEATURE_PROFILES,
-        default=FULL_INPUT_FEATURE_PROFILE,
-    )
-    parser.add_argument(
-        "--speech-annotation-source",
-        choices=SPEECH_ANNOTATION_SOURCES,
-        default=V1_ANNOTATION_SOURCE,
-    )
-    parser.add_argument(
-        "--belief-annotation-source",
-        choices=BELIEF_ANNOTATION_SOURCES,
-        default=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
-    )
-    parser.add_argument("--speech-v2-annotations")
-    parser.add_argument("--belief-v2-annotations")
     parser.add_argument("--worst-case-limit", type=int, default=50)
     return parser
 
@@ -634,15 +671,6 @@ def main() -> int:
         device=args.device,
         bootstrap_samples=args.bootstrap_samples,
         reference_improvement=args.reference_improvement,
-        private_conditioning=args.private_conditioning,
-        backbone=args.backbone,
-        input_feature_profile=args.input_feature_profile,
-        role_sidecar_path=args.role_sidecar,
-        supervision_scope=args.supervision_scope,
-        speech_annotation_source=args.speech_annotation_source,
-        belief_annotation_source=args.belief_annotation_source,
-        speech_v2_annotation_path=args.speech_v2_annotations,
-        belief_v2_annotation_path=args.belief_v2_annotations,
         worst_case_limit=args.worst_case_limit,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

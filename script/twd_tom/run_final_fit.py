@@ -64,19 +64,18 @@ from werewolf.models.twd_tom.public_events import (
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.schema import ACTION_NAMES, ACTION_TO_ID
 from werewolf.models.twd_tom.supervision import (
-    NON_WOLF_ALIVE_SCOPE,
-    load_role_sidecar_report,
+    ALL_ALIVE_SCOPE,
 )
 from werewolf.trajectory import canonical_digest
 
 
-FINAL_PROTOCOL_SCHEMA_VERSION = "classic7_tom_v2_final_fit_protocol_v1"
-FINAL_CHECKPOINT_TYPE = "development_final_fit_v1"
+FINAL_PROTOCOL_SCHEMA_VERSION = "classic7_tom_v2_final_fit_protocol_v2"
+FINAL_CHECKPOINT_TYPE = "development_final_fit_v2"
 FINAL_CHECKPOINT_FILENAME = "final.pt"
 FINAL_PROTOCOL_FILENAME = "final_protocol.json"
 FINAL_SUMMARY_FILENAME = "final_summary.json"
 FINAL_HISTORY_FILENAME = "history.json"
-EXPECTED_FOLD_BEST_EPOCHS = (38, 30, 42, 21, 26)
+EXPECTED_FOLD_BEST_EPOCHS: tuple[int, ...] = ()
 EXPECTED_DEVELOPMENT_GAME_COUNT = 54
 EXPECTED_SEALED_GAME_COUNT = 6
 EPOCH_SELECTION_RULE = "median_of_five_oof_fold_best_epochs"
@@ -87,7 +86,6 @@ class FinalFitConfig:
     """Paths and runtime device for the otherwise immutable final protocol."""
 
     fold_root: str
-    role_sidecar_path: str
     oof_summary_path: str
     output_dir: str
     device: str = "auto"
@@ -96,10 +94,10 @@ class FinalFitConfig:
     input_feature_profile: ClassVar[str] = NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     speech_annotation_source: ClassVar[str] = V1_ANNOTATION_SOURCE
     belief_annotation_source: ClassVar[str] = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
-    supervision_scope: ClassVar[str] = NON_WOLF_ALIVE_SCOPE
+    supervision_scope: ClassVar[str] = ALL_ALIVE_SCOPE
     dense_supervision: ClassVar[bool] = True
     private_conditioning: ClassVar[bool] = False
-    epochs: ClassVar[int] = 30
+    epochs: ClassVar[int] = 0
     scheduler_horizon_epochs: ClassVar[int] = 80
     batch_size: ClassVar[int] = 8
     learning_rate: ClassVar[float] = 1e-4
@@ -115,7 +113,6 @@ class FinalFitConfig:
     def __post_init__(self) -> None:
         for field_name in (
             "fold_root",
-            "role_sidecar_path",
             "oof_summary_path",
             "output_dir",
             "device",
@@ -196,12 +193,20 @@ def _frozen_training_config(config: FinalFitConfig) -> dict[str, Any]:
     }
 
 
+def _require_final_fit_epoch_selection(config: FinalFitConfig) -> None:
+    if len(EXPECTED_FOLD_BEST_EPOCHS) != 5 or config.epochs <= 0:
+        raise RuntimeError(
+            "all-alive final-fit epoch selection has not been frozen from new OOF"
+        )
+
+
 def _validate_oof_summary(
     oof_summary: Mapping[str, Any],
     *,
     fold_manifest: Mapping[str, Any],
     config: FinalFitConfig,
 ) -> list[dict[str, Any]]:
+    _require_final_fit_epoch_selection(config)
     if oof_summary.get("schema_version") != OOF_SUMMARY_SCHEMA_VERSION:
         raise ValueError("OOF summary schema mismatch")
     if oof_summary.get("status") != "ok":
@@ -250,6 +255,17 @@ def _validate_oof_summary(
             )
     if requested.get("private_conditioning", False) is not False:
         raise ValueError("OOF summary must be public-only")
+    forbidden_formal_fields = {
+        "role_sidecar_path",
+        "speech_v2_annotation_path",
+        "belief_v2_annotation_path",
+    }
+    present_forbidden = sorted(forbidden_formal_fields & set(requested))
+    if present_forbidden:
+        raise ValueError(
+            "formal OOF training config contains diagnostic fields: "
+            f"{present_forbidden}"
+        )
     raw_folds = oof_summary.get("folds")
     manifest_folds = fold_manifest.get("folds")
     if not isinstance(raw_folds, Mapping) or not isinstance(manifest_folds, Mapping):
@@ -338,27 +354,14 @@ def _load_development_records(
 def _build_final_dataset(
     records: list[dict[str, Any]],
     *,
-    role_report: Mapping[str, Any],
     config: FinalFitConfig,
 ) -> DenseTWDToMDataset:
-    development_ids = {record["game_id"] for record in records}
-    role_games = role_report.get("games")
-    if not isinstance(role_games, Mapping):
-        raise ValueError("role sidecar has no games mapping")
-    missing = sorted(development_ids - set(role_games))
-    if missing:
-        raise ValueError(f"role sidecar is missing development games: {missing[:3]}")
-    development_roles = {
-        game_id: role_games[game_id]["observer_roles"]
-        for game_id in sorted(development_ids)
-    }
     return DenseTWDToMDataset(
         records,
         feature_builder=PublicEventFeatureBuilder(max_seq_len=config.max_seq_len),
         enable_cyclic_rotation=True,
         augmentation_seed=config.seed,
         include_private_features=False,
-        observer_roles_by_game=development_roles,
         supervision_scope=config.supervision_scope,
         speech_annotation_source=config.speech_annotation_source,
         belief_annotation_source=config.belief_annotation_source,
@@ -376,7 +379,6 @@ def _dataset_contract(dataset: DenseTWDToMDataset) -> dict[str, Any]:
         "supervision_scope": dataset.supervision_scope,
         "speech_annotation_source": dataset.speech_annotation_source,
         "belief_annotation_source": dataset.belief_annotation_source,
-        "role_metadata_usage": "development_supervision_metadata_only",
     }
 
 
@@ -419,7 +421,6 @@ def _final_checkpoint_payload(
         "label_observation_semantics": dataset_contract[
             "label_observation_semantics"
         ],
-        "role_metadata_usage": dataset_contract["role_metadata_usage"],
         "public_event_schema_version": PUBLIC_EVENT_SCHEMA_VERSION,
         "speech_action_count": len(ACTION_NAMES),
         "speech_action_to_id": dict(ACTION_TO_ID),
@@ -448,13 +449,13 @@ def run_final_fit(
 ) -> dict[str, Any]:
     """Fit exactly once on all development games without validation or test access."""
 
+    _require_final_fit_epoch_selection(config)
     set_random_seed(config.seed)
     device = resolve_device(config.device)
     root = Path(repo_root)
     git_commit = _clean_git_commit(root)
     fold_root = Path(os.path.abspath(config.fold_root))
     oof_path = Path(os.path.abspath(config.oof_summary_path))
-    role_path = Path(os.path.abspath(config.role_sidecar_path))
     output_dir = Path(os.path.abspath(config.output_dir))
 
     records, fold_manifest, shards = _load_development_records(fold_root)
@@ -463,17 +464,7 @@ def run_final_fit(
         fold_manifest=fold_manifest,
         config=config,
     )
-    role_report = load_role_sidecar_report(role_path)
-    if role_report["split_manifest_digest"] != fold_manifest[
-        "source_split_manifest_digest"
-    ]:
-        raise ValueError("role sidecar and source split manifest digests differ")
-    if role_report["canonical_batch_summary_digest"] != fold_manifest[
-        "canonical_batch_summary_digest"
-    ]:
-        raise ValueError("role sidecar and canonical batch digests differ")
-
-    dataset = _build_final_dataset(records, role_report=role_report, config=config)
+    dataset = _build_final_dataset(records, config=config)
     if len(dataset) != EXPECTED_DEVELOPMENT_GAME_COUNT:
         raise ValueError("final-fit dataset must contain exactly 54 games")
     generator = torch.Generator().manual_seed(config.seed)
@@ -545,13 +536,6 @@ def run_final_fit(
             "canonical_batch_summary_digest": fold_manifest[
                 "canonical_batch_summary_digest"
             ],
-            "role_sidecar_path": _repository_relative_path(role_path, repo_root=root),
-            "role_sidecar_sha256": sha256_file(role_path),
-            "role_sidecar_digest": role_report["sidecar_digest"],
-            "role_sidecar_development_subset_digest": canonical_digest({
-                game_id: role_report["games"][game_id]
-                for game_id in development_ids
-            }),
             "sealed_test_game_count": len(fold_manifest["sealed_test_game_ids"]),
             "sealed_test_dataset_opened": False,
             "sealed_test_labels_used": False,
@@ -598,9 +582,6 @@ def run_final_fit(
         "development_fold_manifest_digest": fold_manifest["manifest_digest"],
         "source_split_manifest_digest": fold_manifest[
             "source_split_manifest_digest"
-        ],
-        "role_sidecar_development_subset_digest": protocol["data_lineage"][
-            "role_sidecar_development_subset_digest"
         ],
         "sealed_test_dataset_opened": False,
         "sealed_test_labels_used": False,
@@ -691,7 +672,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Run the frozen leakage-safe 54-game ToM final fit."
     )
     parser.add_argument("--fold-root", required=True)
-    parser.add_argument("--role-sidecar", required=True)
     parser.add_argument("--oof-summary", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="auto")
@@ -702,7 +682,6 @@ def main() -> int:
     args = build_arg_parser().parse_args()
     summary = run_final_fit(FinalFitConfig(
         fold_root=args.fold_root,
-        role_sidecar_path=args.role_sidecar,
         oof_summary_path=args.oof_summary,
         output_dir=args.output_dir,
         device=args.device,

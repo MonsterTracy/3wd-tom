@@ -10,10 +10,11 @@ from script.twd_tom.run_development_oof import (
     run_development_oof,
 )
 from werewolf.models.twd_tom.belief_backbone import (
-    GPT2_BLOCK_BACKBONE_NAME,
-    NO_DAY_INPUT_FEATURE_PROFILE,
+    NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+    QWEN2_BACKBONE_NAME,
 )
-from werewolf.models.twd_tom.supervision import VILLAGER_ALIVE_SCOPE
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.models.twd_tom.supervision import ALL_ALIVE_SCOPE
 
 
 def _game_metrics(*, count, model_kl, target_entropy=0.5, uniform_ce=1.8):
@@ -144,41 +145,22 @@ def test_oof_weighting_recomputes_private_admissible_reducible_gap():
     ] == pytest.approx(0.5)
 
 
-def test_oof_cli_accepts_backbone_and_input_feature_profile():
+def test_formal_oof_cli_exposes_no_role_or_experiment_switches():
     args = build_arg_parser().parse_args([
         "--fold-root",
         "folds",
         "--output-dir",
         "output",
-        "--role-sidecar",
-        "roles.json",
-        "--backbone",
-        GPT2_BLOCK_BACKBONE_NAME,
-        "--input-feature-profile",
-        NO_DAY_INPUT_FEATURE_PROFILE,
     ])
 
-    assert args.backbone == GPT2_BLOCK_BACKBONE_NAME
-    assert args.input_feature_profile == NO_DAY_INPUT_FEATURE_PROFILE
+    assert "role_sidecar" not in vars(args)
+    assert "supervision_scope" not in vars(args)
+    assert "private_conditioning" not in vars(args)
+    assert "speech_annotation_source" not in vars(args)
+    assert "belief_annotation_source" not in vars(args)
 
 
-def test_oof_cli_accepts_supervision_sidecar_and_scope():
-    args = build_arg_parser().parse_args([
-        "--fold-root",
-        "folds",
-        "--output-dir",
-        "output",
-        "--role-sidecar",
-        "roles.json",
-        "--supervision-scope",
-        VILLAGER_ALIVE_SCOPE,
-    ])
-
-    assert args.role_sidecar == "roles.json"
-    assert args.supervision_scope == VILLAGER_ALIVE_SCOPE
-
-
-def test_oof_threads_backbone_and_input_profile_into_every_fold(
+def test_formal_oof_fixes_public_all_alive_contract_without_role_sidecar(
     tmp_path,
     monkeypatch,
 ):
@@ -210,6 +192,7 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
         captured["config"] = config
         return {
             "status": "ok",
+            "source_schema_version": SAMPLE_SCHEMA_VERSION,
             "run_provenance": {"development_fold_name": "fold_0"},
             "training_config": asdict(config),
             "best_epoch": 1,
@@ -245,24 +228,36 @@ def test_oof_threads_backbone_and_input_profile_into_every_fold(
     result = run_development_oof(
         fold_root=fold_root,
         output_dir=tmp_path / "output",
-        private_conditioning=True,
-        backbone=GPT2_BLOCK_BACKBONE_NAME,
-        input_feature_profile=NO_DAY_INPUT_FEATURE_PROFILE,
-        role_sidecar_path=tmp_path / "roles.json",
         bootstrap_samples=10,
     )
 
-    assert captured["config"].backbone == GPT2_BLOCK_BACKBONE_NAME
+    assert captured["config"].backbone == QWEN2_BACKBONE_NAME
+    assert captured["config"].private_conditioning is False
+    assert captured["config"].role_sidecar_path is None
+    assert captured["config"].supervision_scope == ALL_ALIVE_SCOPE
     assert (
         captured["config"].input_feature_profile
-        == NO_DAY_INPUT_FEATURE_PROFILE
+        == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     )
-    assert result["training_config"]["backbone"] == GPT2_BLOCK_BACKBONE_NAME
+    assert result["training_config"]["backbone"] == QWEN2_BACKBONE_NAME
     assert (
         result["training_config"]["input_feature_profile"]
-        == NO_DAY_INPUT_FEATURE_PROFILE
+        == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     )
+    assert result["training_config"]["supervision_scope"] == ALL_ALIVE_SCOPE
+    assert "role_sidecar_path" not in result["training_config"]
     assert result["descriptive_reference_target"]["is_acceptance_gate"] is False
     assert result["oof_scored_game_count"] == 1
     assert result["oof_unscored_game_count"] == 0
     assert result["oof_unscored_game_ids"] == []
+
+    with pytest.raises(ValueError, match="wrong source schema"):
+        oof_module._validate_completed_fold_summary(
+            {
+                "status": "ok",
+                "run_provenance": {"development_fold_name": "fold_0"},
+                "training_config": {},
+            },
+            fold_name="fold_0",
+            requested={},
+        )

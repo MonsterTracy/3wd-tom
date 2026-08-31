@@ -1003,26 +1003,25 @@ remain belief, concise and roles."""
 def build_day_cognition_prompt(
     observation,
     *,
-    exact_roles,
-    role_options,
     candidate_snapshot,
     claim_catalog,
-    pre_speech_belief=None,
+    pre_speech_belief,
 ):
-    """Ask for one private Day cognition and frozen public discussion intent."""
+    """Select public discussion intent from one frozen PRE belief."""
+
+    from werewolf.models.twd_tom.samples import SpeakerPreSpeechBelief
 
     if not isinstance(candidate_snapshot, tuple) or not candidate_snapshot:
         raise ValueError("candidate_snapshot must be a non-empty tuple")
     if any(not isinstance(act, DiscussionAct) for act in candidate_snapshot):
         raise TypeError("candidate_snapshot must contain DiscussionAct values")
+    if not isinstance(pre_speech_belief, SpeakerPreSpeechBelief):
+        raise TypeError(
+            "day cognition requires immutable SpeakerPreSpeechBelief"
+        )
     context = _build_gameplay_context(
         observation,
         claim_catalog=claim_catalog,
-    )
-    belief_instructions = _build_belief_output_instructions(
-        observation,
-        exact_roles,
-        role_options,
     )
     content_indices = project_discussion_content_indices(candidate_snapshot)
     content_candidate_text = "\n".join(
@@ -1037,12 +1036,8 @@ def build_day_cognition_prompt(
         )
     )
     claim_ids = [claim.claim_id for claim in claim_catalog]
-    pre_speech_belief_block = ""
-    if pre_speech_belief is not None:
-        prompt_payload = pre_speech_belief.prompt_payload()
-        pre_speech_belief_block = f"""
-
-PRE-SPEECH PRIVATE BELIEF (IMMUTABLE INPUT)
+    prompt_payload = pre_speech_belief.prompt_payload()
+    pre_speech_belief_block = f"""PRE-SPEECH PRIVATE BELIEF (IMMUTABLE INPUT)
 {json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":"))}
 This is the exact readonly self-report captured at the current PRE boundary.
 Use it as the fixed private wolf-suspicion support for this cognition; do not
@@ -1052,8 +1047,6 @@ claim or vote stance."""
     return f"""{context}
 
 {pre_speech_belief_block}
-
-{belief_instructions}
 
 DISCUSSION ACTION SEMANTICS
 {_render_discussion_action_glossary()}
@@ -1092,9 +1085,8 @@ audit only. They do not authorize or require quoting, paraphrasing or mentioning
 those claims in public speech. Selection does not assert truth or falsity and does
 not prove causal influence on the belief or action. Do not provide a reason,
 confidence, strategy name, expected reaction, or any free-text public plan.
-Return only the JSON object required by the response schema. The six fields are
-belief, concise, roles, public_content_selection, public_vote_stance_index and
-evidence_selection."""
+Return only the JSON object required by the response schema. The three fields are
+public_content_selection, public_vote_stance_index and evidence_selection."""
 
 
 def build_public_speech_realization_prompt(

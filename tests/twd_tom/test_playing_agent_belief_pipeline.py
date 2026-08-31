@@ -219,7 +219,7 @@ def test_synthetic_collector_writes_only_player_level_suspicion(tmp_path):
         )
     )
     assert sample["schema_version"] == (
-        "classic7_pre_speech_player_suspicion_v5"
+        "classic7_pre_speech_player_suspicion_v6"
     )
     assert {
         len(suspicion)
@@ -366,7 +366,7 @@ def test_two_pre_speech_snapshots_flow_through_real_raw_collector(
     assert {
         sample["schema_version"]
         for sample in raw_samples
-    } == {"classic7_pre_speech_player_suspicion_v5"}
+    } == {"classic7_pre_speech_player_suspicion_v6"}
     assert public_speech_actions(
         raw_samples[0]["public_events"], raw_samples[0]["speech_annotations"]
     ) == []

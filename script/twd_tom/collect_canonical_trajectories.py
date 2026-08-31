@@ -89,7 +89,7 @@ PROJECTED_SCHEMA_VERSION = "classic7_observer_conditioned_belief_matrix_v1"
 # This version belongs to the immutable canonical collection artifact.  The
 # training Dataset may derive newer supervision masks without rewriting it.
 TARGET_CONVERSION = (
-    "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
+    "nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3"
 )
 
 BACKEND_SDK_MAX_RETRIES = 0

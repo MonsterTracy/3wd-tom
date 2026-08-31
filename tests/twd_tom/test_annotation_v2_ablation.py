@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 import script.twd_tom.run_annotation_v2_ablation as ablation_module
 from script.twd_tom.audit_belief_label_repeatability import (
     REPEATABILITY_SCHEMA_VERSION,
@@ -21,20 +19,6 @@ def _audit(path):
         "state_count": 30,
         "replicate_count": 3,
     }), encoding="utf-8")
-
-
-def test_only_frozen_benchmark_requires_repeatability_before_training(tmp_path):
-    output = tmp_path / "output"
-    with pytest.raises(ValueError, match="requires a passing repeatability"):
-        ablation_module.run_annotation_v2_ablation(
-            fold_root=tmp_path / "folds",
-            output_dir=output,
-            role_sidecar_path=tmp_path / "roles.json",
-            speech_v2_annotation_path=tmp_path / "speech.jsonl",
-            belief_v2_annotation_path=tmp_path / "belief.jsonl",
-            freeze_v2_benchmark=True,
-        )
-    assert not output.exists()
 
 
 def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
@@ -62,7 +46,7 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
             "oof_game_bootstrap_ci": {"point_estimate": improvement / 2},
         }
 
-    monkeypatch.setattr(ablation_module, "run_development_oof", fake_oof)
+    monkeypatch.setattr(ablation_module, "run_diagnostic_oof", fake_oof)
     result = ablation_module.run_annotation_v2_ablation(
         fold_root=tmp_path / "folds",
         output_dir=tmp_path / "output",
@@ -86,7 +70,7 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
         for call in calls
     )
     assert result["input_feature_profile"] == NO_PHASE_DAY_INPUT_FEATURE_PROFILE
-    assert result["benchmark_status"] == "exploratory"
+    assert result["benchmark_status"] == "exploratory_diagnostic"
     assert result["repeatability_audit"]["status"] == "not_provided"
     assert result["experiments"][
         "speech_v1_belief_v1_empty_unobserved"
@@ -94,7 +78,7 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
     assert (tmp_path / "output" / "annotation_v2_ablation_table.md").is_file()
 
 
-def test_passing_repeatability_allows_explicit_formal_freeze(
+def test_passing_repeatability_is_recorded_as_diagnostic_only(
     tmp_path,
     monkeypatch,
 ):
@@ -116,7 +100,7 @@ def test_passing_repeatability_allows_explicit_formal_freeze(
             "oof_game_bootstrap_ci": {"point_estimate": 0.05},
         }
 
-    monkeypatch.setattr(ablation_module, "run_development_oof", fake_oof)
+    monkeypatch.setattr(ablation_module, "run_diagnostic_oof", fake_oof)
     result = ablation_module.run_annotation_v2_ablation(
         fold_root=tmp_path / "folds",
         output_dir=tmp_path / "output",
@@ -124,8 +108,8 @@ def test_passing_repeatability_allows_explicit_formal_freeze(
         speech_v2_annotation_path=tmp_path / "speech.jsonl",
         belief_v2_annotation_path=tmp_path / "belief.jsonl",
         repeatability_audit_path=repeatability,
-        freeze_v2_benchmark=True,
     )
 
-    assert result["benchmark_status"] == "frozen_formal"
+    assert result["benchmark_status"] == "exploratory_diagnostic"
     assert result["repeatability_audit"]["status"] == "verified"
+    assert result["repeatability_audit"]["purpose"] == "diagnostic_ceiling_only"

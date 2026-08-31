@@ -10,7 +10,7 @@
 f(completed_public_history < t, observer_id=i) -> B_t(i, j)
 ```
 
-`B_t(i, :)` 是由怀疑支持集归一化得到、行和为 1 的 `relative_suspicion_matrix_v1`，不是七个彼此独立且经过校准的“是狼人概率”。这一区分尤其重要：经典局有两名狼人，当前 label 只表达 agent 报告的相对怀疑支持，不提供完整角色联合分布。
+`B_t(i, :)` 的 label-observed target row 由非空怀疑支持集归一化得到，行和为 1；empty suspicion row 为 unobserved zero target，不进入 supervision。`relative_suspicion_matrix_v1` 不是七个彼此独立且经过校准的“是狼人概率”。这一区分尤其重要：经典局有两名狼人，当前 label 只表达 agent 报告的相对怀疑支持，不提供完整角色联合分布。
 
 ## 当前唯一标签来源
 
@@ -80,7 +80,7 @@ raw snapshot 为了证明采样边界，会保留当前 speaker 的末尾 `turn_
 - `script/twd_tom/train.py` 与 `eval.py`：单一 tom-v2 objective 的训练、checkpoint 与评估入口。
 - `tests/twd_tom/`：采集、时间边界和只读性回归测试。
 
-当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1`、`classic7_public_speech_realization_prompt_v1`、`classic7_pre_speech_player_suspicion_v5` 和 `classic7_pre_speech_player_suspicion_prompt_v6`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
+当前冻结版本为 `classic7_public_event_sequence_v4`、`classic7_speech_annotation_v3`、`classic7_speech_action_v1`、`classic7_public_speech_realization_prompt_v1`、`classic7_pre_speech_player_suspicion_v6` 和 `classic7_pre_speech_player_suspicion_prompt_v6`。完整字段、ontology 与失败策略见 `docs/public_speech_event_contract.md`。
 
 训练 Dataset 默认启用通用座位循环旋转；验证与 evaluation 保持原始座位。旋转同时覆盖 observer、target、公开事件玩家引用、belief matrix 和 masks。dense 模式的 `batch_size` 表示局数而不是 snapshot 数；同一局所有合法 PRE 边界共同产生监督。
 

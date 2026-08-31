@@ -20,6 +20,7 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
 )
 from script.twd_tom.run_final_fit import (
     FINAL_CHECKPOINT_TYPE,
+    FINAL_PROTOCOL_SCHEMA_VERSION,
     _clean_git_commit,
 )
 from script.twd_tom.train import (
@@ -47,32 +48,26 @@ from werewolf.models.twd_tom.dense_dataset import (
     DenseTWDToMDataset,
     collate_dense_twd_tom_games,
 )
-from werewolf.models.twd_tom.supervision import (
-    NON_WOLF_ALIVE_SCOPE,
-    load_role_sidecar_report,
-)
+from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
+from werewolf.models.twd_tom.supervision import ALL_ALIVE_SCOPE
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
-SEALED_PROTOCOL_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_protocol_v1"
-SEALED_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_summary_v1"
-SEALED_PER_GAME_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_per_game_v1"
-SEALED_PROVENANCE_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_provenance_v1"
-SEALED_MARKER_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_marker_v1"
+SEALED_PROTOCOL_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_protocol_v2"
+SEALED_SUMMARY_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_summary_v2"
+SEALED_PER_GAME_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_per_game_v2"
+SEALED_PROVENANCE_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_provenance_v2"
+SEALED_MARKER_SCHEMA_VERSION = "classic7_tom_v2_sealed_test_marker_v2"
 
 SEALED_PROTOCOL_FILENAME = "sealed_test_protocol.json"
 SEALED_SUMMARY_FILENAME = "sealed_test_summary.json"
 SEALED_PER_GAME_FILENAME = "sealed_test_per_game.json"
 SEALED_PROVENANCE_FILENAME = "sealed_test_provenance.json"
 
-FROZEN_CHECKPOINT_SHA256 = (
-    "24d61d867df3f8e554fff5921f78a77e9a7d882376089a007b9e37baa7cc4510"
-)
-FROZEN_FINAL_PROTOCOL_DIGEST = (
-    "d8a2e64821a813dc5ec944fd52dbb1d986c976c4ca8cb2709cf2b4c5cecf6549"
-)
-FROZEN_CHECKPOINT_GIT_COMMIT = "b368004281b617181bc114ad0e4ee5bb07291393"
-FROZEN_EPOCH = 30
+FROZEN_CHECKPOINT_SHA256 = ""
+FROZEN_FINAL_PROTOCOL_DIGEST = ""
+FROZEN_CHECKPOINT_GIT_COMMIT = ""
+FROZEN_EPOCH = 0
 FROZEN_SEALED_GAME_COUNT = 6
 FROZEN_DEVELOPMENT_GAME_COUNT = 54
 FROZEN_BOOTSTRAP_SAMPLES = 2000
@@ -95,7 +90,7 @@ class SealedEvalConfig:
     input_feature_profile: ClassVar[str] = NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     speech_annotation_source: ClassVar[str] = V1_ANNOTATION_SOURCE
     belief_annotation_source: ClassVar[str] = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
-    supervision_scope: ClassVar[str] = NON_WOLF_ALIVE_SCOPE
+    supervision_scope: ClassVar[str] = ALL_ALIVE_SCOPE
     epoch: ClassVar[int] = FROZEN_EPOCH
     seed: ClassVar[int] = FROZEN_BOOTSTRAP_SEED
     batch_size: ClassVar[int] = FROZEN_BATCH_SIZE
@@ -121,7 +116,6 @@ class SealedPreflight:
     output_dir: Path
     marker_path: Path
     sealed_dataset_path: Path
-    role_sidecar_path: Path
     evaluator_git_commit: str
     sealed_game_ids: tuple[str, ...]
     development_game_ids: tuple[str, ...]
@@ -148,6 +142,18 @@ def _new_run_id() -> str:
     return f"sealed_{uuid.uuid4().hex}"
 
 
+def _require_frozen_bindings() -> None:
+    if (
+        len(FROZEN_CHECKPOINT_SHA256) != 64
+        or len(FROZEN_FINAL_PROTOCOL_DIGEST) != 64
+        or len(FROZEN_CHECKPOINT_GIT_COMMIT) != 40
+        or FROZEN_EPOCH <= 0
+    ):
+        raise RuntimeError(
+            "all-alive sealed bindings have not been frozen from a new final fit"
+        )
+
+
 def _marker_path(checkpoint_path: Path) -> Path:
     return checkpoint_path.with_name(checkpoint_path.name + ".sealed_test_evaluated.json")
 
@@ -161,6 +167,8 @@ def _validate_final_protocol(
         raise ValueError("final protocol canonical digest mismatch")
     if recorded_digest != FROZEN_FINAL_PROTOCOL_DIGEST:
         raise ValueError("final protocol differs from the frozen final-fit protocol")
+    if protocol.get("schema_version") != FINAL_PROTOCOL_SCHEMA_VERSION:
+        raise ValueError("final protocol schema mismatch")
     if protocol.get("git_commit_sha") != FROZEN_CHECKPOINT_GIT_COMMIT:
         raise ValueError("final protocol Git commit mismatch")
     data_lineage = protocol.get("data_lineage")
@@ -187,10 +195,11 @@ def _validate_final_protocol(
 def _validate_checkpoint(checkpoint: Mapping[str, Any]) -> torch.nn.Module:
     expected_top_level = {
         "checkpoint_type": FINAL_CHECKPOINT_TYPE,
+        "schema_version": SAMPLE_SCHEMA_VERSION,
         "backbone": QWEN2_BACKBONE_NAME,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
         "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
-        "supervision_scope": NON_WOLF_ALIVE_SCOPE,
+        "supervision_scope": ALL_ALIVE_SCOPE,
         "epoch": FROZEN_EPOCH,
         "validation_dataset_used": False,
         "early_stopping_enabled": False,
@@ -217,7 +226,7 @@ def _validate_checkpoint(checkpoint: Mapping[str, Any]) -> torch.nn.Module:
         "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
         "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
-        "supervision_scope": NON_WOLF_ALIVE_SCOPE,
+        "supervision_scope": ALL_ALIVE_SCOPE,
         "fit_epochs": FROZEN_EPOCH,
         "seed": FROZEN_BOOTSTRAP_SEED,
         "validation_dataset_used": False,
@@ -283,6 +292,7 @@ def preflight_sealed_evaluation(
 ) -> SealedPreflight:
     """Validate every frozen binding without opening the sealed Dataset file."""
 
+    _require_frozen_bindings()
     checkpoint_path = Path(os.path.abspath(config.checkpoint_path))
     final_protocol_path = Path(os.path.abspath(config.final_protocol_path))
     manifest_path = Path(os.path.abspath(config.manifest_path))
@@ -345,7 +355,6 @@ def preflight_sealed_evaluation(
     sealed_dataset_path = _resolve_manifest_relative_file(
         manifest_path, test_descriptor
     )
-    role_sidecar_path = manifest_path.parent / "role_sidecar.json"
     return SealedPreflight(
         checkpoint_path=checkpoint_path,
         final_protocol_path=final_protocol_path,
@@ -353,7 +362,6 @@ def preflight_sealed_evaluation(
         output_dir=output_dir,
         marker_path=marker_path,
         sealed_dataset_path=sealed_dataset_path,
-        role_sidecar_path=role_sidecar_path,
         evaluator_git_commit=evaluator_git_commit,
         sealed_game_ids=sealed_ids,
         development_game_ids=development_ids,
@@ -438,7 +446,7 @@ def summarize_metric_records(
 def _metric_definitions() -> dict[str, Any]:
     return {
         "primary": {
-            "name": "non_wolf_alive_common_sealed_game_macro_gap_closed",
+            "name": "all_alive_common_sealed_game_macro_gap_closed",
             "unit": "game",
             "formula": "mean_game(1 - game_model_kl_sum / game_uniform_kl_sum)",
             "zero_uniform_denominator": "gap_closed=0.0 (corrected OOF convention)",
@@ -452,7 +460,7 @@ def _metric_definitions() -> dict[str, Any]:
             "total_variation_mean": "observer-weighted mean TV",
         },
         "mask": (
-            "observer_alive & non_wolf_role & v1_empty_unobserved_label_observed"
+            "observer_alive & v1_empty_unobserved_label_observed"
         ),
         "unobserved_target": "all-zero target with distribution_loss_mask=false",
         "bootstrap": {
@@ -496,7 +504,7 @@ def _protocol_payload(
             "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
             "speech_annotation_source": V1_ANNOTATION_SOURCE,
             "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
-            "supervision_scope": NON_WOLF_ALIVE_SCOPE,
+            "supervision_scope": ALL_ALIVE_SCOPE,
             "batch_size": FROZEN_BATCH_SIZE,
         },
         "sealed_data": {
@@ -562,22 +570,6 @@ def run_sealed_evaluation(
     )
     if validated_manifest["manifest_digest"] != plan.manifest["manifest_digest"]:
         raise ValueError("split manifest changed after preflight")
-    role_report = load_role_sidecar_report(plan.role_sidecar_path)
-    data_lineage = plan.final_protocol["data_lineage"]
-    if sha256_file(plan.role_sidecar_path) != data_lineage.get("role_sidecar_sha256"):
-        raise ValueError("role sidecar SHA-256 mismatch")
-    if role_report.get("sidecar_digest") != data_lineage.get("role_sidecar_digest"):
-        raise ValueError("role sidecar digest mismatch")
-    if role_report.get("split_manifest_digest") != plan.manifest["manifest_digest"]:
-        raise ValueError("role sidecar split manifest digest mismatch")
-    missing_roles = sorted(set(plan.sealed_game_ids) - set(role_report["games"]))
-    if missing_roles:
-        raise ValueError(f"role sidecar is missing sealed games: {missing_roles}")
-
-    roles = {
-        game_id: role_report["games"][game_id]["observer_roles"]
-        for game_id in plan.sealed_game_ids
-    }
     dataset = DenseTWDToMDataset.from_jsonl(
         plan.sealed_dataset_path,
         feature_builder=PublicEventFeatureBuilder(
@@ -585,8 +577,7 @@ def run_sealed_evaluation(
         ),
         enable_cyclic_rotation=False,
         include_private_features=False,
-        observer_roles_by_game=roles,
-        supervision_scope=NON_WOLF_ALIVE_SCOPE,
+        supervision_scope=ALL_ALIVE_SCOPE,
         speech_annotation_source=V1_ANNOTATION_SOURCE,
         belief_annotation_source=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
     )
@@ -597,7 +588,7 @@ def run_sealed_evaluation(
         "label_observation_semantics": plan.checkpoint.get(
             "label_observation_semantics"
         ),
-        "supervision_scope": NON_WOLF_ALIVE_SCOPE,
+        "supervision_scope": ALL_ALIVE_SCOPE,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
         "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
     }
@@ -618,7 +609,7 @@ def run_sealed_evaluation(
     )
     model = plan.model.to(resolved_device).eval()
     with torch.inference_mode():
-        _, by_game, _, stratified_by_game = evaluate_model_with_games_and_strata(
+        _, by_game, _, _ = evaluate_model_with_games_and_strata(
             model,
             loader,
             device=resolved_device,
@@ -637,28 +628,13 @@ def run_sealed_evaluation(
         for game_id in sorted(plan.sealed_game_ids)
     ]
     primary = summarize_metric_records(per_game_rows)
-    villager_rows = []
-    for game_id in sorted(plan.sealed_game_ids):
-        role_metrics = stratified_by_game.get(game_id, {}).get("observer_role", {})
-        metrics = role_metrics.get("Villager")
-        villager_rows.append(
-            _metric_record(game_id, metrics)
-            if isinstance(metrics, Mapping)
-            else {
-                "game_id": game_id,
-                "status": "unscored_no_observed_labels",
-                "observed_rows": 0,
-            }
-        )
-    villager = summarize_metric_records(villager_rows)
     completed_at = _utc_timestamp()
     per_game_artifact = {
         "schema_version": SEALED_PER_GAME_SCHEMA_VERSION,
         "status": "ok",
         "run_id": run_id,
         "sealed_protocol_digest": protocol["protocol_digest"],
-        "non_wolf_alive": per_game_rows,
-        "villager_diagnostic": villager_rows,
+        "all_alive": per_game_rows,
         "metric_definitions": _metric_definitions(),
     }
     summary = {
@@ -670,9 +646,8 @@ def run_sealed_evaluation(
         "checkpoint_sha256": FROZEN_CHECKPOINT_SHA256,
         "final_protocol_digest": FROZEN_FINAL_PROTOCOL_DIGEST,
         "sealed_game_count": len(plan.sealed_game_ids),
-        "primary_task": "non_wolf_alive",
+        "primary_task": "all_alive",
         "primary": primary,
-        "villager_diagnostic": villager,
         "metric_definitions": _metric_definitions(),
         "selection_or_tuning_performed": False,
         "checkpoint_updated": False,
@@ -706,7 +681,6 @@ def run_sealed_evaluation(
         "split_manifest_sha256": sha256_file(plan.manifest_path),
         "split_manifest_digest": plan.manifest["manifest_digest"],
         "sealed_dataset_sha256": sha256_file(plan.sealed_dataset_path),
-        "role_sidecar_sha256": sha256_file(plan.role_sidecar_path),
         "artifacts": {
             SEALED_PROTOCOL_FILENAME: sha256_file(protocol_path),
             SEALED_SUMMARY_FILENAME: sha256_file(summary_path),

@@ -40,7 +40,7 @@ flowchart LR
 - online shadow inference；
 - tom-v1 formal reporter 与 pilot pipeline。
 
-Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合保留为 raw self-report，但派生监督标为 unobserved、target row 全零，不进入 CE/KL。`observer_supervision_mask` 是 task scope 与 label-observed mask 的交集；`diagonal_target_mask` 只排除自身列，死亡玩家仍保留为 target。公开模型不返回 hard knowledge；并行的一阶私有模型额外返回每个 observer 自己的 `K+ / K-` mask，不使用 role truth 或其他人的私有 observation。
+Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合保留为 raw self-report，但派生监督标为 unobserved、target row 全零，不进入 CE/KL。正式 `observer_supervision_mask` 固定为 `observer_alive_mask & label_observed_mask`；它不读取 role truth，存活且标签可观测的狼人 observer 也在正式 population 中。`diagonal_target_mask` 只排除自身列，死亡玩家仍保留为 target。公开模型不返回 hard knowledge；一阶私有模型与 role-scoped mask 只保留为独立 diagnostics，不进入正式 OOF/final/sealed。
 
 ## 模型目标
 
@@ -53,6 +53,6 @@ Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = kno
 
 正式 dense 训练把同一局所有 snapshot 按 `step_idx` 排序，验证每个 encoded history 都是最终 PRE 序列的精确前缀，然后用 boundary-specific causal mask 输出 `belief_logits[B, Q, 7, 7]`。`Q` 是该局 strict-PRE 边界数，padding boundary 不参与损失；单边界 gameplay inference 仍保持 `belief_logits[B, 7, 7]`。若 256-token 窗口截断破坏精确前缀关系，数据审计和 Dataset 都直接失败，不改写历史或丢弃边界。
 
-模型选择只在原 train+validation 组成的开发集上执行 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。在 fixed-state repeatability ceiling 建立前，`0.50` 只作描述性参考值，不是自动通过/失败门槛。2×2 OOF 可先作为 exploratory attribution 运行；只有显式冻结 V2 正式 benchmark 时，repeatability 才是硬前置条件。一阶私有实验使用独立输出目录和 checkpoint scope；它与公开模型结果并列报告，不覆盖公开模型。
+模型选择只在原 train+validation 组成的开发集上执行正式 public-only、all-alive 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。在 fixed-state repeatability ceiling 建立前，`0.50` 只作描述性参考值，不是自动通过/失败门槛。Annotation V2、private-conditioned 与 role-scoped OOF 只能通过显式 diagnostic 入口运行，其产物不能作为正式 final-fit epoch selection source。
 
 在 `v1_empty_unobserved` 或 V2 mask 下，某个游戏可能没有任何观测到的监督行。此类游戏保留在 split/OOF 覆盖关系中，但其指标标为未定义并从所有性能分母排除；报告单独公开 scored/unscored game 数与 ID。该规则只是缺失标签语义，不是模型或标签 fallback，且不会放宽全数据无监督时的失败检查。

@@ -10,9 +10,7 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
 from script.twd_tom.materialize_development_folds import (
     materialize_development_folds,
 )
-from script.twd_tom.materialize_role_sidecar import materialize_role_sidecar
 from script.twd_tom.run_final_fit import (
-    EXPECTED_FOLD_BEST_EPOCHS,
     FINAL_CHECKPOINT_FILENAME,
     FINAL_PROTOCOL_FILENAME,
     FinalFitConfig,
@@ -24,6 +22,9 @@ from script.twd_tom.run_development_oof import OOF_SUMMARY_SCHEMA_VERSION
 from script.twd_tom.train import TrainingConfig, build_learning_rate_scheduler
 from werewolf.models.twd_tom.belief_backbone import ToMBeliefBackboneConfig
 from werewolf.trajectory import canonical_digest, canonical_json
+
+
+SYNTHETIC_FOLD_BEST_EPOCHS = (38, 30, 42, 21, 26)
 
 
 def _oof_summary(manifest):
@@ -53,20 +54,15 @@ def _oof_summary(manifest):
             "backbone": "qwen2_model",
             "input_feature_profile": "no_phase_day",
             "dense_supervision": True,
-            "supervision_scope": "non_wolf_alive",
+            "supervision_scope": "all_alive",
             "speech_annotation_source": "v1",
             "belief_annotation_source": "v1_empty_unobserved",
-            # The 2x2 runner records the available sidecar paths in every cell,
-            # including V1/V1. The frozen source selectors above prove they were
-            # not the active inputs for this selected OOF result.
-            "speech_v2_annotation_path": "/unused/speech_v2.jsonl",
-            "belief_v2_annotation_path": "/unused/belief_v2.jsonl",
         },
         "folds": {
             fold_name: {"best_epoch": best_epoch}
             for fold_name, best_epoch in zip(
                 fold_names,
-                EXPECTED_FOLD_BEST_EPOCHS,
+                SYNTHETIC_FOLD_BEST_EPOCHS,
                 strict=True,
             )
         },
@@ -79,8 +75,6 @@ def test_final_fit_cli_exposes_paths_and_runtime_only():
     args = parser.parse_args([
         "--fold-root",
         "folds",
-        "--role-sidecar",
-        "roles.json",
         "--oof-summary",
         "oof.json",
         "--output-dir",
@@ -91,34 +85,48 @@ def test_final_fit_cli_exposes_paths_and_runtime_only():
 
     assert vars(args) == {
         "fold_root": "folds",
-        "role_sidecar": "roles.json",
         "oof_summary": "oof.json",
         "output_dir": "output",
         "device": "cuda",
     }
     config = FinalFitConfig(
         fold_root="folds",
-        role_sidecar_path="roles.json",
         oof_summary_path="oof.json",
         output_dir="output",
     )
-    assert config.epochs == 30
+    assert config.epochs == 0
     assert config.scheduler_horizon_epochs == 80
     assert config.backbone == "qwen2_model"
     assert config.input_feature_profile == "no_phase_day"
-    assert config.supervision_scope == "non_wolf_alive"
+    assert config.supervision_scope == "all_alive"
     assert config.speech_annotation_source == "v1"
     assert config.belief_annotation_source == "v1_empty_unobserved"
 
 
-def test_final_fit_scheduler_prefix_matches_an_80_epoch_schedule(tmp_path):
+def test_final_fit_is_disabled_until_new_all_alive_oof_epochs_are_frozen(
+    tmp_path,
+):
+    config = FinalFitConfig(
+        fold_root="folds",
+        oof_summary_path="oof.json",
+        output_dir="output",
+    )
+
+    with pytest.raises(RuntimeError, match="all-alive final-fit epoch selection"):
+        run_final_fit(config, repo_root=tmp_path)
+
+
+def test_final_fit_scheduler_prefix_matches_an_80_epoch_schedule(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(FinalFitConfig, "epochs", 30)
     model_a = torch.nn.Linear(1, 1)
     model_b = torch.nn.Linear(1, 1)
     optimizer_a = torch.optim.AdamW(model_a.parameters(), lr=1e-4)
     optimizer_b = torch.optim.AdamW(model_b.parameters(), lr=1e-4)
     final_config = FinalFitConfig(
         fold_root="folds",
-        role_sidecar_path="roles.json",
         oof_summary_path="oof.json",
         output_dir="output",
     )
@@ -159,7 +167,13 @@ def test_final_fit_scheduler_prefix_matches_an_80_epoch_schedule(tmp_path):
     assert final_lrs == pytest.approx(oof_lrs, rel=0.0, abs=0.0)
 
 
-def test_oof_validation_rejects_a_changed_fold_epoch():
+def test_oof_validation_rejects_a_changed_fold_epoch(monkeypatch):
+    monkeypatch.setattr(
+        final_fit_module,
+        "EXPECTED_FOLD_BEST_EPOCHS",
+        SYNTHETIC_FOLD_BEST_EPOCHS,
+    )
+    monkeypatch.setattr(FinalFitConfig, "epochs", 30)
     manifest = {
         "source_split_manifest_digest": "1" * 64,
         "manifest_digest": "2" * 64,
@@ -171,13 +185,12 @@ def test_oof_validation_rejects_a_changed_fold_epoch():
     summary = _oof_summary(manifest)
     config = FinalFitConfig(
         fold_root="folds",
-        role_sidecar_path="roles.json",
         oof_summary_path="oof.json",
         output_dir="output",
     )
     records = _validate_oof_summary(summary, fold_manifest=manifest, config=config)
     assert [record["best_epoch"] for record in records] == list(
-        EXPECTED_FOLD_BEST_EPOCHS
+        SYNTHETIC_FOLD_BEST_EPOCHS
     )
 
     changed = json.loads(json.dumps(summary))
@@ -220,12 +233,6 @@ def test_final_fit_uses_all_54_development_games_and_one_checkpoint(
         validation_game_count=6,
         test_game_count=6,
     )
-    role_path = split_root / "role_sidecar.json"
-    materialize_role_sidecar(
-        canonical_root=canonical_root,
-        split_manifest_path=split_root / "split_manifest.json",
-        output_path=role_path,
-    )
     fold_root = tmp_path / "datasets" / "folds"
     fold_manifest = materialize_development_folds(
         train_path=split_root / "train.jsonl",
@@ -249,6 +256,12 @@ def test_final_fit_uses_all_54_development_games_and_one_checkpoint(
         "_clean_git_commit",
         lambda _: "c" * 40,
     )
+    monkeypatch.setattr(
+        final_fit_module,
+        "EXPECTED_FOLD_BEST_EPOCHS",
+        SYNTHETIC_FOLD_BEST_EPOCHS,
+    )
+    monkeypatch.setattr(FinalFitConfig, "epochs", 30)
     monkeypatch.setattr(final_fit_module, "_build_model", lambda _: _TinyFinalModel())
     observed_epochs = []
 
@@ -276,7 +289,6 @@ def test_final_fit_uses_all_54_development_games_and_one_checkpoint(
     summary = run_final_fit(
         FinalFitConfig(
             fold_root=str(fold_root),
-            role_sidecar_path=str(role_path),
             oof_summary_path=str(oof_path),
             output_dir=str(output_dir),
             device="cpu",
@@ -300,7 +312,7 @@ def test_final_fit_uses_all_54_development_games_and_one_checkpoint(
     protocol_digest = protocol.pop("protocol_digest")
     assert protocol_digest == canonical_digest(protocol)
     assert protocol["epoch_selection"]["fold_best_epochs"] == list(
-        EXPECTED_FOLD_BEST_EPOCHS
+        SYNTHETIC_FOLD_BEST_EPOCHS
     )
     assert protocol["data_lineage"]["sealed_test_dataset_opened"] is False
     checkpoint = torch.load(

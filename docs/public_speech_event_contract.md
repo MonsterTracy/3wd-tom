@@ -8,7 +8,7 @@
 - speech annotation：`classic7_speech_annotation_v3`
 - speech action ontology：`classic7_speech_action_v1`
 - speech parser prompt：`classic7_speech_parser_v3`
-- PRE belief sample：`classic7_pre_speech_player_suspicion_v5`
+- PRE belief sample：`classic7_pre_speech_player_suspicion_v6`
 
 版本不做隐式兼容或自动迁移。任一版本变化都必须产生新 canonical run；历史原文可以通过显式离线重标注生成新 annotation artifact，但不能原地覆盖旧 artifact。
 

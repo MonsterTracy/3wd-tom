@@ -125,6 +125,15 @@ def test_canonical_60_server_config_freezes_collection_and_split():
         seeds=seeds,
     )
 
+    assert batch_module.TARGET_CONVERSION == (
+        "nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3"
+    )
+    assert config["pipeline"]["projection_version"] == (
+        batch_module.TARGET_CONVERSION
+    )
+    assert pilot_config["pipeline"]["projection_version"] == (
+        batch_module.TARGET_CONVERSION
+    )
     assert contract["game_count"] == 120
     assert contract["target_game_count"] == 60
     assert contract["seeds"] == seeds

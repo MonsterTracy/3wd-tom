@@ -1,7 +1,7 @@
 # Frozen one-shot sealed evaluation
 
 `script.twd_tom.run_sealed_eval` is the only formal sealed-test entry point for
-the frozen `development_final_fit_v1` checkpoint. It is intentionally separate
+the frozen `development_final_fit_v2` checkpoint. It is intentionally separate
 from the training and general evaluation CLIs.
 
 ## Fixed contract
@@ -31,14 +31,15 @@ Evaluation uses `model.eval()` under `torch.inference_mode()`. It creates no
 optimizer or scheduler, calls no backward pass, performs no selection or
 tuning, and never writes a checkpoint. It uses dense V1 public speech,
 `v1_empty_unobserved` belief labels, the `no_phase_day` input profile, and
-`non_wolf_alive` supervision. Empty/unobserved rows remain zero targets and are
+`all_alive` supervision. The evaluation population is exactly
+`observer_alive_mask & label_observed_mask`; it does not load a role sidecar or
+inspect ground-truth roles. Empty/unobserved rows remain zero targets and are
 excluded from all distribution metrics.
 
 One successful run places exactly these JSON artifacts in its output directory:
 
 - `sealed_test_protocol.json`: immutable pre-label-open protocol and digest.
-- `sealed_test_summary.json`: primary non-wolf result, secondary metrics, and
-  Villager diagnostic.
+- `sealed_test_summary.json`: primary all-alive result and secondary metrics.
 - `sealed_test_per_game.json`: additive per-game KL terms and per-game
   GapClosed values used for metric-only recomputation.
 - `sealed_test_provenance.json`: input/output hashes and pure-forward audit.
@@ -54,4 +55,7 @@ bootstrap with 2,000 draws and seed 42. With six sealed games, the bootstrap is
 reported descriptively and is not presented as a precision claim.
 
 Formal sealed execution is intentionally not documented here as a copy-paste
-command until the implementation commit and review are approved.
+command until the implementation commit and review are approved. The prior
+non-wolf checkpoint hash, final-protocol digest, Git commit, epoch, and sealed
+constants are not valid for this protocol; the evaluator remains fail-closed
+until new all-alive OOF and final-fit artifacts are reviewed and frozen.

@@ -1946,6 +1946,7 @@ def run_training(config: TrainingConfig) -> dict[str, Any]:
         raise RuntimeError("training completed without a best validation epoch")
     summary = {
         "status": "ok",
+        "source_schema_version": dataset_contract["source_schema_version"],
         **checkpoint_task_contract(
             config.private_conditioning,
             target_semantics=dataset_contract["target_semantics"],

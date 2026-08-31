@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from script.twd_tom.run_development_oof import run_development_oof
+from script.twd_tom.run_development_oof import run_diagnostic_oof
 from script.twd_tom.audit_belief_label_repeatability import (
     REPEATABILITY_SCHEMA_VERSION,
 )
@@ -22,7 +22,7 @@ from werewolf.models.twd_tom.annotation_v2 import (
 )
 
 
-ABLATION_SCHEMA_VERSION = "classic7_annotation_v2_oof_ablation_v3"
+ABLATION_SCHEMA_VERSION = "classic7_annotation_v2_oof_ablation_v4"
 _EXPERIMENTS = (
     (
         "speech_v1_belief_v1_empty_unobserved",
@@ -75,7 +75,6 @@ def run_annotation_v2_ablation(
     speech_v2_annotation_path: str | Path,
     belief_v2_annotation_path: str | Path,
     repeatability_audit_path: str | Path | None = None,
-    freeze_v2_benchmark: bool = False,
     epochs: int = 80,
     batch_size: int = 8,
     learning_rate: float = 1e-4,
@@ -91,11 +90,9 @@ def run_annotation_v2_ablation(
     """Run eight resumable OOF jobs while holding optimization fixed."""
 
     output = Path(os.path.abspath(output_dir))
-    if not isinstance(freeze_v2_benchmark, bool):
-        raise TypeError("freeze_v2_benchmark must be bool")
     repeatability_report: dict[str, Any] = {
         "status": "not_provided",
-        "required_for": "frozen_v2_formal_benchmark",
+        "purpose": "diagnostic_ceiling_only",
         "used_as_acceptance_ceiling": False,
     }
     if repeatability_audit_path is not None:
@@ -122,21 +119,16 @@ def run_annotation_v2_ablation(
             ).hexdigest(),
             "state_count": repeatability["state_count"],
             "replicate_count": repeatability["replicate_count"],
-            "required_for": "frozen_v2_formal_benchmark",
+            "purpose": "diagnostic_ceiling_only",
             "used_as_acceptance_ceiling": False,
         }
-    elif freeze_v2_benchmark:
-        raise ValueError(
-            "freezing a formal V2 benchmark requires a passing "
-            "repeatability audit"
-        )
     output.mkdir(parents=True, exist_ok=True)
     reports: dict[str, Any] = {}
     for experiment_name, speech_source, belief_source in _EXPERIMENTS:
         reports[experiment_name] = {}
         for scope in _SCOPES:
             run_output = output / experiment_name / scope
-            report = run_development_oof(
+            report = run_diagnostic_oof(
                 fold_root=fold_root,
                 output_dir=run_output,
                 epochs=epochs,
@@ -181,9 +173,7 @@ def run_annotation_v2_ablation(
     result = {
         "schema_version": ABLATION_SCHEMA_VERSION,
         "status": "ok",
-        "benchmark_status": (
-            "frozen_formal" if freeze_v2_benchmark else "exploratory"
-        ),
+        "benchmark_status": "exploratory_diagnostic",
         "task": "public_only_subjective_suspicion",
         "backbone": QWEN2_BACKBONE_NAME,
         "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
@@ -233,7 +223,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speech-v2-annotations", required=True)
     parser.add_argument("--belief-v2-annotations", required=True)
     parser.add_argument("--repeatability-audit")
-    parser.add_argument("--freeze-v2-benchmark", action="store_true")
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -257,7 +246,6 @@ def main() -> int:
         speech_v2_annotation_path=args.speech_v2_annotations,
         belief_v2_annotation_path=args.belief_v2_annotations,
         repeatability_audit_path=args.repeatability_audit,
-        freeze_v2_benchmark=args.freeze_v2_benchmark,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,

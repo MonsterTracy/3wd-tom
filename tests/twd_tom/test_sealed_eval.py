@@ -28,12 +28,13 @@ from werewolf.trajectory import canonical_digest, canonical_json
 
 def _valid_checkpoint():
     return {
-        "checkpoint_type": "development_final_fit_v1",
+        "checkpoint_type": sealed_module.FINAL_CHECKPOINT_TYPE,
+        "schema_version": sealed_module.SAMPLE_SCHEMA_VERSION,
         "backbone": "qwen2_model",
         "speech_annotation_source": "v1",
         "belief_annotation_source": "v1_empty_unobserved",
-        "supervision_scope": "non_wolf_alive",
-        "epoch": 30,
+        "supervision_scope": "all_alive",
+        "epoch": sealed_module.FROZEN_EPOCH,
         "validation_dataset_used": False,
         "early_stopping_enabled": False,
         "sealed_test_evaluated": False,
@@ -46,8 +47,8 @@ def _valid_checkpoint():
             "input_feature_profile": "no_phase_day",
             "speech_annotation_source": "v1",
             "belief_annotation_source": "v1_empty_unobserved",
-            "supervision_scope": "non_wolf_alive",
-            "fit_epochs": 30,
+            "supervision_scope": "all_alive",
+            "fit_epochs": sealed_module.FROZEN_EPOCH,
             "seed": 42,
             "validation_dataset_used": False,
             "early_stopping_enabled": False,
@@ -79,7 +80,7 @@ def _valid_manifest():
 
 def _protocol_payload(manifest, manifest_sha):
     return {
-        "schema_version": "classic7_tom_v2_final_fit_protocol_v1",
+        "schema_version": sealed_module.FINAL_PROTOCOL_SCHEMA_VERSION,
         "status": "frozen_before_fit",
         "git_commit_sha": sealed_module.FROZEN_CHECKPOINT_GIT_COMMIT,
         "data_lineage": {
@@ -98,8 +99,6 @@ def _protocol_payload(manifest, manifest_sha):
             "sealed_test_dataset_opened": False,
             "sealed_test_labels_used": False,
             "sealed_test_evaluated": False,
-            "role_sidecar_sha256": "d" * 64,
-            "role_sidecar_digest": "e" * 64,
         },
         "checkpoint_policy": {
             "validation_dataset_used": False,
@@ -115,6 +114,8 @@ def _write_protocol(path, payload):
 
 
 def _preflight_fixture(tmp_path, monkeypatch):
+    monkeypatch.setattr(sealed_module, "FROZEN_CHECKPOINT_GIT_COMMIT", "f" * 40)
+    monkeypatch.setattr(sealed_module, "FROZEN_EPOCH", 30)
     checkpoint_path = tmp_path / "final.pt"
     checkpoint_path.write_bytes(b"synthetic checkpoint")
     manifest_path = tmp_path / "split_manifest.json"
@@ -176,6 +177,20 @@ def test_sealed_cli_exposes_only_frozen_paths_and_device():
     }
 
 
+def test_sealed_preflight_is_disabled_until_new_all_alive_artifacts_are_frozen(
+    tmp_path,
+):
+    config = SealedEvalConfig(
+        checkpoint_path=str(tmp_path / "missing.pt"),
+        final_protocol_path=str(tmp_path / "missing_protocol.json"),
+        manifest_path=str(tmp_path / "missing_manifest.json"),
+        output_dir=str(tmp_path / "sealed"),
+    )
+
+    with pytest.raises(RuntimeError, match="all-alive sealed bindings"):
+        preflight_sealed_evaluation(config, repo_root=tmp_path)
+
+
 def test_checkpoint_sha_mismatch_aborts_before_checkpoint_load(tmp_path, monkeypatch):
     config, _, _ = _preflight_fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(sealed_module, "FROZEN_CHECKPOINT_SHA256", "0" * 64)
@@ -203,7 +218,7 @@ def test_final_protocol_digest_mismatch_aborts(tmp_path):
     [
         (("backbone",), "gpt2_block", "backbone"),
         (("model_config", "input_feature_profile"), "full", "input feature"),
-        (("supervision_scope",), "all_alive", "supervision_scope"),
+        (("supervision_scope",), "non_wolf_alive", "supervision_scope"),
     ],
 )
 def test_checkpoint_rejects_wrong_model_profile_or_scope(
@@ -302,30 +317,30 @@ def test_existing_checkpoint_marker_rejects_another_preflight(tmp_path, monkeypa
         preflight_sealed_evaluation(config, repo_root=tmp_path)
 
 
-def test_unobserved_empty_v1_rows_are_zero_and_excluded(
+def test_formal_all_alive_mask_includes_an_observed_living_wolf(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
         observers=(1, 2, 3, 4, 5, 6, 7),
         suspicions_by_observer={5: []},
     )
-    roles = {
-        "player1": "Werewolf",
-        "player2": "Werewolf",
-        "player3": "Villager",
-        "player4": "Villager",
-        "player5": "Villager",
-        "player6": "Seer",
-        "player7": "Witch",
-    }
+    ground_truth_roles = {"player1": "Werewolf", "player2": "Werewolf"}
     dataset = DenseTWDToMDataset(
         [sample],
-        observer_roles_by_game={sample["game_id"]: roles},
-        supervision_scope="non_wolf_alive",
+        supervision_scope="all_alive",
         speech_annotation_source="v1",
         belief_annotation_source="v1_empty_unobserved",
     )
     row = dataset[0]
+    assert torch.equal(
+        row["observer_supervision_mask"],
+        row["observer_alive_mask"] & row["label_observed_mask"],
+    )
+    assert ground_truth_roles["player1"] == "Werewolf"
+    # Formal population construction never receives ground_truth_roles.
+    assert bool(row["observer_alive_mask"][0, 0])
+    assert bool(row["label_observed_mask"][0, 0])
+    assert bool(row["observer_supervision_mask"][0, 0])
     assert torch.equal(row["belief_targets"][0, 4], torch.zeros(7))
     assert not bool(row["label_observed_mask"][0, 4])
     assert not bool(row["observer_supervision_mask"][0, 4])
@@ -425,10 +440,7 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
     manifest_path.write_text("{}\n", encoding="utf-8")
     test_path = tmp_path / "test.jsonl"
     test_path.write_text("synthetic sealed labels\n", encoding="utf-8")
-    role_path = tmp_path / "role_sidecar.json"
-    role_path.write_text("synthetic roles\n", encoding="utf-8")
     sealed_ids = tuple(f"sealed_{index}" for index in range(6))
-    role_sha = sealed_module.sha256_file(role_path)
     model = SimpleNamespace(
         config=SimpleNamespace(max_seq_len=256),
         to=lambda device: model,
@@ -438,12 +450,7 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
         "manifest_digest": "a" * 64,
         "output_files": {"test": {"sha256": sealed_module.sha256_file(test_path)}},
     }
-    final_protocol = {
-        "data_lineage": {
-            "role_sidecar_sha256": role_sha,
-            "role_sidecar_digest": "b" * 64,
-        }
-    }
+    final_protocol = {"data_lineage": {}}
     plan = SealedPreflight(
         checkpoint_path=checkpoint_path,
         final_protocol_path=protocol_path,
@@ -451,7 +458,6 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
         output_dir=tmp_path / "sealed_output",
         marker_path=sealed_module._marker_path(checkpoint_path),
         sealed_dataset_path=test_path,
-        role_sidecar_path=role_path,
         evaluator_git_commit="f" * 40,
         sealed_game_ids=sealed_ids,
         development_game_ids=tuple(f"dev_{index}" for index in range(54)),
@@ -469,34 +475,13 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
         "validate_split_manifest",
         lambda *args, **kwargs: manifest,
     )
-    roles = {
-        "player1": "Werewolf",
-        "player2": "Werewolf",
-        "player3": "Villager",
-        "player4": "Villager",
-        "player5": "Villager",
-        "player6": "Seer",
-        "player7": "Witch",
-    }
-    monkeypatch.setattr(
-        sealed_module,
-        "load_role_sidecar_report",
-        lambda _: {
-            "sidecar_digest": "b" * 64,
-            "split_manifest_digest": "a" * 64,
-            "games": {
-                game_id: {"observer_roles": roles} for game_id in sealed_ids
-            },
-        },
-    )
-
     class FakeDataset(torch.utils.data.Dataset):
         samples = [{"game_id": game_id} for game_id in sealed_ids]
         model_input_scope = None
         target_semantics = None
         target_conversion = None
         label_observation_semantics = None
-        supervision_scope = "non_wolf_alive"
+        supervision_scope = "all_alive"
         speech_annotation_source = "v1"
         belief_annotation_source = "v1_empty_unobserved"
 
@@ -516,14 +501,10 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
         game_id: _synthetic_metric(index + 1)
         for index, game_id in enumerate(sealed_ids)
     }
-    stratified = {
-        game_id: {"observer_role": {"Villager": _synthetic_metric(index + 1)}}
-        for index, game_id in enumerate(sealed_ids)
-    }
     monkeypatch.setattr(
         sealed_module,
         "evaluate_model_with_games_and_strata",
-        lambda *args, **kwargs: ({}, by_game, {}, stratified),
+        lambda *args, **kwargs: ({}, by_game, {}, {}),
     )
     monkeypatch.setattr(sealed_module, "FROZEN_BOOTSTRAP_SAMPLES", 10)
     monkeypatch.setattr(sealed_module, "_new_run_id", lambda: "sealed_test_run")

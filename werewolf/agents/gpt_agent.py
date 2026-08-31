@@ -9,10 +9,10 @@ from werewolf.agents.llm_agent import (
     LLMAgent,
     RoleReportValidationError,
     belief_response_format,
-    day_cognition_response_format_v3,
+    day_cognition_response_format,
     night_action_response_format,
     parse_belief_response,
-    parse_day_cognition_response_v3,
+    parse_day_cognition_response,
     parse_vote_response,
     validate_gameplay_public_speech,
     validate_role_report,
@@ -109,6 +109,14 @@ class GPTAgent(LLMAgent):
         is_vote = "vote" in phase
         is_night = any(name in phase for name in _CONSTRAINED_NIGHT_PHASES)
         is_strict = self.gameplay_prompt_profile == STRICT_CLASSIC7_GAMEPLAY_PROMPT_PROFILE
+        if (
+            is_speech
+            and is_strict
+            and not isinstance(pre_speech_belief, SpeakerPreSpeechBelief)
+        ):
+            raise TypeError(
+                "strict day cognition requires SpeakerPreSpeechBelief"
+            )
 
         time.sleep(self.rate_limit)
         temperature, max_tokens = self._request_limits()
@@ -311,14 +319,11 @@ class GPTAgent(LLMAgent):
     ):
         player_id = observation.get("current_act_idx")
         phase = observation.get("phase")
-        exact_roles, role_options = derive_belief_constraints(observation)
         candidate_snapshot = freeze_discussion_candidates(observation)
         claim_catalog = build_public_claim_catalog(observation)
         claim_ids = tuple(claim.claim_id for claim in claim_catalog)
         prompt = build_day_cognition_prompt(
             observation,
-            exact_roles=exact_roles,
-            role_options=role_options,
             candidate_snapshot=candidate_snapshot,
             claim_catalog=claim_catalog,
             pre_speech_belief=pre_speech_belief,
@@ -326,19 +331,18 @@ class GPTAgent(LLMAgent):
         content, metadata = self._chat_with_metadata(
             [{"role": "user", "content": prompt}],
             player_log_context={
-                "stage": "belief",
+                "stage": "day_cognition",
                 "observation": observation,
                 "gen_times": attempt - 1,
             },
             temperature=temperature,
             max_tokens=max_tokens,
-            response_format=day_cognition_response_format_v3(
+            response_format=day_cognition_response_format(
                 supports_json_schema=getattr(
                     self.backend,
                     "supports_json_schema",
                     False,
                 ),
-                role_options=role_options,
                 candidate_snapshot=candidate_snapshot,
                 claim_ids=claim_ids,
             ),
@@ -349,28 +353,13 @@ class GPTAgent(LLMAgent):
                 f"Day cognition response was truncated "
                 f"(player={player_id}, phase={phase!r})"
             )
-        report = parse_day_cognition_response_v3(
+        report = parse_day_cognition_response(
             content,
             player_id=player_id,
-            self_role=observation.get("identity"),
             phase=phase,
-            exact_roles=exact_roles,
-            role_options=role_options,
             candidate_snapshot=candidate_snapshot,
             claim_ids=claim_ids,
         )
-        try:
-            validate_role_report(
-                report,
-                player_id=player_id,
-                self_role=observation.get("identity"),
-                phase=phase,
-                exact_roles=exact_roles,
-                role_options=role_options,
-            )
-        except RoleReportValidationError:
-            # The raw response is already retained by the existing call audit.
-            pass
         return report, candidate_snapshot, claim_catalog
 
     def _generate_public_speech(

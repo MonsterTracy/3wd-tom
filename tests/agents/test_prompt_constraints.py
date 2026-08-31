@@ -16,6 +16,11 @@ from werewolf.agents.prompt_template_v0 import (
     project_discussion_vote_stances,
 )
 from werewolf.helper.log_utils import Log
+from werewolf.models.twd_tom.samples import (
+    SAMPLE_SCHEMA_VERSION,
+    SpeakerPreSpeechBelief,
+)
+from werewolf.models.twd_tom.schema import LABEL_PROMPT_VERSION, LABEL_PROVENANCE
 
 
 def _observation(*, identity="Villager", phase="1_day_speech"):
@@ -62,6 +67,21 @@ BELIEF = {
         "player7": "unknown",
     },
 }
+
+
+def _pre_speech_belief(observation):
+    player_id = observation["current_act_idx"]
+    return SpeakerPreSpeechBelief(
+        observer_id=f"player{player_id}",
+        suspected_werewolves=("player5",),
+        known_werewolves=(),
+        known_non_werewolves=(f"player{player_id}",),
+        source_schema_version=SAMPLE_SCHEMA_VERSION,
+        label_prompt_version=LABEL_PROMPT_VERSION,
+        label_provenance=LABEL_PROVENANCE,
+        step_idx=0,
+        structured_input_digest="prompt-test-pre-boundary",
+    )
 
 
 class GameplayPromptTest(unittest.TestCase):
@@ -295,13 +315,11 @@ Villager: {3}""".format(*counts)
             tuple(claim.claim_id for claim in catalog),
             ("claim_000", "claim_001"),
         )
-        exact_roles, role_options = derive_belief_constraints(observation)
         day_prompt = build_day_cognition_prompt(
             observation,
-            exact_roles=exact_roles,
-            role_options=role_options,
             candidate_snapshot=freeze_discussion_candidates(observation),
             claim_catalog=catalog,
+            pre_speech_belief=_pre_speech_belief(observation),
         )
         self.assertLess(day_prompt.index("claim_000"), day_prompt.index("claim_001"))
         self.assertIn(f"[claim_000] [第1天白天 / speech] player4：{raw_speech}", day_prompt)
@@ -327,14 +345,12 @@ Villager: {3}""".format(*counts)
                 self.assertIn(rendered_speech, prompt)
                 self.assertNotIn("claim_000", prompt)
 
-        exact_roles, role_options = derive_belief_constraints(observation)
         catalog = build_public_claim_catalog(observation)
         day_prompt = build_day_cognition_prompt(
             observation,
-            exact_roles=exact_roles,
-            role_options=role_options,
             candidate_snapshot=freeze_discussion_candidates(observation),
             claim_catalog=catalog,
+            pre_speech_belief=_pre_speech_belief(observation),
         )
         self.assertIn("[claim_000] [第1天白天 / speech]", day_prompt)
         self.assertIn("DISCUSSION INTENT OUTPUT", day_prompt)
@@ -608,13 +624,11 @@ Villager: {3}""".format(*counts)
 
     def test_day_prompt_encourages_existing_interaction_actions(self):
         observation = _observation()
-        exact_roles, role_options = derive_belief_constraints(observation)
         prompt = build_day_cognition_prompt(
             observation,
-            exact_roles=exact_roles,
-            role_options=role_options,
             candidate_snapshot=freeze_discussion_candidates(observation),
             claim_catalog=build_public_claim_catalog(observation),
+            pre_speech_belief=_pre_speech_belief(observation),
         )
 
         self.assertIn("INTERACTION GUIDANCE", prompt)

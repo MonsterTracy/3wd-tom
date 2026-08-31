@@ -25,7 +25,7 @@ NUMERIC_ANNOTATION_PRESENT = False
 RAW_LABEL_SEMANTICS = (
     "observer_internal_hard_knowledge_consistent_player_suspicion_set_v2"
 )
-SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v1"
+SUPERVISION_SCOPE = "all_valid_alive_observer_rows_v2"
 LABEL_PROVENANCE = "alive_observer_readonly_pre_speech_report_v3"
 LABEL_SOURCE = "playing_agent_readonly_self_report"
 LABEL_CONTEXT_SCOPE = "playing_agent_legally_available_information_state"
