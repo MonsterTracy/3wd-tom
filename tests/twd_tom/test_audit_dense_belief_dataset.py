@@ -78,6 +78,38 @@ def test_dense_audit_reports_strict_pre_contract(
     assert json.loads(output_path.read_text(encoding="utf-8")) == report
 
 
+def test_dense_audit_distinguishes_alive_from_supervised_observers(
+    tmp_path,
+    suspicion_sample_factory,
+    canonical_belief_batch_factory,
+):
+    dataset_dir = _materialized_three_game_split(
+        tmp_path,
+        suspicion_sample_factory,
+        canonical_belief_batch_factory,
+    )
+    (dataset_dir / "test.jsonl").unlink()
+
+    report = audit_dense_belief_dataset(
+        dataset_path=dataset_dir / "train.jsonl",
+        split_name="train",
+    )
+
+    # The fixture has four alive observers and one empty, unobserved label row.
+    assert report["alive_observer_count"] == 4
+    assert report["supervised_observer_count"] == 3
+    assert report["alive_observers_per_game"] == {
+        "min": 4,
+        "max": 4,
+        "mean": 4.0,
+    }
+    assert report["supervised_observers_per_game"] == {
+        "min": 3,
+        "max": 3,
+        "mean": 3.0,
+    }
+
+
 def test_dense_audit_never_accepts_test_split(
     tmp_path,
     suspicion_sample_factory,

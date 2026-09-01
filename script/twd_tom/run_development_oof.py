@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,13 @@ def _validate_completed_fold_summary(
     config = summary.get("training_config")
     if not isinstance(config, Mapping):
         raise ValueError(f"existing {fold_name} summary has no training config")
+    missing = sorted(set(requested) - set(config))
+    unexpected = sorted(set(config) - set(requested))
+    if missing or unexpected:
+        raise ValueError(
+            f"existing {fold_name} config field contract differs: "
+            f"missing={missing} unexpected={unexpected}"
+        )
     for name, value in requested.items():
         if config.get(name) != value:
             raise ValueError(
@@ -387,7 +395,7 @@ def _run_development_oof(
             _validate_completed_fold_summary(
                 summary,
                 fold_name=fold_name,
-                requested=requested_config,
+                requested=asdict(fold_config),
             )
         else:
             if fold_output.exists() and any(fold_output.iterdir()):

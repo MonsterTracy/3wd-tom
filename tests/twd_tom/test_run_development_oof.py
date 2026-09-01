@@ -31,6 +31,32 @@ def _game_metrics(*, count, model_kl, target_entropy=0.5, uniform_ce=1.8):
     }
 
 
+def _formal_completed_fold_config():
+    return asdict(oof_module.TrainingConfig(
+        output_dir="/formal/oof/fold_0",
+        dataset_path="/formal/folds/fold_0/train.jsonl",
+        validation_dataset_path="/formal/folds/fold_0/validation.jsonl",
+        epochs=80,
+        batch_size=8,
+        learning_rate=1e-4,
+        lr_scheduler="warmup_cosine",
+        min_learning_rate=1e-5,
+        input_feature_profile=NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
+        dense_supervision=True,
+        early_stopping_patience=12,
+        early_stopping_min_delta=1e-4,
+    ))
+
+
+def _completed_fold_summary(training_config):
+    return {
+        "status": "ok",
+        "source_schema_version": SAMPLE_SCHEMA_VERSION,
+        "run_provenance": {"development_fold_name": "fold_0"},
+        "training_config": training_config,
+    }
+
+
 def test_oof_weighting_recomputes_reducible_gap_from_all_observers():
     by_game = {
         "game_a": _game_metrics(count=3, model_kl=0.4),
@@ -260,4 +286,52 @@ def test_formal_oof_fixes_public_all_alive_contract_without_role_sidecar(
             },
             fold_name="fold_0",
             requested={},
+        )
+
+
+def test_formal_completed_fold_exact_config_can_resume():
+    requested = _formal_completed_fold_config()
+
+    oof_module._validate_completed_fold_summary(
+        _completed_fold_summary(dict(requested)),
+        fold_name="fold_0",
+        requested=requested,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "diagnostic_value"),
+    [
+        ("private_conditioning", True),
+        ("role_sidecar_path", "/diagnostic/roles.json"),
+        ("speech_v2_annotation_path", "/diagnostic/speech_v2.jsonl"),
+        ("belief_v2_annotation_path", "/diagnostic/belief_v2.jsonl"),
+    ],
+)
+def test_formal_completed_fold_rejects_diagnostic_config(
+    field_name,
+    diagnostic_value,
+):
+    requested = _formal_completed_fold_config()
+    existing = dict(requested)
+    existing[field_name] = diagnostic_value
+
+    with pytest.raises(ValueError, match=field_name):
+        oof_module._validate_completed_fold_summary(
+            _completed_fold_summary(existing),
+            fold_name="fold_0",
+            requested=requested,
+        )
+
+
+def test_formal_completed_fold_rejects_unexpected_config_field():
+    requested = _formal_completed_fold_config()
+    existing = dict(requested)
+    existing["diagnostic_only_extra"] = True
+
+    with pytest.raises(ValueError, match="unexpected=.*diagnostic_only_extra"):
+        oof_module._validate_completed_fold_summary(
+            _completed_fold_summary(existing),
+            fold_name="fold_0",
+            requested=requested,
         )

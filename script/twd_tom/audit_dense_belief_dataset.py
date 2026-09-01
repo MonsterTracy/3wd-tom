@@ -75,6 +75,7 @@ def audit_dense_belief_dataset(
 
     boundary_counts: list[int] = []
     final_sequence_lengths: list[int] = []
+    alive_observer_counts: list[int] = []
     supervised_observer_counts: list[int] = []
     phase_counts: Counter[str] = Counter()
     game_ids: list[str] = []
@@ -92,8 +93,11 @@ def audit_dense_belief_dataset(
         game_ids.append(metadata["game_id"])
         boundary_counts.append(boundary_count)
         final_sequence_lengths.append(sequence_length)
-        supervised_observer_counts.append(
+        alive_observer_counts.append(
             int(item["observer_alive_mask"].sum().item())
+        )
+        supervised_observer_counts.append(
+            int(item["observer_supervision_mask"].sum().item())
         )
         phase_counts.update(metadata["phase"])
 
@@ -111,9 +115,11 @@ def audit_dense_belief_dataset(
         "max_seq_len": max_seq_len,
         "game_count": len(dataset),
         "boundary_count": dataset.boundary_count,
+        "alive_observer_count": sum(alive_observer_counts),
         "supervised_observer_count": sum(supervised_observer_counts),
         "boundaries_per_game": _statistics(boundary_counts),
         "final_sequence_length": _statistics(final_sequence_lengths),
+        "alive_observers_per_game": _statistics(alive_observer_counts),
         "supervised_observers_per_game": _statistics(
             supervised_observer_counts
         ),
