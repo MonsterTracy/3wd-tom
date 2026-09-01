@@ -23,6 +23,7 @@ from script.twd_tom.train import (
     bootstrap_game_macro_metric,
     game_macro_metrics,
     run_training,
+    sha256_file,
     stratified_game_macro_metrics,
 )
 from werewolf.models.twd_tom.belief_backbone import (
@@ -42,6 +43,7 @@ from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.supervision import (
     ALL_ALIVE_SCOPE,
     SUPERVISION_SCOPES,
+    load_role_sidecar_report,
 )
 
 
@@ -215,6 +217,7 @@ def _validate_completed_fold_summary(
     *,
     fold_name: str,
     requested: Mapping[str, Any],
+    expected_run_provenance: Mapping[str, Any],
 ) -> None:
     if summary.get("status") != "ok":
         raise ValueError(f"existing {fold_name} summary is not complete")
@@ -227,6 +230,17 @@ def _validate_completed_fold_summary(
         "development_fold_name"
     ) != fold_name:
         raise ValueError(f"existing {fold_name} summary has wrong lineage")
+    missing_provenance = sorted(set(expected_run_provenance) - set(provenance))
+    if missing_provenance:
+        raise ValueError(
+            f"existing {fold_name} provenance is missing: {missing_provenance}"
+        )
+    for name, value in expected_run_provenance.items():
+        if provenance.get(name) != value:
+            raise ValueError(
+                f"existing {fold_name} provenance differs for {name}: "
+                f"{provenance.get(name)!r} != {value!r}"
+            )
     config = summary.get("training_config")
     if not isinstance(config, Mapping):
         raise ValueError(f"existing {fold_name} summary has no training config")
@@ -319,9 +333,18 @@ def _run_development_oof(
     # Keep the lexical project path so repository symlinks remain valid
     # provenance paths; validators resolve their physical targets separately.
     resolved_fold_root = Path(os.path.abspath(fold_root))
-    fold_manifest = _load_json(
-        resolved_fold_root / DEVELOPMENT_FOLD_MANIFEST_FILENAME
-    )
+    fold_manifest_path = resolved_fold_root / DEVELOPMENT_FOLD_MANIFEST_FILENAME
+    fold_manifest = _load_json(fold_manifest_path)
+    expected_run_provenance = {
+        "development_fold_manifest_sha256": sha256_file(fold_manifest_path),
+        "development_fold_manifest_digest": fold_manifest["manifest_digest"],
+    }
+    if resolved_role_sidecar is not None:
+        role_sidecar = load_role_sidecar_report(resolved_role_sidecar)
+        expected_run_provenance.update({
+            "role_sidecar_sha256": sha256_file(resolved_role_sidecar),
+            "role_sidecar_digest": role_sidecar["sidecar_digest"],
+        })
     fold_names = sorted(
         fold_manifest["folds"],
         key=lambda name: fold_manifest["folds"][name]["fold_index"],
@@ -396,6 +419,7 @@ def _run_development_oof(
                 summary,
                 fold_name=fold_name,
                 requested=asdict(fold_config),
+                expected_run_provenance=expected_run_provenance,
             )
         else:
             if fold_output.exists() and any(fold_output.iterdir()):

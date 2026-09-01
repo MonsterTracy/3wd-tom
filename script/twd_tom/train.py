@@ -457,6 +457,8 @@ def build_run_provenance(
     role_sidecar_path = config.resolved_role_sidecar_path
     if role_sidecar_path is not None:
         role_sidecar = load_role_sidecar_report(role_sidecar_path)
+        if not is_development_fold:
+            raise ValueError("role sidecar requires development-fold training")
         expected_split_digest = (
             lineage["source_split_manifest_digest"]
             if is_development_fold
@@ -472,6 +474,16 @@ def build_run_provenance(
             raise ValueError(
                 "role sidecar and training canonical batch digests differ"
             )
+        if role_sidecar["development_fold_manifest_digest"] != lineage[
+            "manifest_digest"
+        ]:
+            raise ValueError(
+                "role sidecar and development fold manifest digests differ"
+            )
+        if set(role_sidecar["games"]) != set(lineage["development_game_ids"]):
+            raise ValueError("role sidecar games differ from development games")
+        if set(role_sidecar["games"]) & set(lineage["sealed_test_game_ids"]):
+            raise ValueError("role sidecar contains sealed test games")
         result.update({
             "role_sidecar_path": _repository_relative_path(
                 role_sidecar_path,

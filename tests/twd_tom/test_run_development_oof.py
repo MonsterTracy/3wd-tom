@@ -52,8 +52,27 @@ def _completed_fold_summary(training_config):
     return {
         "status": "ok",
         "source_schema_version": SAMPLE_SCHEMA_VERSION,
-        "run_provenance": {"development_fold_name": "fold_0"},
+        "run_provenance": {
+            "development_fold_name": "fold_0",
+            "development_fold_manifest_sha256": "a" * 64,
+            "development_fold_manifest_digest": "b" * 64,
+        },
         "training_config": training_config,
+    }
+
+
+def _formal_resume_provenance():
+    return {
+        "development_fold_manifest_sha256": "a" * 64,
+        "development_fold_manifest_digest": "b" * 64,
+    }
+
+
+def _diagnostic_resume_provenance():
+    return {
+        **_formal_resume_provenance(),
+        "role_sidecar_sha256": "c" * 64,
+        "role_sidecar_digest": "d" * 64,
     }
 
 
@@ -208,6 +227,7 @@ def test_formal_oof_fixes_public_all_alive_contract_without_role_sidecar(
     }
 
     monkeypatch.setattr(oof_module, "_load_json", lambda _: manifest)
+    monkeypatch.setattr(oof_module, "sha256_file", lambda _: "a" * 64)
     monkeypatch.setattr(
         oof_module,
         "validate_development_fold_paths",
@@ -286,6 +306,7 @@ def test_formal_oof_fixes_public_all_alive_contract_without_role_sidecar(
             },
             fold_name="fold_0",
             requested={},
+            expected_run_provenance=_formal_resume_provenance(),
         )
 
 
@@ -296,7 +317,63 @@ def test_formal_completed_fold_exact_config_can_resume():
         _completed_fold_summary(dict(requested)),
         fold_name="fold_0",
         requested=requested,
+        expected_run_provenance=_formal_resume_provenance(),
     )
+
+
+def test_diagnostic_completed_fold_exact_provenance_can_resume():
+    requested = _formal_completed_fold_config()
+    requested["role_sidecar_path"] = "/diagnostic/roles.json"
+    summary = _completed_fold_summary(dict(requested))
+    summary["run_provenance"].update(_diagnostic_resume_provenance())
+
+    oof_module._validate_completed_fold_summary(
+        summary,
+        fold_name="fold_0",
+        requested=requested,
+        expected_run_provenance=_diagnostic_resume_provenance(),
+    )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "role_sidecar_sha256",
+        "role_sidecar_digest",
+        "development_fold_manifest_sha256",
+        "development_fold_manifest_digest",
+    ],
+)
+def test_diagnostic_completed_fold_rejects_changed_provenance(field_name):
+    requested = _formal_completed_fold_config()
+    requested["role_sidecar_path"] = "/diagnostic/roles.json"
+    summary = _completed_fold_summary(dict(requested))
+    summary["run_provenance"].update(_diagnostic_resume_provenance())
+    summary["run_provenance"][field_name] = "e" * 64
+
+    with pytest.raises(ValueError, match=field_name):
+        oof_module._validate_completed_fold_summary(
+            summary,
+            fold_name="fold_0",
+            requested=requested,
+            expected_run_provenance=_diagnostic_resume_provenance(),
+        )
+
+
+def test_diagnostic_completed_fold_rejects_missing_provenance():
+    requested = _formal_completed_fold_config()
+    requested["role_sidecar_path"] = "/diagnostic/roles.json"
+    summary = _completed_fold_summary(dict(requested))
+    summary["run_provenance"].update(_diagnostic_resume_provenance())
+    summary["run_provenance"].pop("role_sidecar_digest")
+
+    with pytest.raises(ValueError, match="role_sidecar_digest"):
+        oof_module._validate_completed_fold_summary(
+            summary,
+            fold_name="fold_0",
+            requested=requested,
+            expected_run_provenance=_diagnostic_resume_provenance(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -321,6 +398,7 @@ def test_formal_completed_fold_rejects_diagnostic_config(
             _completed_fold_summary(existing),
             fold_name="fold_0",
             requested=requested,
+            expected_run_provenance=_formal_resume_provenance(),
         )
 
 
@@ -334,4 +412,5 @@ def test_formal_completed_fold_rejects_unexpected_config_field():
             _completed_fold_summary(existing),
             fold_name="fold_0",
             requested=requested,
+            expected_run_provenance=_formal_resume_provenance(),
         )

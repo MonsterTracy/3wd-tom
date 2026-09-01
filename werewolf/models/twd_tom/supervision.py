@@ -13,7 +13,7 @@ from werewolf.models.twd_tom.schema import NUM_PLAYERS, PLAYER_NAMES, PLAYER_TO_
 from werewolf.trajectory import canonical_digest
 
 
-ROLE_SIDECAR_SCHEMA_VERSION = "classic7_tom_v2_role_sidecar_v1"
+ROLE_SIDECAR_SCHEMA_VERSION = "classic7_tom_v2_development_role_sidecar_v2"
 ROLE_NAMES = ("Werewolf", "Villager", "Seer", "Witch")
 ROLE_COUNTS = {"Werewolf": 2, "Villager": 3, "Seer": 1, "Witch": 1}
 
@@ -151,6 +151,7 @@ def load_role_sidecar_report(path: str | Path) -> dict[str, Any]:
         "canonical_batch_summary_digest",
         "canonical_batch_summary_sha256",
         "split_manifest_digest",
+        "development_fold_manifest_digest",
         "games",
         "sidecar_digest",
     }
@@ -162,6 +163,7 @@ def load_role_sidecar_report(path: str | Path) -> dict[str, Any]:
         "canonical_batch_summary_digest",
         "canonical_batch_summary_sha256",
         "split_manifest_digest",
+        "development_fold_manifest_digest",
         "sidecar_digest",
     ):
         _require_lower_hex_digest(value[field_name], field_name=field_name)
