@@ -37,7 +37,7 @@ from werewolf.models.twd_tom.annotation_v2 import (
     BELIEF_ANNOTATION_SOURCES,
     SPEECH_ANNOTATION_SOURCES,
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 from werewolf.models.twd_tom.samples import SAMPLE_SCHEMA_VERSION
 from werewolf.models.twd_tom.supervision import (
@@ -280,7 +280,7 @@ def _run_development_oof(
     role_sidecar_path: str | Path | None = None,
     supervision_scope: str = ALL_ALIVE_SCOPE,
     speech_annotation_source: str = V1_ANNOTATION_SOURCE,
-    belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    belief_annotation_source: str = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     speech_v2_annotation_path: str | Path | None = None,
     belief_v2_annotation_path: str | Path | None = None,
     worst_case_limit: int = 50,
@@ -644,7 +644,7 @@ def run_development_oof(
         role_sidecar_path=None,
         supervision_scope=ALL_ALIVE_SCOPE,
         speech_annotation_source=V1_ANNOTATION_SOURCE,
-        belief_annotation_source=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source=V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         speech_v2_annotation_path=None,
         belief_v2_annotation_path=None,
         worst_case_limit=worst_case_limit,

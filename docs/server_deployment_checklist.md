@@ -118,7 +118,7 @@ test ! -e "${FOLD_ROOT}"
 
 ## 正式 public-only all-alive OOF
 
-`script.twd_tom.run_development_oof` 已固定 Qwen2、`no_phase_day`、dense supervision、public-only、V1 speech、`v1_empty_unobserved` labels 与 `all_alive`。CLI 不提供 role sidecar、supervision scope、private conditioning 或 Annotation V2 开关。
+`script.twd_tom.run_development_oof` 已固定 Qwen2、`no_phase_day`、dense supervision、public-only、V1 speech、`v1_empty_uniform_nonself` labels 与 `all_alive`。CLI 不提供 role sidecar、supervision scope、private conditioning 或 Annotation V2 开关。
 
 ```bash
 cd /home/dell/yuxiao/3wd-tom

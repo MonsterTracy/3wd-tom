@@ -72,7 +72,7 @@ def test_worst_case_export_uses_the_bound_validation_targets(
     assert rows[0]["schema_version"] == WORST_CASE_SCHEMA_VERSION
     assert rows[0]["public_history"]
     assert rows[0]["legacy_v1_target"]
-    assert rows[0]["v1_empty_unobserved_target"]
+    assert rows[0]["v1_empty_uniform_nonself_target"]
     assert rows[0]["v2_target"] is None
     assert rows[0]["model_prediction"]
 

@@ -75,13 +75,47 @@ def test_private_dataset_reports_private_admissible_uniform_baseline(
     assert "private_admissible_normalized_reducible_gap_improvement" in aggregate
 
 
+def test_public_empirical_priors_accept_empty_target_with_private_knowledge(
+    training_sample_factory,
+):
+    sample = training_sample_factory()
+    sample["suspected_werewolves"] = {
+        observer: [] for observer in sample["suspected_werewolves"]
+    }
+    sample["known_non_werewolves"]["player1"] = ["player1", "player4"]
+    dataset = DenseTWDToMDataset([sample])
+
+    report = evaluate_dense_empirical_priors(
+        dataset,
+        fit_dense_empirical_priors(dataset),
+    )
+
+    for name in ("train_global_prior", "train_phase_prior"):
+        aggregate = report[name]["aggregate"]
+        assert aggregate["valid_observer_count"] == 4
+        assert aggregate[
+            "uniform_non_self_baseline_mean_kl_divergence"
+        ] == pytest.approx(0.0)
+        assert aggregate["mean_belief_cross_entropy"] == pytest.approx(
+            aggregate["mean_belief_target_entropy"]
+        )
+        assert "private_admissible_uniform_baseline_kl_sum" not in aggregate
+
+
 def test_dense_baselines_keep_zero_supervision_game_as_explicit_unscored(
     training_sample_factory,
 ):
     scored = training_sample_factory(game_id="scored_game")
     unscored = training_sample_factory(game_id="unscored_game")
     unscored["suspected_werewolves"] = {
-        observer: [] for observer in unscored["suspected_werewolves"]
+        observer: None for observer in unscored["suspected_werewolves"]
+    }
+    unscored["belief_status"] = {
+        observer: "parse_error" for observer in unscored["belief_status"]
+    }
+    unscored["belief_errors"] = {
+        observer: "synthetic failed report"
+        for observer in unscored["belief_errors"]
     }
     dataset = DenseTWDToMDataset([scored, unscored])
 

@@ -38,7 +38,7 @@ from script.twd_tom.train import (
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 from werewolf.models.twd_tom.belief_backbone import (
     NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
@@ -93,7 +93,7 @@ class FinalFitConfig:
     backbone: ClassVar[str] = QWEN2_BACKBONE_NAME
     input_feature_profile: ClassVar[str] = NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     speech_annotation_source: ClassVar[str] = V1_ANNOTATION_SOURCE
-    belief_annotation_source: ClassVar[str] = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
+    belief_annotation_source: ClassVar[str] = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE
     supervision_scope: ClassVar[str] = ALL_ALIVE_SCOPE
     dense_supervision: ClassVar[bool] = True
     private_conditioning: ClassVar[bool] = False

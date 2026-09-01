@@ -34,7 +34,7 @@ from werewolf.models.twd_tom.annotation_v2 import (
     BELIEF_ANNOTATION_SOURCES,
     SPEECH_ANNOTATION_SOURCES,
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     V2_ANNOTATION_SOURCE,
     annotation_set_digest,
     load_belief_v2_annotations,
@@ -129,7 +129,7 @@ class TrainingConfig:
     early_stopping_patience: int = 0
     early_stopping_min_delta: float = 0.0
     speech_annotation_source: str = V1_ANNOTATION_SOURCE
-    belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
+    belief_annotation_source: str = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE
     speech_v2_annotation_path: str | None = None
     belief_v2_annotation_path: str | None = None
 
@@ -972,10 +972,11 @@ def _item_metric_tensors(
         "observed": batch["label_observed_mask"][batch_index],
         "supervision": batch["observer_supervision_mask"][batch_index],
         "diagonal": batch["diagonal_target_mask"][batch_index],
-        "known_non_wolf": batch[
-            "supervision_known_non_werewolf_mask"
-        ][batch_index],
     }
+    if "known_non_werewolf_mask" in batch:
+        result["known_non_wolf"] = batch[
+            "known_non_werewolf_mask"
+        ][batch_index]
     if logits.ndim == 4:
         valid_boundaries = batch["boundary_valid_mask"][batch_index]
         result = {
@@ -1152,7 +1153,7 @@ class StratifiedMetricAccumulator:
                         observer_alive_mask=tensors["alive"],
                         observer_supervision_mask=supervision,
                         diagonal_target_mask=tensors["diagonal"],
-                        known_non_werewolf_mask=tensors["known_non_wolf"],
+                        known_non_werewolf_mask=tensors.get("known_non_wolf"),
                     )
                     game_accumulator = self._game_groups.setdefault(
                         game_id, {}
@@ -1169,7 +1170,7 @@ class StratifiedMetricAccumulator:
                         observer_alive_mask=tensors["alive"],
                         observer_supervision_mask=supervision,
                         diagonal_target_mask=tensors["diagonal"],
-                        known_non_werewolf_mask=tensors["known_non_wolf"],
+                        known_non_werewolf_mask=tensors.get("known_non_wolf"),
                     )
 
     def finalize(self) -> dict[str, dict[str, dict[str, int | float]]]:
@@ -1411,7 +1412,7 @@ def _loss_and_update(
     observer_alive_mask = batch["observer_alive_mask"]
     observer_supervision_mask = batch["observer_supervision_mask"]
     diagonal_target_mask = batch["diagonal_target_mask"]
-    known_non_werewolf_mask = batch["supervision_known_non_werewolf_mask"]
+    known_non_werewolf_mask = batch.get("known_non_werewolf_mask")
     observer_scope_mask = batch["observer_scope_mask"]
     label_observed_mask = batch["label_observed_mask"]
     if logits.ndim == 4:
@@ -1422,7 +1423,8 @@ def _loss_and_update(
         observer_alive_mask = observer_alive_mask.flatten(0, 1)
         observer_supervision_mask = observer_supervision_mask.flatten(0, 1)
         diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
-        known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
+        if known_non_werewolf_mask is not None:
+            known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
         observer_scope_mask = observer_scope_mask.flatten(0, 1)
         label_observed_mask = label_observed_mask.flatten(0, 1)
     loss = masked_belief_distribution_loss(
@@ -1487,7 +1489,7 @@ def _update_per_game_metrics(
             diagonal_target_mask=tensors["diagonal"],
             observer_scope_mask=tensors["scope"],
             label_observed_mask=tensors["observed"],
-            known_non_werewolf_mask=tensors["known_non_wolf"],
+            known_non_werewolf_mask=tensors.get("known_non_wolf"),
         )
 
 
@@ -1587,9 +1589,7 @@ def evaluate_model_with_games_and_strata(
         observer_alive_mask = batch["observer_alive_mask"]
         observer_supervision_mask = batch["observer_supervision_mask"]
         diagonal_target_mask = batch["diagonal_target_mask"]
-        known_non_werewolf_mask = batch[
-            "supervision_known_non_werewolf_mask"
-        ]
+        known_non_werewolf_mask = batch.get("known_non_werewolf_mask")
         observer_scope_mask = batch["observer_scope_mask"]
         label_observed_mask = batch["label_observed_mask"]
         if logits.ndim == 4:
@@ -1598,7 +1598,8 @@ def evaluate_model_with_games_and_strata(
             observer_alive_mask = observer_alive_mask.flatten(0, 1)
             observer_supervision_mask = observer_supervision_mask.flatten(0, 1)
             diagonal_target_mask = diagonal_target_mask.flatten(0, 1)
-            known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
+            if known_non_werewolf_mask is not None:
+                known_non_werewolf_mask = known_non_werewolf_mask.flatten(0, 1)
             observer_scope_mask = observer_scope_mask.flatten(0, 1)
             label_observed_mask = label_observed_mask.flatten(0, 1)
         loss = (
@@ -1669,7 +1670,7 @@ def checkpoint_payload(
         "target_conversion": TARGET_CONVERSION,
         "label_observation_semantics": LABEL_OBSERVATION_SEMANTICS,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
-        "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        "belief_annotation_source": V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     })
     task_contract = checkpoint_task_contract(
         model.config.private_conditioning,
@@ -1696,7 +1697,7 @@ def checkpoint_payload(
         ),
         "belief_annotation_source": dataset_contract.get(
             "belief_annotation_source",
-            V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+            V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         ),
         "label_observation_semantics": dataset_contract.get(
             "label_observation_semantics",
@@ -2081,7 +2082,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--belief-annotation-source",
         choices=BELIEF_ANNOTATION_SOURCES,
-        default=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        default=V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     )
     parser.add_argument("--speech-v2-annotations")
     parser.add_argument("--belief-v2-annotations")

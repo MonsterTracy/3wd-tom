@@ -19,7 +19,7 @@ from script.twd_tom.run_development_oof import (
 )
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 from werewolf.models.twd_tom.belief_backbone import (
     NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
@@ -75,7 +75,7 @@ def run_non_wolf_oof_diagnostic(
         input_feature_profile=NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
         supervision_scope=NON_WOLF_ALIVE_SCOPE,
         speech_annotation_source=V1_ANNOTATION_SOURCE,
-        belief_annotation_source=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source=V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         speech_v2_annotation_path=None,
         belief_v2_annotation_path=None,
         worst_case_limit=50,

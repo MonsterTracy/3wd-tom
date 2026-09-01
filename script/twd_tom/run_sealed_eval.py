@@ -34,7 +34,7 @@ from script.twd_tom.train import (
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 from werewolf.models.twd_tom.belief_backbone import (
     NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
@@ -89,7 +89,7 @@ class SealedEvalConfig:
     backbone: ClassVar[str] = QWEN2_BACKBONE_NAME
     input_feature_profile: ClassVar[str] = NO_PHASE_DAY_INPUT_FEATURE_PROFILE
     speech_annotation_source: ClassVar[str] = V1_ANNOTATION_SOURCE
-    belief_annotation_source: ClassVar[str] = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE
+    belief_annotation_source: ClassVar[str] = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE
     supervision_scope: ClassVar[str] = ALL_ALIVE_SCOPE
     epoch: ClassVar[int] = FROZEN_EPOCH
     seed: ClassVar[int] = FROZEN_BOOTSTRAP_SEED
@@ -198,7 +198,7 @@ def _validate_checkpoint(checkpoint: Mapping[str, Any]) -> torch.nn.Module:
         "schema_version": SAMPLE_SCHEMA_VERSION,
         "backbone": QWEN2_BACKBONE_NAME,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
-        "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        "belief_annotation_source": V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         "supervision_scope": ALL_ALIVE_SCOPE,
         "epoch": FROZEN_EPOCH,
         "validation_dataset_used": False,
@@ -225,7 +225,7 @@ def _validate_checkpoint(checkpoint: Mapping[str, Any]) -> torch.nn.Module:
         "backbone": QWEN2_BACKBONE_NAME,
         "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
-        "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        "belief_annotation_source": V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         "supervision_scope": ALL_ALIVE_SCOPE,
         "fit_epochs": FROZEN_EPOCH,
         "seed": FROZEN_BOOTSTRAP_SEED,
@@ -460,7 +460,7 @@ def _metric_definitions() -> dict[str, Any]:
             "total_variation_mean": "observer-weighted mean TV",
         },
         "mask": (
-            "observer_alive & v1_empty_unobserved_label_observed"
+            "observer_alive & v1_empty_uniform_nonself_label_observed"
         ),
         "unobserved_target": "all-zero target with distribution_loss_mask=false",
         "bootstrap": {
@@ -503,7 +503,7 @@ def _protocol_payload(
             "backbone": QWEN2_BACKBONE_NAME,
             "input_feature_profile": NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
             "speech_annotation_source": V1_ANNOTATION_SOURCE,
-            "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+            "belief_annotation_source": V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
             "supervision_scope": ALL_ALIVE_SCOPE,
             "batch_size": FROZEN_BATCH_SIZE,
         },
@@ -579,7 +579,7 @@ def run_sealed_evaluation(
         include_private_features=False,
         supervision_scope=ALL_ALIVE_SCOPE,
         speech_annotation_source=V1_ANNOTATION_SOURCE,
-        belief_annotation_source=V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source=V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     )
     expected_dataset_contract = {
         "model_input_scope": plan.checkpoint.get("model_input_scope"),
@@ -590,7 +590,7 @@ def run_sealed_evaluation(
         ),
         "supervision_scope": ALL_ALIVE_SCOPE,
         "speech_annotation_source": V1_ANNOTATION_SOURCE,
-        "belief_annotation_source": V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        "belief_annotation_source": V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     }
     for field_name, expected in expected_dataset_contract.items():
         if getattr(dataset, field_name) != expected:

@@ -215,3 +215,21 @@ def test_private_admissible_uniform_baseline_excludes_known_non_werewolves():
         "private_admissible_uniform_baseline_mean_absolute_error"
     ] == pytest.approx(0.0)
     assert metrics["mean_illegal_known_nonwolf_mass"] == pytest.approx(5 / 6)
+
+
+def test_private_admissible_diagnostic_rejects_incompatible_empty_target():
+    logits, targets, alive, diagonal = make_contract()
+    known_non_wolf = torch.zeros_like(diagonal)
+    known_non_wolf[0, 0, [0, 3]] = True
+
+    with pytest.raises(
+        ValueError,
+        match="belief targets cannot support known non-Werewolves",
+    ):
+        compute_belief_metrics(
+            logits,
+            targets,
+            alive,
+            diagonal,
+            known_non_werewolf_mask=known_non_wolf,
+        )

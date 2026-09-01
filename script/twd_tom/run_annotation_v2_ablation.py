@@ -18,21 +18,21 @@ from werewolf.models.twd_tom.belief_backbone import (
     QWEN2_BACKBONE_NAME,
 )
 from werewolf.models.twd_tom.annotation_v2 import (
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 
 
 ABLATION_SCHEMA_VERSION = "classic7_annotation_v2_oof_ablation_v4"
 _EXPERIMENTS = (
     (
-        "speech_v1_belief_v1_empty_unobserved",
+        "speech_v1_belief_v1_empty_uniform_nonself",
         "v1",
-        V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     ),
     (
-        "speech_v2_belief_v1_empty_unobserved",
+        "speech_v2_belief_v1_empty_uniform_nonself",
         "v2",
-        V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     ),
     ("speech_v1_belief_v2", "v1", "v2"),
     ("speech_v2_belief_v2", "v2", "v2"),

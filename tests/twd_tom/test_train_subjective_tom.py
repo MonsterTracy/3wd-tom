@@ -255,6 +255,56 @@ def test_one_train_and_evaluation_batch_use_direct_belief_contract(
     )
 
 
+def test_formal_metrics_accept_observed_empty_targets_with_private_knowledge(
+    tmp_path, training_sample_factory
+):
+    sample = training_sample_factory()
+    sample["suspected_werewolves"] = {
+        observer: [] for observer in sample["suspected_werewolves"]
+    }
+    sample["known_non_werewolves"]["player1"] = ["player1", "player4"]
+    path = tmp_path / "empty.jsonl"
+    write_jsonl(path, sample)
+    config = TrainingConfig(
+        output_dir=str(tmp_path / "run"),
+        dataset_path=str(path),
+        validation_dataset_path=str(path),
+        epochs=1,
+        batch_size=8,
+        max_seq_len=32,
+        backbone="gpt2_block",
+        device="cpu",
+        dense_supervision=True,
+    )
+    loader, dataset = build_data_loader(
+        config,
+        dataset_path=path,
+        shuffle=False,
+    )
+    item = dataset[0]
+
+    assert item["label_observed_mask"][0, 0]
+    assert item["observer_supervision_mask"][0, 0]
+    assert item["supervision_known_non_werewolf_mask"][0, 0, 3]
+    assert item["belief_targets"][0, 0].tolist() == pytest.approx(
+        [0.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
+    )
+
+    metrics = evaluate_model(
+        build_model(config),
+        loader,
+        device=torch.device("cpu"),
+    )
+
+    assert metrics["valid_observer_count"] == 4
+    assert metrics["observed_label_row_count_in_scope"] == 4
+    assert metrics["zero_uniform_baseline_gap_row_count"] == 4
+    assert metrics["uniform_non_self_baseline_kl_sum"] == pytest.approx(0.0)
+    assert torch.isfinite(torch.tensor(metrics["mean_belief_cross_entropy"]))
+    assert torch.isfinite(torch.tensor(metrics["mean_belief_kl_divergence"]))
+    assert "private_admissible_uniform_baseline_kl_sum" not in metrics
+
+
 def test_dense_game_batch_trains_every_pre_boundary(
     tmp_path, training_sample_factory
 ):
@@ -326,7 +376,14 @@ def test_dense_evaluation_excludes_unscored_game_without_losing_lineage(
     scored = training_sample_factory(game_id="scored_game")
     unscored = training_sample_factory(game_id="unscored_game")
     unscored["suspected_werewolves"] = {
-        observer: [] for observer in unscored["suspected_werewolves"]
+        observer: None for observer in unscored["suspected_werewolves"]
+    }
+    unscored["belief_status"] = {
+        observer: "parse_error" for observer in unscored["belief_status"]
+    }
+    unscored["belief_errors"] = {
+        observer: "synthetic failed report"
+        for observer in unscored["belief_errors"]
     }
     dataset = DenseTWDToMDataset([scored, unscored])
     loader = DataLoader(

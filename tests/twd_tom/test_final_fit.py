@@ -56,7 +56,7 @@ def _oof_summary(manifest):
             "dense_supervision": True,
             "supervision_scope": "all_alive",
             "speech_annotation_source": "v1",
-            "belief_annotation_source": "v1_empty_unobserved",
+            "belief_annotation_source": "v1_empty_uniform_nonself",
         },
         "folds": {
             fold_name: {"best_epoch": best_epoch}
@@ -100,7 +100,7 @@ def test_final_fit_cli_exposes_paths_and_runtime_only():
     assert config.input_feature_profile == "no_phase_day"
     assert config.supervision_scope == "all_alive"
     assert config.speech_annotation_source == "v1"
-    assert config.belief_annotation_source == "v1_empty_unobserved"
+    assert config.belief_annotation_source == "v1_empty_uniform_nonself"
 
 
 def test_final_fit_is_disabled_until_new_all_alive_oof_epochs_are_frozen(
@@ -192,6 +192,17 @@ def test_oof_validation_rejects_a_changed_fold_epoch(monkeypatch):
     assert [record["best_epoch"] for record in records] == list(
         SYNTHETIC_FOLD_BEST_EPOCHS
     )
+
+    old_semantics = json.loads(json.dumps(summary))
+    old_semantics["training_config"][
+        "belief_annotation_source"
+    ] = "v1_empty_unobserved"
+    with pytest.raises(ValueError, match="belief_annotation_source"):
+        _validate_oof_summary(
+            old_semantics,
+            fold_manifest=manifest,
+            config=config,
+        )
 
     changed = json.loads(json.dumps(summary))
     changed["folds"]["fold_2"]["best_epoch"] = 41

@@ -246,7 +246,7 @@ def test_dataset_selects_v2_speech_and_loss_mask_without_uniform_imputation(
     assert not item["observer_supervision_mask"][4]
     torch.testing.assert_close(item["belief_targets"], item["v2_belief_targets"])
     torch.testing.assert_close(
-        item["v1_empty_unobserved_belief_targets"],
+        item["v1_empty_uniform_nonself_belief_targets"],
         baseline["belief_targets"],
     )
 

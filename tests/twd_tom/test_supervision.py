@@ -334,7 +334,10 @@ def test_development_role_sidecar_lineage_failures_are_closed(
 def test_non_wolf_supervision_still_intersects_label_observation(
     suspicion_sample_factory,
 ):
-    sample = suspicion_sample_factory(observers=(1, 2, 3, 5))
+    sample = suspicion_sample_factory(
+        observers=(1, 2, 3, 5),
+        failed_observer=5,
+    )
     item = TWDToMDataset(
         [sample],
         observer_roles_by_game={sample["game_id"]: ROLES},

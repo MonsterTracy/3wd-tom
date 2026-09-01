@@ -19,7 +19,7 @@ from werewolf.models.twd_tom.dense_dataset import (
 from werewolf.trajectory import canonical_digest, canonical_json
 
 
-DENSE_AUDIT_SCHEMA_VERSION = "classic7_tom_v2_dense_pre_audit_v1"
+DENSE_AUDIT_SCHEMA_VERSION = "classic7_tom_v2_dense_pre_audit_v2"
 AUDITABLE_SPLITS = ("train", "validation")
 
 
@@ -112,6 +112,10 @@ def audit_dense_belief_dataset(
             "canonical_batch_summary_digest"
         ],
         "training_supervision": DENSE_SUPERVISION_VERSION,
+        "target_semantics": dataset.target_semantics,
+        "target_conversion": dataset.target_conversion,
+        "label_observation_semantics": dataset.label_observation_semantics,
+        "belief_annotation_source": dataset.belief_annotation_source,
         "max_seq_len": max_seq_len,
         "game_count": len(dataset),
         "boundary_count": dataset.boundary_count,

@@ -37,12 +37,12 @@ from werewolf.models.twd_tom.public_events import (
 from werewolf.models.twd_tom.schema import NUM_PLAYERS
 
 
-WORST_CASE_SCHEMA_VERSION = "classic7_tom_v2_worst_case_v2"
+WORST_CASE_SCHEMA_VERSION = "classic7_tom_v2_worst_case_v3"
 _JSON_FIELDS = {
     "public_history",
     "speech_annotations",
     "legacy_v1_target",
-    "v1_empty_unobserved_target",
+    "v1_empty_uniform_nonself_target",
     "v2_target",
     "model_prediction",
     "previous_boundary_target",
@@ -166,8 +166,8 @@ def export_belief_worst_cases(
                 legacy_v1_target = raw_batch["legacy_v1_belief_targets"][
                     batch_index, boundary_index
                 ]
-                v1_empty_unobserved_target = raw_batch[
-                    "v1_empty_unobserved_belief_targets"
+                v1_empty_uniform_nonself_target = raw_batch[
+                    "v1_empty_uniform_nonself_belief_targets"
                 ][
                     batch_index, boundary_index
                 ]
@@ -230,8 +230,8 @@ def export_belief_worst_cases(
                         "legacy_v1_target": (
                             legacy_v1_target[observer_index].tolist()
                         ),
-                        "v1_empty_unobserved_target": (
-                            v1_empty_unobserved_target[
+                        "v1_empty_uniform_nonself_target": (
+                            v1_empty_uniform_nonself_target[
                                 observer_index
                             ].tolist()
                         ),

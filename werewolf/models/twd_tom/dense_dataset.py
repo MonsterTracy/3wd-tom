@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from werewolf.models.twd_tom.action_features import PublicEventFeatureBuilder
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 from werewolf.models.twd_tom.dataset import (
     MODEL_INPUT_SCOPE,
@@ -72,7 +72,7 @@ class DenseTWDToMDataset(Dataset):
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
         speech_annotation_source: str = V1_ANNOTATION_SOURCE,
-        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         speech_v2_annotations: Mapping[
             tuple[str, int], Mapping[str, Any]
         ] | None = None,
@@ -252,15 +252,15 @@ class DenseTWDToMDataset(Dataset):
                     for snapshot in snapshots
                 ]
             ),
-            "v1_empty_unobserved_belief_targets": torch.stack(
+            "v1_empty_uniform_nonself_belief_targets": torch.stack(
                 [
-                    snapshot["v1_empty_unobserved_belief_targets"]
+                    snapshot["v1_empty_uniform_nonself_belief_targets"]
                     for snapshot in snapshots
                 ]
             ),
-            "v1_empty_unobserved_label_observed_mask": torch.stack(
+            "v1_empty_uniform_nonself_label_observed_mask": torch.stack(
                 [
-                    snapshot["v1_empty_unobserved_label_observed_mask"]
+                    snapshot["v1_empty_uniform_nonself_label_observed_mask"]
                     for snapshot in snapshots
                 ]
             ),
@@ -376,14 +376,14 @@ def collate_dense_twd_tom_games(
         (len(batch), max_boundaries, NUM_PLAYERS, NUM_PLAYERS)
     )
     legacy_v1_belief_targets = torch.zeros_like(belief_targets)
-    v1_empty_unobserved_belief_targets = torch.zeros_like(belief_targets)
+    v1_empty_uniform_nonself_belief_targets = torch.zeros_like(belief_targets)
     observer_alive_mask = torch.zeros(
         (len(batch), max_boundaries, NUM_PLAYERS), dtype=torch.bool
     )
     observer_scope_mask = torch.zeros_like(observer_alive_mask)
     label_observed_mask = torch.zeros_like(observer_alive_mask)
     legacy_v1_label_observed_mask = torch.zeros_like(observer_alive_mask)
-    v1_empty_unobserved_label_observed_mask = torch.zeros_like(
+    v1_empty_uniform_nonself_label_observed_mask = torch.zeros_like(
         observer_alive_mask
     )
     observer_supervision_mask = torch.zeros_like(observer_alive_mask)
@@ -442,10 +442,10 @@ def collate_dense_twd_tom_games(
         legacy_v1_belief_targets[batch_index, :boundary_count] = item[
             "legacy_v1_belief_targets"
         ]
-        v1_empty_unobserved_belief_targets[
+        v1_empty_uniform_nonself_belief_targets[
             batch_index, :boundary_count
         ] = item[
-            "v1_empty_unobserved_belief_targets"
+            "v1_empty_uniform_nonself_belief_targets"
         ]
         observer_alive_mask[batch_index, :boundary_count] = item[
             "observer_alive_mask"
@@ -459,10 +459,10 @@ def collate_dense_twd_tom_games(
         legacy_v1_label_observed_mask[batch_index, :boundary_count] = item[
             "legacy_v1_label_observed_mask"
         ]
-        v1_empty_unobserved_label_observed_mask[
+        v1_empty_uniform_nonself_label_observed_mask[
             batch_index, :boundary_count
         ] = item[
-            "v1_empty_unobserved_label_observed_mask"
+            "v1_empty_uniform_nonself_label_observed_mask"
         ]
         if v2_belief_targets is not None:
             v2_belief_targets[batch_index, :boundary_count] = item[
@@ -493,11 +493,11 @@ def collate_dense_twd_tom_games(
         "belief_targets": belief_targets,
         "legacy_v1_belief_targets": legacy_v1_belief_targets,
         "legacy_v1_label_observed_mask": legacy_v1_label_observed_mask,
-        "v1_empty_unobserved_belief_targets": (
-            v1_empty_unobserved_belief_targets
+        "v1_empty_uniform_nonself_belief_targets": (
+            v1_empty_uniform_nonself_belief_targets
         ),
-        "v1_empty_unobserved_label_observed_mask": (
-            v1_empty_unobserved_label_observed_mask
+        "v1_empty_uniform_nonself_label_observed_mask": (
+            v1_empty_uniform_nonself_label_observed_mask
         ),
         "observer_alive_mask": observer_alive_mask,
         "observer_scope_mask": observer_scope_mask,

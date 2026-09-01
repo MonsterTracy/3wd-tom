@@ -10,6 +10,14 @@ from script.twd_tom.materialize_canonical_belief_dataset import (
     materialize_canonical_belief_dataset,
 )
 from werewolf.models.twd_tom.dense_dataset import DENSE_SUPERVISION_VERSION
+from werewolf.models.twd_tom.annotation_v2 import (
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
+)
+from werewolf.models.twd_tom.dataset import (
+    LABEL_OBSERVATION_SEMANTICS,
+    TARGET_CONVERSION,
+    TARGET_SEMANTICS,
+)
 from werewolf.trajectory import canonical_digest
 
 
@@ -63,6 +71,14 @@ def test_dense_audit_reports_strict_pre_contract(
     assert report["schema_version"] == DENSE_AUDIT_SCHEMA_VERSION
     assert report["status"] == "PASS"
     assert report["training_supervision"] == DENSE_SUPERVISION_VERSION
+    assert report["target_semantics"] == TARGET_SEMANTICS
+    assert report["target_conversion"] == TARGET_CONVERSION
+    assert report["label_observation_semantics"] == (
+        LABEL_OBSERVATION_SEMANTICS
+    )
+    assert report["belief_annotation_source"] == (
+        V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE
+    )
     assert report["game_count"] == 1
     assert report["boundary_count"] == 1
     assert report["causal_contract"] == {
@@ -95,18 +111,18 @@ def test_dense_audit_distinguishes_alive_from_supervised_observers(
         split_name="train",
     )
 
-    # The fixture has four alive observers and one empty, unobserved label row.
+    # The fixture has four alive observers, including one observed empty report.
     assert report["alive_observer_count"] == 4
-    assert report["supervised_observer_count"] == 3
+    assert report["supervised_observer_count"] == 4
     assert report["alive_observers_per_game"] == {
         "min": 4,
         "max": 4,
         "mean": 4.0,
     }
     assert report["supervised_observers_per_game"] == {
-        "min": 3,
-        "max": 3,
-        "mean": 3.0,
+        "min": 4,
+        "max": 4,
+        "mean": 4.0,
     }
 
 

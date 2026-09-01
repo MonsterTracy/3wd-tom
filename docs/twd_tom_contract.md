@@ -12,8 +12,11 @@
 - raw sample：`classic7_pre_speech_player_suspicion_v7`；
 - label prompt：`classic7_pre_speech_player_suspicion_prompt_v6`；
 - label provenance：`alive_observer_readonly_pre_speech_report_v3`；
-- target conversion：`nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3`；
-- target semantics：`relative_suspicion_matrix_v1`；
+- raw collector projection lineage：`nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3`（只锁定 v7 raw provenance，不在采集时生成概率 target）；
+- Dataset target conversion：`nonempty_sparse_suspicion_uniform_support_empty_uniform_nonself_v4`；
+- target semantics：`relative_suspicion_matrix_empty_uniform_nonself_v2`；
+- formal belief annotation source：`v1_empty_uniform_nonself`；
+- label observation semantics：`successful_report_including_empty_is_observed_v2`；
 - public-only model input scope：`completed_structured_public_events_without_terminal_turn_start_v1`；
 - private-conditioned model input scope：`completed_structured_public_events_plus_observer_hard_knowledge_v1`；
 - public event：`classic7_public_event_sequence_v4`；
@@ -22,7 +25,7 @@
 - speech parser prompt：`classic7_speech_parser_v3`；
 - public speech realization prompt：`classic7_public_speech_realization_prompt_v1`。
 
-旧版本不做兼容读取或隐式迁移；需要重新采集。
+旧 raw schema 不做兼容读取或隐式迁移；需要重新采集。Dataset target conversion 是 raw 符号集合之后的派生契约，本次从 v3 到 v4 的修改直接复用合法 v7 raw、既有 split 和 development folds，不修改或迁移 raw artifact。
 
 ## 观察者
 
@@ -61,9 +64,9 @@ raw sample 保存 public history 的两个 digest、观察者集合、每个观�
 
 tom-v2 只有一个 Dataset。输入是同一时间边界的结构化公开历史和存活观察者集合；raw label 直接读取 playing-agent self-report 中的 `suspected_werewolves`，不经过 external annotation、public-only reporter、ToM1/ToM2 materialization 或旧 lineage adapter。
 
-Dataset 将每个观察者的合法非空怀疑集合确定性转换为长度 7 的稀疏 belief row：只在被列入的玩家上均分概率，其他玩家为 0。历史实验契约明确命名为 `legacy_v1`，其中空集合仍按旧实现插补为 hard-admissible non-self uniform；新契约明确命名为 `v1_empty_unobserved`，空集合保留在 canonical raw record 中，但派生监督标为 `label_observed=False`、target row 全零且不进入 CE/KL。二者具有不同的 target conversion、label-observation contract 和 checkpoint provenance，不得都简称为 V1。观察者自身对角线恒为 0。完整 target 为固定 `7×7`，行是 observer，列是 target player。
+Dataset 将每个观察者的成功报告确定性转换为长度 7 的 belief row。非空怀疑集合只在其 support 内均分概率；成功的空集合是有效且已观测的 label，对 observer `i` 固定转换为 `B[i,i]=0`、其余六列各为 `1/6`。历史实验契约仍明确命名为 `legacy_v1`；新正式契约唯一命名为 `v1_empty_uniform_nonself`。二者具有不同的 target conversion、label-observation contract 和 checkpoint provenance，不得都简称为 V1。完整 target 为固定 `7×7`，行是 observer，列是 target player。
 
-该矩阵的冻结语义是“相对怀疑质量”，不是每个玩家为狼的独立边缘概率，也不是两狼组合上的联合概率。只有 label-observed target row 在非自身怀疑支持集上分配单位质量；empty suspicion row 是 unobserved zero target，不进入 supervision。因此不能把 `B[i,j]=0.5` 解释为经过校准的 50% 狼人概率。checkpoint 以独立的 `target_semantics` 字段锁定这一解释，旧 checkpoint 不得隐式兼容。
+该矩阵的冻结语义是“相对怀疑质量”，不是每个玩家为狼的独立边缘概率，也不是两狼组合上的联合概率。每条成功报告都是 label-observed 且 row sum 为 1，包括 empty suspicion；只有真正 missing/failed 的报告使用全零 target 占位并标为 `label_observed=False`。失败状态必须同时携带 null suspicion 和非空错误，不得自动降级为空集合或 uniform target。checkpoint 以独立的 `target_semantics`、`target_conversion`、`label_observation_semantics` 和 `belief_annotation_source` 字段锁定这一解释，旧 OOF artifact 不得由新正式路径 resume。
 
 Dataset 输出：
 
@@ -71,7 +74,7 @@ Dataset 输出：
 - `observer_alive_mask`：`[7]` 布尔张量，只表示该时间点公开存活的 observer；
 - `diagonal_target_mask`：`[7, 7]` 布尔张量，只排除 observer 自身列。
 
-死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。public-only 模式下，raw sample 中的 hard knowledge 只用于 label 合法性，不进入模型特征。private-conditioned 模式使用同一份 raw sample，额外输出 `known_werewolf_mask[7,7]` 与 `known_non_werewolf_mask[7,7]`；每行只编码该 observer 在当前 PRE 边界已经拥有并完成规则闭包的 `K+ / K-`。它不加入 `self_role`、全局角色真值、其他 observer 的 observation、未来信息或重构标签。两个 knowledge mask 必须成对出现、互斥，并与公开事件及 target 一起执行同一个座位循环旋转。正式路径固定 `observer_scope_mask = observer_alive_mask`，因此 `observer_supervision_mask = observer_alive_mask & label_observed_mask`。真实角色不参与正式训练、validation 或 sealed population 的选择，存活且标签可观测的狼人 observer 同样进入监督。role-scoped mask 与 role sidecar 仅属于显式 diagnostics，不得进入正式 OOF、final fit 或 sealed evaluation。训练 Dataset 对非 `ok` 的存活 observer 直接失败，不补猜。
+死亡玩家仍是合法 target，因此不得根据存活状态屏蔽 target 列。public-only 模式下，raw sample 中的 hard knowledge 只用于非空 label 合法性，不进入模型特征；empty 成功报告的 uniform non-self target 不依据 hard knowledge 缩窄。private-conditioned 模式使用同一份 raw sample，额外输出 `known_werewolf_mask[7,7]` 与 `known_non_werewolf_mask[7,7]`；每行只编码该 observer 在当前 PRE 边界已经拥有并完成规则闭包的 `K+ / K-`。它不加入 `self_role`、全局角色真值、其他 observer 的 observation、未来信息或重构标签。两个 knowledge mask 必须成对出现、互斥，并与公开事件及 target 一起执行同一个座位循环旋转。正式路径固定 `observer_scope_mask = observer_alive_mask`，因此 `observer_supervision_mask = observer_alive_mask & label_observed_mask`。真实角色不参与正式训练、validation 或 sealed population 的选择，存活且标签可观测的狼人 observer 同样进入监督。role-scoped mask 与 role sidecar 仅属于显式 diagnostics，不得进入正式 OOF、final fit 或 sealed evaluation。合法的 non-`ok` 报告只产生 unobserved zero placeholder；canonical collector 和 canonical audit 仍 fail-closed，不允许这些失败行进入正式数据。
 
 ## Speaker cognition 同源契约
 
@@ -103,9 +106,9 @@ strict realization 会拒绝空白/截断、非法 `playerN`、结构或控制�
 
 模型有两条显式且互不兼容的 checkpoint 契约。public-only 路径只输入由 public event 与对应 speech annotation 投影出的已经完成的结构化 `public_history < t`；private-conditioned 路径在完全相同的公开输入上，为每个 observer query 加入其自身 `K+ / K-` 的相对座位 embedding 之和。两条路径都不编码自然语言 `raw_text`，共享七个 canonical observer query 参数，且 raw snapshot 的末尾 `turn_start` 不进入特征。私有 embedding 只改变 query representation；它不修改 target、不屏蔽 logits、不重写模型响应，也不增加规则型输出兜底。输出始终为 `belief_logits[B, 7, 7]`，直接对应同一个 `belief_targets[B, 7, 7]`。
 
-对每个存活且标签可观测的 observer，在六个非自身 target 位置上计算 soft-target cross entropy；其中 hard knowledge 不允许的列已有 target 概率为 0。batch loss 是 `observer_alive_mask & label_observed_mask` 所有行的算术平均。死亡或标签未观测的 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。训练和 checkpoint 选择只使用这一 CE 目标；评估额外报告 target entropy 以及 `KL=CE-H(target)`，用于把标签本身的不确定性与模型相对怀疑质量区分开。不存在第二个 KL loss。checkpoint、metrics、train 和 eval 不保存旧任务阶数或组合类别字段。
+对每个存活且标签可观测的 observer，在六个非自身 target 位置上计算 soft-target cross entropy。显式非空 self-report 的 support 必须在上游通过 observer hard knowledge 合法性校验；successful-empty 的 projected target 则固定在全部六个非自身位置各取 `1/6`，即使其中包含该 observer 的 `K-` 位置。generic projected-target metrics 只校验有限、非负、行和为 1、自身概率为 0 以及 supervision mask 合法性，不把 private hard knowledge 当作 target validity condition。batch loss 是 `observer_alive_mask & label_observed_mask` 所有行的算术平均。死亡或标签未观测的 observer 行不参与监督，死亡 player 列仍参与其他 observer 的分布。训练和 checkpoint 选择只使用这一 CE 目标；评估额外报告 target entropy 以及 `KL=CE-H(target)`，用于把标签本身的不确定性与模型相对怀疑质量区分开。不存在第二个 KL loss。checkpoint、metrics、train 和 eval 不保存旧任务阶数或组合类别字段。
 
-评估中的 top-1 指标定义为预测最高概率集合是否与 soft target 的正概率支持集相交，不再把 `target.argmax()` 当作唯一类别。两条路径都报告六个非自身玩家均匀分布的固定 baseline。private-conditioned 路径还报告 `private_admissible_uniform`：对每个 observer 排除自身与 `K-` 后在剩余 target 上均分。私有模型的主 reducible-gap 指标必须相对这一更强 baseline 计算，不能把硬知识已经排除的候选当成模型学到的收益；CE loss 本身仍在全部六个非自身位置上计算。
+评估中的 top-1 指标定义为预测最高概率集合是否与 soft target 的正概率支持集相交，不再把 `target.argmax()` 当作唯一类别。正式公共指标报告六个非自身玩家均匀分布的固定 baseline；successful-empty target 与它完全一致，因此该行的 baseline KL 为 0 且仍进入 CE、KL 和 supervised count。`private_admissible_uniform` 只属于显式 private diagnostic：它对每个 observer 排除自身与 `K-` 后在剩余 target 上均分，并且只在全部受监督 target support 都位于该 admissible set 时有定义。若 successful-empty target 在 `K-` 位置具有正质量，该 diagnostic 必须 fail-closed，不得通过 epsilon、过滤行或重写 target 继续计算；它不进入正式公共 metric wiring，也不约束正式 target 的合法性。
 
 `PrefixBeliefPredictor` 与 Dataset 共用同一个 strict-PRE 截断。public-only checkpoint 每次按完整公开历史重算并输出完整 `belief_matrix[7,7]`。private-conditioned checkpoint 只允许 `predict_observer()`：调用方必须显式传入当前 actor 自己的闭包后 `K+ / K-`，接口只返回该 observer 的长度 7 向量，避免 gameplay 调用方意外把其他角色私有信息拼入当前 actor 视角。两者都不缓存或递推 belief state，也不把预测解释为校准的独立狼人概率。
 

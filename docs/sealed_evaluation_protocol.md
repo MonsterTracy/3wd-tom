@@ -30,11 +30,12 @@ recovery policy; there is no automatic retry or fallback.
 Evaluation uses `model.eval()` under `torch.inference_mode()`. It creates no
 optimizer or scheduler, calls no backward pass, performs no selection or
 tuning, and never writes a checkpoint. It uses dense V1 public speech,
-`v1_empty_unobserved` belief labels, the `no_phase_day` input profile, and
+`v1_empty_uniform_nonself` belief labels, the `no_phase_day` input profile, and
 `all_alive` supervision. The evaluation population is exactly
 `observer_alive_mask & label_observed_mask`; it does not load a role sidecar or
-inspect ground-truth roles. Empty/unobserved rows remain zero targets and are
-excluded from all distribution metrics.
+inspect ground-truth roles. Successful empty rows use the uniform non-self
+target and remain in all distribution metrics. Only genuinely missing/failed
+rows remain zero targets and are excluded.
 
 One successful run places exactly these JSON artifacts in its output directory:
 

@@ -26,7 +26,7 @@ def suspicion_set_to_belief_vector(
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
-    """Convert a legal suspicion set to one sparse seven-player row."""
+    """Convert a legal suspicion set to one seven-player belief row."""
 
     if not isinstance(dtype, torch.dtype) or not dtype.is_floating_point:
         raise TypeError("dtype must be a floating-point torch dtype")
@@ -41,12 +41,9 @@ def suspicion_set_to_belief_vector(
         closed_non_wolves,
         observer_id=observer,
     )
-    if not suspected:
-        raise ValueError(
-            "empty suspicion is an unobserved label, not a probability distribution"
-        )
     target = torch.zeros(NUM_PLAYERS, dtype=dtype, device=device)
-    for player in suspected:
+    support = suspected or [player for player in PLAYER_NAMES if player != observer]
+    for player in support:
         target[PLAYER_TO_ID[player] - 1] = 1.0
     if target.sum().item() == 0.0:
         raise RuntimeError("hard knowledge leaves no admissible target player")

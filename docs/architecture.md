@@ -40,7 +40,7 @@ flowchart LR
 - online shadow inference；
 - tom-v1 formal reporter 与 pilot pipeline。
 
-Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；空集合保留为 raw self-report，但派生监督标为 unobserved、target row 全零，不进入 CE/KL。正式 `observer_supervision_mask` 固定为 `observer_alive_mask & label_observed_mask`；它不读取 role truth，存活且标签可观测的狼人 observer 也在正式 population 中。`diagonal_target_mask` 只排除自身列，死亡玩家仍保留为 target。公开模型不返回 hard knowledge；一阶私有模型与 role-scoped mask 只保留为独立 diagnostics，不进入正式 OOF/final/sealed。
+Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = known_werewolves - {observer}`，`F = known_non_werewolves ∪ {observer}`：合法 self-report 必须满足 `R ⊆ suspected_werewolves` 且与 `F` 不相交。非空集合只在集合成员上均分；成功空集合是 observed label，target 在六个非自身座位上各为 `1/6`。只有真正 missing/failed 的报告才使用 unobserved zero placeholder 并退出 CE/KL。正式 `observer_supervision_mask` 固定为 `observer_alive_mask & label_observed_mask`；它不读取 role truth，存活且标签可观测的狼人 observer 也在正式 population 中。`diagonal_target_mask` 只排除自身列，死亡玩家仍保留为 target。公开模型不返回 hard knowledge；一阶私有模型与 role-scoped mask 只保留为独立 diagnostics，不进入正式 OOF/final/sealed。
 
 ## 模型目标
 
@@ -55,4 +55,4 @@ Dataset 的公开序列特征始终只来自结构化公开事件。设 `R = kno
 
 模型选择只在原 train+validation 组成的开发集上执行正式 public-only、all-alive 5-fold OOF。每局恰好作为一次 fold validation；原 test 六局不复制进 fold，也不被 OOF 入口读取。报告同时给出逐局模型指标、训练集 global/phase prior、observer-weighted 聚合以及以 game 为重采样单位的 bootstrap CI。在 fixed-state repeatability ceiling 建立前，`0.50` 只作描述性参考值，不是自动通过/失败门槛。Annotation V2、private-conditioned 与 role-scoped OOF 只能通过显式 diagnostic 入口运行，其产物不能作为正式 final-fit epoch selection source。
 
-在 `v1_empty_unobserved` 或 V2 mask 下，某个游戏可能没有任何观测到的监督行。此类游戏保留在 split/OOF 覆盖关系中，但其指标标为未定义并从所有性能分母排除；报告单独公开 scored/unscored game 数与 ID。该规则只是缺失标签语义，不是模型或标签 fallback，且不会放宽全数据无监督时的失败检查。
+在 `v1_empty_uniform_nonself` 下，成功的空报告仍是观测到的监督行；只有真实 missing/failed report（或显式 V2 loss mask）可能使某个游戏没有任何监督行。此类游戏保留在 split/OOF 覆盖关系中，但其指标标为未定义并从所有性能分母排除；报告单独公开 scored/unscored game 数与 ID。该规则只是缺失标签语义，不是模型或标签 fallback，且不会放宽全数据无监督时的失败检查。

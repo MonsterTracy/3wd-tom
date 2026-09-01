@@ -212,9 +212,6 @@ def _evaluate_prior_for_game(
         observer_supervision_mask=item["observer_supervision_mask"],
         observer_scope_mask=item["observer_scope_mask"],
         label_observed_mask=item["label_observed_mask"],
-        known_non_werewolf_mask=item[
-            "supervision_known_non_werewolf_mask"
-        ],
     )
 
 

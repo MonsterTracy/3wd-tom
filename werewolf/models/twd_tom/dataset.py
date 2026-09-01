@@ -17,7 +17,7 @@ from werewolf.models.twd_tom.annotation_v2 import (
     LEGACY_V1_BELIEF_SOURCE,
     SPEECH_ANNOTATION_SOURCES,
     V1_ANNOTATION_SOURCE,
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
     V2_ANNOTATION_SOURCE,
     apply_speech_v2_to_sample,
     belief_v2_targets_for_sample,
@@ -63,7 +63,12 @@ from werewolf.models.twd_tom.speech_annotations import (
     normalize_speech_annotations,
     speech_annotation_digest,
 )
-from werewolf.speech.private_belief_perceiver import STATUS_OK
+from werewolf.speech.private_belief_perceiver import (
+    STATUS_OK,
+    STATUS_PARSE_ERROR,
+    STATUS_REPORTER_ERROR,
+    STATUS_SEMANTIC_ERROR,
+)
 
 
 MODEL_INPUT_SCOPE = (
@@ -76,17 +81,17 @@ PRIVATE_FEATURE_FIELDS = (
     "known_werewolves",
     "known_non_werewolves",
 )
-TARGET_SEMANTICS = "relative_suspicion_matrix_v1"
+TARGET_SEMANTICS = "relative_suspicion_matrix_empty_uniform_nonself_v2"
 TARGET_CONVERSION = (
-    "nonempty_sparse_suspicion_uniform_support_empty_unobserved_v3"
+    "nonempty_sparse_suspicion_uniform_support_empty_uniform_nonself_v4"
 )
-LEGACY_V1_TARGET_SEMANTICS = TARGET_SEMANTICS
+LEGACY_V1_TARGET_SEMANTICS = "relative_suspicion_matrix_v1"
 LEGACY_V1_TARGET_CONVERSION = (
     "hard_knowledge_consistent_sparse_suspicion_uniform_support_v2"
 )
 V2_TARGET_SEMANTICS = "relative_suspicion_distribution_v2_compat_v1"
 V2_TARGET_CONVERSION = "annotation_v2_distribution_loss_mask_v1"
-LABEL_OBSERVATION_SEMANTICS = "empty_suspicion_is_unobserved_v1"
+LABEL_OBSERVATION_SEMANTICS = "successful_report_including_empty_is_observed_v2"
 LEGACY_V1_LABEL_OBSERVATION_SEMANTICS = (
     "empty_suspicion_imputed_uniform_legacy_v1"
 )
@@ -318,22 +323,13 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         )
         for field_name in _SUBJECT_MAPPING_FIELDS
     }
-    v1_empty_unobserved_targets: dict[str, torch.Tensor] = {}
+    v1_empty_uniform_nonself_targets: dict[str, torch.Tensor] = {}
     legacy_v1_targets: dict[str, torch.Tensor] = {}
     label_observed: dict[str, bool] = {}
     for subject in sorted(expected_subjects, key=PLAYER_TO_ID.__getitem__):
         status = mappings["belief_status"][subject]
         error = mappings["belief_errors"][subject]
         suspicion = mappings["suspected_werewolves"][subject]
-        if status != STATUS_OK:
-            raise ValueError(
-                "training Dataset requires status=ok for every alive observer"
-            )
-        if error is not None:
-            raise ValueError(f"{subject} status=ok requires null belief error")
-        if not isinstance(suspicion, list):
-            raise ValueError(f"{subject} status=ok requires a suspicion list")
-
         known_wolves = mappings["known_werewolves"][subject]
         known_non_wolves = mappings["known_non_werewolves"][subject]
         closed_wolves, closed_non_wolves = close_hard_knowledge(
@@ -342,43 +338,66 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
         )
         if known_wolves != closed_wolves or known_non_wolves != closed_non_wolves:
             raise ValueError(f"{subject} hard knowledge must already be closed")
-        normalized_suspicion = validate_player_suspicion(
-            suspicion,
-            closed_wolves,
-            closed_non_wolves,
-            observer_id=subject,
-        )
-        if suspicion != normalized_suspicion:
-            raise ValueError(
-                f"{subject} suspected_werewolves must use canonical order"
-            )
         _require_non_empty_text(
             mappings["agent_backend_ids"][subject],
             field_name=f"{subject} agent_backend_id",
         )
-        label_observed[subject] = bool(normalized_suspicion)
-        v1_empty_unobserved_targets[subject] = (
-            suspicion_set_to_belief_vector(
-                normalized_suspicion,
+        if status == STATUS_OK:
+            if error is not None:
+                raise ValueError(f"{subject} status=ok requires null belief error")
+            if not isinstance(suspicion, list):
+                raise ValueError(f"{subject} status=ok requires a suspicion list")
+            normalized_suspicion = validate_player_suspicion(
+                suspicion,
+                closed_wolves,
+                closed_non_wolves,
                 observer_id=subject,
-                known_werewolves=closed_wolves,
-                known_non_werewolves=closed_non_wolves,
+            )
+            if suspicion != normalized_suspicion:
+                raise ValueError(
+                    f"{subject} suspected_werewolves must use canonical order"
+                )
+            label_observed[subject] = True
+            v1_empty_uniform_nonself_targets[subject] = (
+                suspicion_set_to_belief_vector(
+                    normalized_suspicion,
+                    observer_id=subject,
+                    known_werewolves=closed_wolves,
+                    known_non_werewolves=closed_non_wolves,
+                    dtype=torch.float64,
+                )
+            )
+            legacy_v1_targets[subject] = (
+                v1_empty_uniform_nonself_targets[subject].clone()
+                if normalized_suspicion
+                else legacy_v1_suspicion_set_to_belief_vector(
+                    normalized_suspicion,
+                    observer_id=subject,
+                    known_werewolves=closed_wolves,
+                    known_non_werewolves=closed_non_wolves,
+                    dtype=torch.float64,
+                )
+            )
+        elif status in {
+            STATUS_PARSE_ERROR,
+            STATUS_REPORTER_ERROR,
+            STATUS_SEMANTIC_ERROR,
+        }:
+            if suspicion is not None:
+                raise ValueError(f"{subject} failed report requires null suspicion")
+            if not isinstance(error, str) or not error:
+                raise ValueError(f"{subject} failed report requires an error")
+            label_observed[subject] = False
+            v1_empty_uniform_nonself_targets[subject] = torch.zeros(
+                NUM_PLAYERS,
                 dtype=torch.float64,
             )
-            if normalized_suspicion
-            else torch.zeros(NUM_PLAYERS, dtype=torch.float64)
-        )
-        legacy_v1_targets[subject] = (
-            v1_empty_unobserved_targets[subject].clone()
-            if normalized_suspicion
-            else legacy_v1_suspicion_set_to_belief_vector(
-                normalized_suspicion,
-                observer_id=subject,
-                known_werewolves=closed_wolves,
-                known_non_werewolves=closed_non_wolves,
+            legacy_v1_targets[subject] = torch.zeros(
+                NUM_PLAYERS,
                 dtype=torch.float64,
             )
-        )
+        else:
+            raise ValueError(f"{subject} has unsupported belief status")
 
     public_events = normalize_public_events(sample.get("public_events"))
     completed_pre_speech_public_events(
@@ -443,8 +462,8 @@ def _normalize_sample(sample: Any) -> dict[str, Any]:
     normalized["speech_annotations"] = speech_annotations
     for field_name, value in mappings.items():
         normalized[field_name] = value
-    normalized["_v1_empty_unobserved_belief_targets"] = (
-        v1_empty_unobserved_targets
+    normalized["_v1_empty_uniform_nonself_belief_targets"] = (
+        v1_empty_uniform_nonself_targets
     )
     normalized["_legacy_v1_belief_targets"] = legacy_v1_targets
     normalized["_label_observed"] = label_observed
@@ -487,7 +506,7 @@ class TWDToMDataset(Dataset):
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
         speech_annotation_source: str = V1_ANNOTATION_SOURCE,
-        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         speech_v2_annotations: Mapping[
             tuple[str, int], Mapping[str, Any]
         ] | None = None,
@@ -643,7 +662,7 @@ class TWDToMDataset(Dataset):
         observer_roles_by_game: Mapping[str, Mapping[str, str]] | None = None,
         supervision_scope: str = ALL_ALIVE_SCOPE,
         speech_annotation_source: str = V1_ANNOTATION_SOURCE,
-        belief_annotation_source: str = V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        belief_annotation_source: str = V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         speech_v2_annotations: Mapping[
             tuple[str, int], Mapping[str, Any]
         ] | None = None,
@@ -704,12 +723,12 @@ class TWDToMDataset(Dataset):
             model_public_events,
             sample["speech_annotations"],
         )
-        v1_empty_unobserved_belief_targets = torch.zeros(
+        v1_empty_uniform_nonself_belief_targets = torch.zeros(
             (NUM_PLAYERS, NUM_PLAYERS),
             dtype=self.target_dtype,
         )
         legacy_v1_belief_targets = torch.zeros_like(
-            v1_empty_unobserved_belief_targets
+            v1_empty_uniform_nonself_belief_targets
         )
         observer_alive_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
         v1_label_observed_mask = torch.zeros(NUM_PLAYERS, dtype=torch.bool)
@@ -720,8 +739,8 @@ class TWDToMDataset(Dataset):
         for observer_id in sample["observer_ids"]:
             subject = normalize_player(observer_id)
             row_index = observer_id - 1
-            v1_empty_unobserved_belief_targets[row_index] = sample[
-                "_v1_empty_unobserved_belief_targets"
+            v1_empty_uniform_nonself_belief_targets[row_index] = sample[
+                "_v1_empty_uniform_nonself_belief_targets"
             ][subject].to(dtype=self.target_dtype)
             legacy_v1_belief_targets[row_index] = sample[
                 "_legacy_v1_belief_targets"
@@ -758,9 +777,9 @@ class TWDToMDataset(Dataset):
             label_observed_mask = v2_label_observed_mask
         elif self.belief_annotation_source == LEGACY_V1_BELIEF_SOURCE:
             belief_targets = legacy_v1_belief_targets
-            label_observed_mask = observer_alive_mask.clone()
+            label_observed_mask = v1_label_observed_mask
         else:
-            belief_targets = v1_empty_unobserved_belief_targets
+            belief_targets = v1_empty_uniform_nonself_belief_targets
             label_observed_mask = v1_label_observed_mask
 
         observer_scope_mask = build_observer_supervision_mask(
@@ -786,16 +805,24 @@ class TWDToMDataset(Dataset):
             ),
             "raw_support_size": [
                 (
-                    int((belief_targets[player_id - 1] > 0).sum().item())
-                    if observer_alive_mask[player_id - 1]
+                    len(sample["suspected_werewolves"][normalize_player(player_id)])
+                    if isinstance(
+                        sample["suspected_werewolves"].get(normalize_player(player_id)),
+                        list,
+                    )
                     else None
                 )
                 for player_id in range(1, NUM_PLAYERS + 1)
             ],
             "raw_empty": [
                 (
-                    not bool(label_observed_mask[player_id - 1])
-                    if observer_alive_mask[player_id - 1]
+                    not bool(
+                        sample["suspected_werewolves"][normalize_player(player_id)]
+                    )
+                    if isinstance(
+                        sample["suspected_werewolves"].get(normalize_player(player_id)),
+                        list,
+                    )
                     else None
                 )
                 for player_id in range(1, NUM_PLAYERS + 1)
@@ -839,11 +866,11 @@ class TWDToMDataset(Dataset):
             **features,
             "belief_targets": belief_targets,
             "legacy_v1_belief_targets": legacy_v1_belief_targets,
-            "legacy_v1_label_observed_mask": observer_alive_mask.clone(),
-            "v1_empty_unobserved_belief_targets": (
-                v1_empty_unobserved_belief_targets
+            "legacy_v1_label_observed_mask": v1_label_observed_mask.clone(),
+            "v1_empty_uniform_nonself_belief_targets": (
+                v1_empty_uniform_nonself_belief_targets
             ),
-            "v1_empty_unobserved_label_observed_mask": (
+            "v1_empty_uniform_nonself_label_observed_mask": (
                 v1_label_observed_mask
             ),
             "observer_alive_mask": observer_alive_mask,
@@ -877,8 +904,8 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         "belief_targets",
         "legacy_v1_belief_targets",
         "legacy_v1_label_observed_mask",
-        "v1_empty_unobserved_belief_targets",
-        "v1_empty_unobserved_label_observed_mask",
+        "v1_empty_uniform_nonself_belief_targets",
+        "v1_empty_uniform_nonself_label_observed_mask",
         "observer_alive_mask",
         "observer_scope_mask",
         "label_observed_mask",
@@ -929,12 +956,12 @@ def collate_twd_tom_samples(batch: Sequence[Mapping[str, Any]]) -> dict[str, Any
         "legacy_v1_label_observed_mask": torch.stack(
             [item["legacy_v1_label_observed_mask"] for item in batch]
         ),
-        "v1_empty_unobserved_belief_targets": torch.stack(
-            [item["v1_empty_unobserved_belief_targets"] for item in batch]
+        "v1_empty_uniform_nonself_belief_targets": torch.stack(
+            [item["v1_empty_uniform_nonself_belief_targets"] for item in batch]
         ),
-        "v1_empty_unobserved_label_observed_mask": torch.stack(
+        "v1_empty_uniform_nonself_label_observed_mask": torch.stack(
             [
-                item["v1_empty_unobserved_label_observed_mask"]
+                item["v1_empty_uniform_nonself_label_observed_mask"]
                 for item in batch
             ]
         ),

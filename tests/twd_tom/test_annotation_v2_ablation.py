@@ -8,7 +8,7 @@ from werewolf.models.twd_tom.belief_backbone import (
     NO_PHASE_DAY_INPUT_FEATURE_PROFILE,
 )
 from werewolf.models.twd_tom.annotation_v2 import (
-    V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+    V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
 )
 
 
@@ -58,7 +58,7 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
     assert len(calls) == 8
     assert {call["speech_annotation_source"] for call in calls} == {"v1", "v2"}
     assert {call["belief_annotation_source"] for call in calls} == {
-        V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
+        V1_EMPTY_UNIFORM_NONSELF_BELIEF_SOURCE,
         "v2",
     }
     assert {call["supervision_scope"] for call in calls} == {
@@ -73,7 +73,7 @@ def test_ablation_runs_fixed_2x2_for_nonwolf_and_villager(
     assert result["benchmark_status"] == "exploratory_diagnostic"
     assert result["repeatability_audit"]["status"] == "not_provided"
     assert result["experiments"][
-        "speech_v1_belief_v1_empty_unobserved"
+        "speech_v1_belief_v1_empty_uniform_nonself"
     ]["non_wolf_alive"]["oof_unscored_game_count"] == 1
     assert (tmp_path / "output" / "annotation_v2_ablation_table.md").is_file()
 

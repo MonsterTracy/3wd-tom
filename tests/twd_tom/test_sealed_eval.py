@@ -32,7 +32,7 @@ def _valid_checkpoint():
         "schema_version": sealed_module.SAMPLE_SCHEMA_VERSION,
         "backbone": "qwen2_model",
         "speech_annotation_source": "v1",
-        "belief_annotation_source": "v1_empty_unobserved",
+        "belief_annotation_source": "v1_empty_uniform_nonself",
         "supervision_scope": "all_alive",
         "epoch": sealed_module.FROZEN_EPOCH,
         "validation_dataset_used": False,
@@ -46,7 +46,7 @@ def _valid_checkpoint():
             "backbone": "qwen2_model",
             "input_feature_profile": "no_phase_day",
             "speech_annotation_source": "v1",
-            "belief_annotation_source": "v1_empty_unobserved",
+            "belief_annotation_source": "v1_empty_uniform_nonself",
             "supervision_scope": "all_alive",
             "fit_epochs": sealed_module.FROZEN_EPOCH,
             "seed": 42,
@@ -329,7 +329,7 @@ def test_formal_all_alive_mask_includes_an_observed_living_wolf(
         [sample],
         supervision_scope="all_alive",
         speech_annotation_source="v1",
-        belief_annotation_source="v1_empty_unobserved",
+        belief_annotation_source="v1_empty_uniform_nonself",
     )
     row = dataset[0]
     assert torch.equal(
@@ -341,9 +341,11 @@ def test_formal_all_alive_mask_includes_an_observed_living_wolf(
     assert bool(row["observer_alive_mask"][0, 0])
     assert bool(row["label_observed_mask"][0, 0])
     assert bool(row["observer_supervision_mask"][0, 0])
-    assert torch.equal(row["belief_targets"][0, 4], torch.zeros(7))
-    assert not bool(row["label_observed_mask"][0, 4])
-    assert not bool(row["observer_supervision_mask"][0, 4])
+    assert row["belief_targets"][0, 4].tolist() == pytest.approx(
+        [1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 0.0, 1.0 / 6.0, 1.0 / 6.0]
+    )
+    assert bool(row["label_observed_mask"][0, 4])
+    assert bool(row["observer_supervision_mask"][0, 4])
 
 
 def test_metric_formula_matches_corrected_oof_synthetic_case():
@@ -483,7 +485,7 @@ def test_synthetic_six_game_one_shot_run_writes_only_audit_artifacts(
         label_observation_semantics = None
         supervision_scope = "all_alive"
         speech_annotation_source = "v1"
-        belief_annotation_source = "v1_empty_unobserved"
+        belief_annotation_source = "v1_empty_uniform_nonself"
 
         def __len__(self):
             return 6

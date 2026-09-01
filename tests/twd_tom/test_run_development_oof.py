@@ -321,6 +321,20 @@ def test_formal_completed_fold_exact_config_can_resume():
     )
 
 
+def test_formal_completed_fold_rejects_old_empty_unobserved_target_semantics():
+    requested = _formal_completed_fold_config()
+    existing = dict(requested)
+    existing["belief_annotation_source"] = "v1_empty_unobserved"
+
+    with pytest.raises(ValueError, match="belief_annotation_source"):
+        oof_module._validate_completed_fold_summary(
+            _completed_fold_summary(existing),
+            fold_name="fold_0",
+            requested=requested,
+            expected_run_provenance=_formal_resume_provenance(),
+        )
+
+
 def test_diagnostic_completed_fold_exact_provenance_can_resume():
     requested = _formal_completed_fold_config()
     requested["role_sidecar_path"] = "/diagnostic/roles.json"

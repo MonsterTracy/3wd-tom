@@ -8,14 +8,21 @@ from werewolf.models.twd_tom.belief_labels import (
 )
 
 
-def test_empty_suspicion_is_unobserved_not_a_uniform_distribution():
-    with pytest.raises(ValueError, match="unobserved label"):
-        suspicion_set_to_belief_vector(
-            [],
-            observer_id="player7",
-            known_werewolves=[],
-            known_non_werewolves=["player2", "player7"],
-        )
+@pytest.mark.parametrize("observer_id", range(1, 8))
+def test_empty_suspicion_is_uniform_over_all_six_nonself_players(observer_id):
+    target = suspicion_set_to_belief_vector(
+        [],
+        observer_id=observer_id,
+        known_werewolves=[],
+        known_non_werewolves=[f"player{observer_id}"],
+        dtype=torch.float64,
+    )
+    expected = torch.full((7,), 1.0 / 6.0, dtype=torch.float64)
+    expected[observer_id - 1] = 0.0
+
+    torch.testing.assert_close(target, expected)
+    assert target[observer_id - 1].item() == 0.0
+    assert target.sum().item() == pytest.approx(1.0)
 
 
 def test_legacy_v1_preserves_historical_empty_to_uniform_conversion():

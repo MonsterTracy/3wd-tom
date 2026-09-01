@@ -121,10 +121,6 @@ def test_each_observed_alive_row_matches_the_deterministic_conversion(
     item = TWDToMDataset([sample], target_dtype=torch.float64)[0]
     for observer_id in sample["observer_ids"]:
         subject = f"player{observer_id}"
-        if not sample["suspected_werewolves"][subject]:
-            assert not item["label_observed_mask"][observer_id - 1]
-            assert torch.count_nonzero(item["belief_targets"][observer_id - 1]) == 0
-            continue
         expected = suspicion_set_to_belief_vector(
             sample["suspected_werewolves"][subject],
             observer_id=subject,
@@ -132,15 +128,17 @@ def test_each_observed_alive_row_matches_the_deterministic_conversion(
             known_non_werewolves=sample["known_non_werewolves"][subject],
             dtype=torch.float64,
         )
+        assert item["label_observed_mask"][observer_id - 1]
         torch.testing.assert_close(item["belief_targets"][observer_id - 1], expected)
 
 
-def test_legacy_v1_is_distinct_from_empty_unobserved_v1(
+def test_legacy_v1_is_distinct_from_empty_uniform_nonself_v1(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
         suspicions_by_observer={1: ["player3"], 2: []}
     )
+    sample["known_non_werewolves"]["player2"] = ["player2", "player4"]
     current = TWDToMDataset([sample], target_dtype=torch.float64)[0]
     legacy = TWDToMDataset(
         [sample],
@@ -155,8 +153,10 @@ def test_legacy_v1_is_distinct_from_empty_unobserved_v1(
         dtype=torch.float64,
     )
 
-    assert not current["label_observed_mask"][1]
-    assert torch.count_nonzero(current["belief_targets"][1]) == 0
+    assert current["label_observed_mask"][1]
+    assert current["belief_targets"][1].tolist() == pytest.approx(
+        [1.0 / 6.0, 0.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
+    )
     assert legacy["label_observed_mask"][1]
     torch.testing.assert_close(legacy["belief_targets"][1], expected)
     assert current["metadata"]["belief_annotation_source"] != (
@@ -164,6 +164,9 @@ def test_legacy_v1_is_distinct_from_empty_unobserved_v1(
     )
     assert current["metadata"]["target_conversion"] != (
         legacy["metadata"]["target_conversion"]
+    )
+    assert current["metadata"]["target_semantics"] != (
+        legacy["metadata"]["target_semantics"]
     )
 
 
@@ -367,9 +370,35 @@ def test_old_materialized_lineage_is_rejected(suspicion_sample_factory):
         TWDToMDataset([sample])
 
 
-def test_non_ok_alive_self_report_is_rejected(suspicion_sample_factory):
+def test_non_ok_alive_self_report_is_unobserved_without_imputation(
+    suspicion_sample_factory,
+):
     sample = suspicion_sample_factory(failed_observer=3)
-    with pytest.raises(ValueError, match="status=ok for every alive observer"):
+    item = TWDToMDataset([sample])[0]
+
+    assert item["observer_alive_mask"][2]
+    assert not item["label_observed_mask"][2]
+    assert not item["observer_supervision_mask"][2]
+    assert item["belief_targets"][2].tolist() == pytest.approx([0.0] * 7)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "message"),
+    [
+        ("suspected_werewolves", [], "requires null suspicion"),
+        ("belief_errors", None, "requires an error"),
+    ],
+)
+def test_failed_report_cannot_fall_back_to_empty_uniform(
+    suspicion_sample_factory,
+    field_name,
+    invalid_value,
+    message,
+):
+    sample = suspicion_sample_factory(failed_observer=3)
+    sample[field_name]["player3"] = invalid_value
+
+    with pytest.raises(ValueError, match=message):
         TWDToMDataset([sample])
 
 
@@ -400,7 +429,7 @@ def test_dataset_rejects_suspicion_that_contradicts_hard_knowledge(
         TWDToMDataset([sample])
 
 
-def test_dataset_empty_report_is_unobserved_and_has_no_distribution_target(
+def test_dataset_empty_successful_report_is_observed_uniform_nonself(
     suspicion_sample_factory,
 ):
     sample = suspicion_sample_factory(
@@ -410,9 +439,13 @@ def test_dataset_empty_report_is_unobserved_and_has_no_distribution_target(
 
     item = TWDToMDataset([sample])[0]
 
-    assert not item["label_observed_mask"][0]
-    assert not item["observer_supervision_mask"][0]
-    assert item["belief_targets"][0].tolist() == pytest.approx([0.0] * 7)
+    assert item["label_observed_mask"][0]
+    assert item["observer_supervision_mask"][0]
+    assert item["belief_targets"][0].tolist() == pytest.approx(
+        [0.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
+    )
+    assert item["metadata"]["raw_support_size"][0] == 0
+    assert item["metadata"]["raw_empty"][0]
 
 
 def test_raw_sample_is_not_mutated(suspicion_sample_factory):
