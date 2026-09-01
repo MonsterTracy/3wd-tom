@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 import script.twd_tom.run_non_wolf_oof_diagnostic as diagnostic_module
+import script.twd_tom.run_development_oof as oof_module
 from werewolf.models.twd_tom.annotation_v2 import (
     V1_ANNOTATION_SOURCE,
     V1_EMPTY_UNOBSERVED_BELIEF_SOURCE,
@@ -18,8 +19,8 @@ def test_non_wolf_diagnostic_validates_sidecar_and_hard_locks_condition(
     tmp_path,
     monkeypatch,
 ):
-    fold_root = tmp_path / "folds"
-    role_sidecar = tmp_path / "roles.json"
+    fold_root = tmp_path / "repository" / "datasets" / "folds"
+    role_sidecar = tmp_path / "repository" / "datasets" / "roles.json"
     output_dir = tmp_path / "diagnostic"
     captured = {}
 
@@ -55,18 +56,16 @@ def test_non_wolf_diagnostic_validates_sidecar_and_hard_locks_condition(
         reference_improvement=0.50,
     )
 
-    resolved_fold_root = fold_root.resolve()
-    resolved_sidecar = role_sidecar.resolve()
     assert result == {"status": "ok"}
     assert captured["validation"] == {
-        "role_sidecar_path": resolved_sidecar,
+        "role_sidecar_path": role_sidecar,
         "development_fold_manifest_path": (
-            resolved_fold_root / "development_folds_manifest.json"
+            fold_root / "development_folds_manifest.json"
         ),
     }
     assert captured["run"] == {
-        "fold_root": resolved_fold_root,
-        "role_sidecar_path": resolved_sidecar,
+        "fold_root": fold_root,
+        "role_sidecar_path": role_sidecar,
         "output_dir": output_dir,
         "epochs": 80,
         "batch_size": 8,
@@ -89,6 +88,63 @@ def test_non_wolf_diagnostic_validates_sidecar_and_hard_locks_condition(
         "belief_v2_annotation_path": None,
         "worst_case_limit": 50,
     }
+
+
+def test_non_wolf_diagnostic_preserves_symlink_paths_in_training_config(
+    tmp_path,
+    monkeypatch,
+):
+    repository = tmp_path / "repository"
+    physical_data = tmp_path / "physical_data"
+    repository.mkdir()
+    physical_data.mkdir()
+    (repository / "datasets").symlink_to(physical_data, target_is_directory=True)
+    fold_root = repository / "datasets" / "folds"
+    role_sidecar = repository / "datasets" / "roles.json"
+    captured = {}
+
+    class ConfigCaptured(Exception):
+        pass
+
+    def capture_training_config(**kwargs):
+        captured.update(kwargs)
+        raise ConfigCaptured
+
+    monkeypatch.setattr(
+        diagnostic_module,
+        "validate_development_role_sidecar",
+        lambda **_: {"status": "ok"},
+    )
+    monkeypatch.setattr(oof_module, "_load_json", lambda _: {
+        "folds": {"fold_0": {"fold_index": 0}},
+        "manifest_digest": "a" * 64,
+    })
+    monkeypatch.setattr(oof_module, "sha256_file", lambda _: "b" * 64)
+    monkeypatch.setattr(oof_module, "load_role_sidecar_report", lambda _: {
+        "sidecar_digest": "c" * 64,
+    })
+    monkeypatch.setattr(
+        oof_module,
+        "validate_development_fold_paths",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(oof_module, "TrainingConfig", capture_training_config)
+
+    with pytest.raises(ConfigCaptured):
+        diagnostic_module.run_non_wolf_oof_diagnostic(
+            fold_root=fold_root,
+            role_sidecar_path=role_sidecar,
+            output_dir=repository / "diagnostic",
+        )
+
+    assert captured["dataset_path"] == str(fold_root / "fold_0" / "train.jsonl")
+    assert captured["validation_dataset_path"] == str(
+        fold_root / "fold_0" / "validation.jsonl"
+    )
+    assert captured["role_sidecar_path"] == str(role_sidecar)
+    assert str(physical_data) not in captured["dataset_path"]
+    assert str(physical_data) not in captured["validation_dataset_path"]
+    assert str(physical_data) not in captured["role_sidecar_path"]
 
 
 def test_non_wolf_diagnostic_cli_exposes_no_condition_or_private_switches():

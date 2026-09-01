@@ -47,8 +47,8 @@ def run_non_wolf_oof_diagnostic(
 ) -> dict[str, Any]:
     """Run exactly the controlled non-wolf-alive diagnostic condition."""
 
-    fold_root = Path(fold_root).resolve()
-    role_sidecar_path = Path(role_sidecar_path).resolve()
+    fold_root = Path(fold_root)
+    role_sidecar_path = Path(role_sidecar_path)
     validate_development_role_sidecar(
         role_sidecar_path=role_sidecar_path,
         development_fold_manifest_path=(
